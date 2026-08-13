@@ -21,6 +21,7 @@ from sheets_hub.config import (
     save_config,
 )
 from sheets_hub.models import Record
+from sheets_hub.ssl_setup import configure_tls
 from sheets_hub.split import (
     address_value,
     explode_records,
@@ -1285,6 +1286,7 @@ class _RefList:
 
 
 def main() -> None:
+    configure_tls()
     _enable_windows_dpi()
     ctk.set_appearance_mode("light")
     ctk.set_default_color_theme("green")

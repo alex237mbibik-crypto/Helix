@@ -28,7 +28,7 @@ jobs:
       - name: Build SheetsHub.exe
         shell: cmd
         run: |
-          python -m PyInstaller --noconfirm --clean --windowed --name SheetsHub --collect-all customtkinter --add-data "config.example.yaml;." launcher.py
+          python -m PyInstaller --noconfirm --clean --windowed --name SheetsHub --collect-all customtkinter --collect-all certifi --collect-all gspread --hidden-import=certifi --add-data "config.example.yaml;." launcher.py
           if not exist dist\SheetsHub mkdir dist\SheetsHub
           copy /Y config.example.yaml dist\SheetsHub\
           if exist credentials.example.json copy /Y credentials.example.json dist\SheetsHub\
