@@ -26,6 +26,8 @@ from sheets_hub.split import (
     address_value,
     explode_records,
     explode_values,
+    is_address_col,
+    is_service_col,
     match_destination,
     service_value,
     write_back_value,
@@ -38,10 +40,11 @@ GREEN = "#188038"
 GREEN_HOVER = "#137333"
 BG = "#f8f9fa"
 CARD = "#ffffff"
-BORDER = "#dadce0"
+BORDER = "#5f6368"
 LINE = "#e8eaed"
 TEXT = "#202124"
 MUTED = "#5f6368"
+HINT = "#80868b"
 DANGER = "#d93025"
 DANGER_HOVER = "#b3261e"
 ZEBRA = "#fafafa"
@@ -82,6 +85,71 @@ def _is_date_col(name: str) -> bool:
 def _is_status_col(name: str) -> bool:
     key = _norm(name)
     return key in {"статус", "status", "состояние"} or "статус" in key
+
+
+def _column_prompt(header: str) -> tuple[str, str]:
+    key = _norm(header)
+    if _is_date_col(header):
+        return "2026-08-13", "дата в формате ГГГГ-ММ-ДД"
+    if _is_status_col(header):
+        return "Ожидание", "статус: Ожидание, Подтверждено или Отменено"
+    if is_service_col(header):
+        return "Стрижка", "тип услуги, несколько через запятую"
+    if is_address_col(header):
+        return "ул. Ленина, д. 10", "адрес филиала, несколько через ;"
+    if "телефон" in key or "phone" in key or "тел" in key:
+        return "+7 999 123-45-67", "телефон клиента"
+    if "клиент" in key or "имя" in key or "фио" in key or key in {"name", "client"}:
+        return "Иванова А.", "имя клиента"
+    if "время" in key or key == "time":
+        return "10:00", "время визита"
+    if "сумм" in key or "amount" in key or "цена" in key:
+        return "0", "число без знака валюты"
+    if "коммент" in key or "примечан" in key or "note" in key:
+        return "комментарий", "любой текст"
+    return f"Введите «{header}»", f"значение колонки «{header}»"
+
+
+def _input_box(parent, title: str, hint: str) -> ctk.CTkFrame:
+    box = ctk.CTkFrame(
+        parent,
+        fg_color=CARD,
+        corner_radius=8,
+        border_width=2,
+        border_color=BORDER,
+    )
+    ctk.CTkLabel(
+        box,
+        text=title,
+        font=ctk.CTkFont(size=12, weight="bold"),
+        text_color=TEXT,
+        anchor="w",
+    ).pack(fill="x", padx=10, pady=(8, 0))
+    ctk.CTkLabel(
+        box,
+        text=hint,
+        font=ctk.CTkFont(size=11),
+        text_color=HINT,
+        anchor="w",
+        wraplength=220,
+        justify="left",
+    ).pack(fill="x", padx=10)
+    return box
+
+
+def _styled_entry(parent, placeholder: str, **kwargs) -> ctk.CTkEntry:
+    return ctk.CTkEntry(
+        parent,
+        height=36,
+        corner_radius=6,
+        border_width=2,
+        border_color=BORDER,
+        fg_color=CARD,
+        text_color=TEXT,
+        placeholder_text=placeholder,
+        placeholder_text_color="#9aa0a6",
+        **kwargs,
+    )
 
 
 def _status_tag(value: str) -> str | None:
@@ -229,10 +297,19 @@ class SheetsHubApp(ctk.CTk):
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=TEXT,
         ).pack(side="left")
+        dest_box = ctk.CTkFrame(top, fg_color=CARD, corner_radius=8, border_width=2, border_color=BORDER)
+        dest_box.pack(side="left", padx=(8, 0), fill="x", expand=True)
+        ctk.CTkLabel(
+            dest_box,
+            text="куда записать: выберите таблицу-назначение",
+            font=ctk.CTkFont(size=11),
+            text_color=HINT,
+            anchor="w",
+        ).pack(fill="x", padx=10, pady=(6, 0))
 
         self.dest_var = tk.StringVar(value="")
         self.dest_menu = ctk.CTkOptionMenu(
-            top,
+            dest_box,
             variable=self.dest_var,
             values=["—"],
             width=280,
@@ -245,7 +322,7 @@ class SheetsHubApp(ctk.CTk):
             dropdown_text_color=TEXT,
             command=lambda _value: self._load_dest_headers(),
         )
-        self.dest_menu.pack(side="left", padx=(8, 0))
+        self.dest_menu.pack(padx=8, pady=(4, 8), anchor="w")
 
         self.add_fields_wrap = ctk.CTkFrame(self.add_form, fg_color="transparent")
         self.add_fields_wrap.grid(row=1, column=0, sticky="ew", padx=10, pady=(4, 12))
@@ -269,22 +346,17 @@ class SheetsHubApp(ctk.CTk):
         cols = 4
         for i, header in enumerate(headers):
             row, col = divmod(i, cols)
-            field = ctk.CTkFrame(self.add_fields_wrap, fg_color="transparent")
+            placeholder, hint = _column_prompt(header)
+            field = _input_box(self.add_fields_wrap, header, hint)
             field.grid(row=row, column=col, sticky="ew", padx=6, pady=4)
             self.add_fields_wrap.grid_columnconfigure(col, weight=1)
-            ctk.CTkLabel(
-                field,
-                text=header,
-                text_color=MUTED,
-                font=ctk.CTkFont(size=12, weight="bold"),
-                anchor="w",
-            ).pack(fill="x")
             if _is_status_col(header):
                 widget = ctk.CTkComboBox(
                     field,
                     values=list(STATUS_OPTIONS),
                     height=36,
-                    corner_radius=8,
+                    corner_radius=6,
+                    border_width=2,
                     border_color=BORDER,
                     fg_color=CARD,
                     button_color=GREEN,
@@ -292,17 +364,10 @@ class SheetsHubApp(ctk.CTk):
                 )
                 widget.set(STATUS_OPTIONS[0])
             else:
-                widget = ctk.CTkEntry(
-                    field,
-                    height=36,
-                    corner_radius=8,
-                    border_color=BORDER,
-                    fg_color=CARD,
-                    text_color=TEXT,
-                )
+                widget = _styled_entry(field, placeholder)
                 if _is_date_col(header):
                     widget.insert(0, date.today().isoformat())
-            widget.pack(fill="x")
+            widget.pack(fill="x", padx=10, pady=(4, 10))
             self._add_fields[header] = widget
 
         last_row = (len(headers) - 1) // cols
@@ -315,58 +380,28 @@ class SheetsHubApp(ctk.CTk):
         filter_area.grid(row=2, column=0, sticky="ew", padx=20, pady=(0, 4))
         filter_area.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(
-            filter_area,
-            text="Поиск",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            text_color=TEXT,
-        ).grid(row=0, column=0, padx=(0, 8), pady=6, sticky="w")
-
+        search_box = _input_box(filter_area, "Поиск", "имя, телефон, услуга или любой текст из таблицы")
+        search_box.grid(row=0, column=0, columnspan=2, sticky="ew", pady=6, padx=(0, 12))
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_: self._render_table())
-        ctk.CTkEntry(
-            filter_area,
-            textvariable=self.search_var,
-            placeholder_text="фильтр по любой колонке",
-            height=36,
-            corner_radius=8,
-            border_color=BORDER,
-            fg_color=CARD,
-            text_color=TEXT,
-            font=ctk.CTkFont(size=13),
-        ).grid(row=0, column=1, sticky="ew", pady=6, padx=(0, 12))
+        _styled_entry(
+            search_box, "начните вводить текст для фильтра", textvariable=self.search_var
+        ).pack(fill="x", padx=10, pady=(4, 10))
 
-        ctk.CTkLabel(
-            filter_area,
-            text="Дата",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            text_color=TEXT,
-        ).grid(row=0, column=2, padx=(0, 8), pady=6, sticky="w")
-
+        date_box = _input_box(filter_area, "Дата", "оставьте пустым или введите ГГГГ-ММ-ДД")
+        date_box.grid(row=0, column=2, columnspan=2, sticky="ew", pady=6, padx=(0, 8))
         self.date_var = tk.StringVar()
         self.date_var.trace_add("write", lambda *_: self._render_table())
-        ctk.CTkEntry(
-            filter_area,
-            textvariable=self.date_var,
-            placeholder_text="ГГГГ-ММ-ДД",
-            width=140,
-            height=36,
-            corner_radius=8,
-            border_color=BORDER,
-            fg_color=CARD,
-            text_color=TEXT,
-        ).grid(row=0, column=3, pady=6, padx=(0, 8))
+        _styled_entry(date_box, "2026-08-13", width=160, textvariable=self.date_var).pack(
+            fill="x", padx=10, pady=(4, 10)
+        )
 
-        ctk.CTkLabel(
-            filter_area,
-            text="Услуга",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            text_color=TEXT,
-        ).grid(row=1, column=0, padx=(0, 8), pady=6, sticky="w")
+        service_box = _input_box(filter_area, "Услуга", "показывать пункты только этой услуги")
+        service_box.grid(row=1, column=0, columnspan=2, sticky="w", pady=6)
         self.service_filter = tk.StringVar(value="Все")
         self.service_filter.trace_add("write", lambda *_: self._render_table())
         self.service_menu = ctk.CTkOptionMenu(
-            filter_area,
+            service_box,
             variable=self.service_filter,
             values=["Все"],
             width=180,
@@ -378,18 +413,14 @@ class SheetsHubApp(ctk.CTk):
             dropdown_fg_color=CARD,
             dropdown_text_color=TEXT,
         )
-        self.service_menu.grid(row=1, column=1, sticky="w", pady=6)
+        self.service_menu.pack(padx=10, pady=(4, 10), anchor="w")
 
-        ctk.CTkLabel(
-            filter_area,
-            text="Адрес",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            text_color=TEXT,
-        ).grid(row=1, column=2, padx=(0, 8), pady=6, sticky="w")
+        address_box = _input_box(filter_area, "Адрес", "показывать пункты только этого адреса")
+        address_box.grid(row=1, column=2, columnspan=2, sticky="w", pady=6, padx=(0, 8))
         self.address_filter = tk.StringVar(value="Все")
         self.address_filter.trace_add("write", lambda *_: self._render_table())
         self.address_menu = ctk.CTkOptionMenu(
-            filter_area,
+            address_box,
             variable=self.address_filter,
             values=["Все"],
             width=180,
@@ -401,7 +432,7 @@ class SheetsHubApp(ctk.CTk):
             dropdown_fg_color=CARD,
             dropdown_text_color=TEXT,
         )
-        self.address_menu.grid(row=1, column=3, pady=6, sticky="w")
+        self.address_menu.pack(padx=10, pady=(4, 10), anchor="w")
 
         ctk.CTkButton(
             filter_area,
@@ -876,17 +907,15 @@ class SheetsHubApp(ctk.CTk):
         return dialog
 
     def _edit_cell(self, record: Record, field: str) -> None:
-        dialog = self._dialog("Изменить ячейку", "460x240")
+        dialog = self._dialog("Изменить ячейку", "480x280")
         ctk.CTkLabel(dialog, text=f"{record.source_name} · строка {record.row}", text_color=MUTED).pack(
             padx=16, pady=(16, 4), anchor="w"
         )
-        ctk.CTkLabel(dialog, text=field, font=ctk.CTkFont(weight="bold"), text_color=TEXT).pack(
-            padx=16, pady=4, anchor="w"
-        )
-        entry = ctk.CTkEntry(
-            dialog, width=420, height=36, corner_radius=8, border_color=BORDER, fg_color=CARD, text_color=TEXT
-        )
-        entry.pack(padx=16, pady=8)
+        placeholder, hint = _column_prompt(field)
+        box = _input_box(dialog, field, hint)
+        box.pack(fill="x", padx=16, pady=8)
+        entry = _styled_entry(box, placeholder)
+        entry.pack(fill="x", padx=10, pady=(4, 10))
         entry.insert(0, record.values.get(field, ""))
         entry.focus()
 
@@ -1062,19 +1091,18 @@ class SheetsHubApp(ctk.CTk):
         elif creds_path.exists():
             email = credentials_email(creds_path)
 
-        ctk.CTkLabel(account, text="Ключ", text_color=MUTED, font=ctk.CTkFont(size=12, weight="bold")).grid(
-            row=2, column=0, sticky="w", padx=12, pady=(0, 4)
-        )
         path_var = tk.StringVar(value=str(creds_path))
-        ctk.CTkEntry(
+        key_box = _input_box(
             account,
+            "JSON-ключ",
+            "файл, скачанный из Google Cloud → Keys → Create key. Не заполняйте руками.",
+        )
+        key_box.grid(row=2, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 4))
+        _styled_entry(
+            key_box,
+            "например C:\\...\\credentials.json",
             textvariable=path_var,
-            height=34,
-            corner_radius=8,
-            border_color=BORDER,
-            fg_color=CARD,
-            text_color=TEXT,
-        ).grid(row=2, column=1, sticky="ew", padx=8, pady=(0, 4))
+        ).pack(fill="x", padx=10, pady=(4, 10))
 
         email_var = tk.StringVar(value=email or "файл ещё не выбран")
         ctk.CTkLabel(account, text="Email", text_color=MUTED, font=ctk.CTkFont(size=12, weight="bold")).grid(
@@ -1161,7 +1189,7 @@ class _RefList:
 
         self.body = ctk.CTkScrollableFrame(self.frame, fg_color="transparent")
         self.body.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 10))
-        self.body.grid_columnconfigure(1, weight=1)
+        self.body.grid_columnconfigure(0, weight=1)
 
         if refs:
             for ref in refs:
@@ -1175,62 +1203,59 @@ class _RefList:
     def _add_row(self, ref: SheetRef) -> None:
         index = self._next_row
         self._next_row += 1
-        name_var = tk.StringVar(value=ref.name)
+        name_var = tk.StringVar(value="" if ref.name in {"Источник", "Назначение", self.placeholder} else ref.name)
         url_var = tk.StringVar(value="" if ref.is_placeholder() else ref.spreadsheet_id)
-        sheet_var = tk.StringVar(value=ref.sheet or "Лист1")
+        sheet_var = tk.StringVar(value=ref.sheet or "")
         service_var = tk.StringVar(value=ref.service)
         address_var = tk.StringVar(value=ref.address)
 
-        ctk.CTkEntry(
+        row_frame = ctk.CTkFrame(
             self.body,
-            textvariable=name_var,
-            width=120,
-            height=34,
-            corner_radius=8,
-            border_color=BORDER,
             fg_color=CARD,
-            placeholder_text="Название",
-        ).grid(row=index, column=0, padx=4, pady=4, sticky="w")
-        url_entry = ctk.CTkEntry(
-            self.body,
-            textvariable=url_var,
-            height=34,
             corner_radius=8,
+            border_width=2,
             border_color=BORDER,
-            fg_color=CARD,
-            placeholder_text="Ссылка или ID Google Таблицы",
         )
-        url_entry.grid(row=index, column=1, padx=4, pady=4, sticky="ew")
-        ctk.CTkEntry(
-            self.body,
-            textvariable=sheet_var,
-            width=90,
-            height=34,
-            corner_radius=8,
-            border_color=BORDER,
-            fg_color=CARD,
-            placeholder_text="Лист",
-        ).grid(row=index, column=2, padx=4, pady=4)
-        ctk.CTkEntry(
-            self.body,
-            textvariable=service_var,
-            width=120,
-            height=34,
-            corner_radius=8,
-            border_color=BORDER,
-            fg_color=CARD,
-            placeholder_text="Тип услуги",
-        ).grid(row=index, column=3, padx=4, pady=4)
-        ctk.CTkEntry(
-            self.body,
-            textvariable=address_var,
-            width=140,
-            height=34,
-            corner_radius=8,
-            border_color=BORDER,
-            fg_color=CARD,
-            placeholder_text="Адрес",
-        ).grid(row=index, column=4, padx=4, pady=4)
+        row_frame.grid(row=index, column=0, sticky="ew", padx=4, pady=6)
+        row_frame.grid_columnconfigure(1, weight=1)
+
+        fields = [
+            ("Название", "как будет видно в списке", name_var, 130, "Гинеколог"),
+            ("Ссылка на таблицу", "вставьте URL из браузера: https://docs.google.com/spreadsheets/d/...", url_var, 0, "https://docs.google.com/spreadsheets/d/..."),
+            ("Лист", "имя вкладки внизу таблицы", sheet_var, 100, "Лист1"),
+            ("Тип услуги", "какая услуга у этой таблицы", service_var, 130, "Стрижка"),
+            ("Адрес", "какой филиал у этой таблицы", address_var, 150, "ул. Ленина"),
+        ]
+        widgets = [row_frame]
+        for col, (title, hint, var, width, placeholder) in enumerate(fields):
+            box = ctk.CTkFrame(row_frame, fg_color="transparent")
+            sticky = "ew" if col == 1 else "w"
+            box.grid(row=0, column=col, sticky=sticky, padx=6, pady=8)
+            if col == 1:
+                row_frame.grid_columnconfigure(col, weight=1)
+            ctk.CTkLabel(
+                box,
+                text=title,
+                font=ctk.CTkFont(size=11, weight="bold"),
+                text_color=TEXT,
+                anchor="w",
+            ).pack(fill="x")
+            ctk.CTkLabel(
+                box,
+                text=hint,
+                font=ctk.CTkFont(size=10),
+                text_color=HINT,
+                anchor="w",
+                wraplength=200 if col != 1 else 360,
+                justify="left",
+            ).pack(fill="x")
+            kwargs = {"textvariable": var}
+            if width:
+                kwargs["width"] = width
+            entry = _styled_entry(box, placeholder, **kwargs)
+            entry.pack(fill="x", pady=(4, 0))
+            widgets.append(entry)
+
         row_data = {
             "name": name_var,
             "url": url_var,
@@ -1238,7 +1263,7 @@ class _RefList:
             "service": service_var,
             "address": address_var,
             "map": dict(ref.map),
-            "widgets": [],
+            "widgets": widgets,
         }
 
         def remove() -> None:
@@ -1247,23 +1272,20 @@ class _RefList:
             self.rows.remove(row_data)
 
         remove_btn = ctk.CTkButton(
-            self.body,
+            row_frame,
             text="✕",
             width=36,
             height=34,
             corner_radius=8,
             fg_color=CARD,
             hover_color="#fce8e6",
-            border_width=1,
+            border_width=2,
             border_color=BORDER,
             text_color=DANGER,
             command=remove,
         )
-        remove_btn.grid(row=index, column=5, padx=4, pady=4)
-        row_data["widgets"] = [
-            widget
-            for widget in self.body.grid_slaves(row=index)
-        ]
+        remove_btn.grid(row=0, column=5, padx=8, pady=8, sticky="n")
+        widgets.append(remove_btn)
         self.rows.append(row_data)
 
     def collect(self) -> list[SheetRef]:
