@@ -23,11 +23,13 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install -r requirements.txt
 
       - name: Build SheetsHub.exe
+        shell: cmd
         run: |
-          pyinstaller --noconfirm --clean --windowed --name SheetsHub --collect-all customtkinter --add-data "config.example.yaml;." launcher.py
+          python -m PyInstaller --noconfirm --clean --windowed --name SheetsHub --collect-all customtkinter --add-data "config.example.yaml;." launcher.py
+          if not exist dist\SheetsHub mkdir dist\SheetsHub
           copy /Y config.example.yaml dist\SheetsHub\
           if exist credentials.example.json copy /Y credentials.example.json dist\SheetsHub\
 
