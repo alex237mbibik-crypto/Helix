@@ -1,0 +1,39 @@
+name: Build Windows
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build SheetsHub.exe
+        run: |
+          pyinstaller --noconfirm --clean --windowed --name SheetsHub --collect-all customtkinter --add-data "config.example.yaml;." launcher.py
+          copy /Y config.example.yaml dist\SheetsHub\
+          if exist credentials.example.json copy /Y credentials.example.json dist\SheetsHub\
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: SheetsHub-Windows
+          path: dist/SheetsHub/
+          if-no-files-found: error

@@ -1,0 +1,35 @@
+# Скопируйте файл как config.yaml и подставьте свои таблицы.
+# ID таблицы — кусок ссылки между /d/ и /edit:
+# https://docs.google.com/spreadsheets/d/ВОТ_ЭТОТ_ID/edit
+#
+# sources — откуда читать данные
+# destinations — куда писать новые строки и копировать записи
+# service / address — необязательно: одна таблица на тип услуги и адрес.
+# Если в ячейке несколько услуг (через запятую) или адресов (через ;),
+# программа разобьёт строку на отдельные пункты.
+
+credentials: credentials.json
+
+sources:
+  - name: Источник 1
+    spreadsheet_id: PASTE_SPREADSHEET_ID_OR_URL
+    sheet: Лист1
+    # service: Стрижка
+    # address: ул. Ленина
+
+  - name: Источник 2
+    spreadsheet_id: PASTE_ANOTHER_ID_OR_URL
+    sheet: Лист1
+
+destinations:
+  - name: Назначение
+    spreadsheet_id: PASTE_DESTINATION_ID_OR_URL
+    sheet: Лист1
+    service: Стрижка
+    address: ул. Ленина
+
+  - name: Назначение
+    spreadsheet_id: PASTE_ANOTHER_DESTINATION_ID_OR_URL
+    sheet: Лист1
+    service: Диагностика
+    address: ул. Мира

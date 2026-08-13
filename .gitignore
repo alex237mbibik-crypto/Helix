@@ -1,0 +1,14 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.spec
+.DS_Store
+
+# секреты и локальный конфиг
+credentials.json
+config.yaml
+.env
