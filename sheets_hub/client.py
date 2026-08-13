@@ -20,9 +20,9 @@ class SheetsClient:
     def __init__(self, credentials_path: Path) -> None:
         if not credentials_path.exists():
             raise SheetsError(
-                f"Нет файла ключа: {credentials_path}\n"
-                "Скопируйте credentials.example.json → credentials.json "
-                "и вставьте JSON сервисного аккаунта из Google Cloud."
+                "Нет ключа аккаунта Google.\n"
+                "Ссылка на таблицу — это не вход. Нажмите «Таблицы» → «Выбрать JSON-ключ…» "
+                "и укажите файл ключа сервисного аккаунта из Google Cloud."
             )
         creds = Credentials.from_service_account_file(str(credentials_path), scopes=SCOPES)
         self._gc = gspread.authorize(creds)

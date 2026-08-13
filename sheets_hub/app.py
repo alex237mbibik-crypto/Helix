@@ -4,6 +4,7 @@ import csv
 import sys
 import threading
 from datetime import date
+from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
@@ -11,7 +12,14 @@ import customtkinter as ctk
 import tkinter as tk
 
 from sheets_hub.client import SheetsClient, SheetsError, values_for_destination
-from sheets_hub.config import AppConfig, SheetRef, load_config, save_config
+from sheets_hub.config import (
+    AppConfig,
+    SheetRef,
+    credentials_email,
+    install_credentials,
+    load_config,
+    save_config,
+)
 from sheets_hub.models import Record
 from sheets_hub.split import (
     address_value,
@@ -601,7 +609,13 @@ class SheetsHubApp(ctk.CTk):
         self.dest_var.set(current if current in labels else labels[0])
         self._load_dest_headers()
 
-    def _try_connect(self) -> None:
+    def _try_connect(self, prompt_key: bool = True) -> None:
+        if not self.config_data.credentials.exists():
+            self.client = None
+            self._set_status("Нет ключа аккаунта. Ссылка на таблицу сама по себе доступ не даёт.")
+            if prompt_key:
+                self.after(200, self._ask_for_credentials)
+            return
         try:
             self.client = SheetsClient(self.config_data.credentials)
             self._set_status(f"Вход: {self.client.service_email}")
@@ -616,6 +630,36 @@ class SheetsHubApp(ctk.CTk):
         except Exception as exc:
             self._set_status(f"Ошибка входа: {exc}")
             messagebox.showerror("Ошибка", str(exc))
+
+    def _ask_for_credentials(self) -> None:
+        go = messagebox.askokcancel(
+            "Нужен аккаунт Google",
+            "Ссылка на таблицу уже сохранена, но программа ещё не знает, "
+            "через какой аккаунт к ней ходить.\n\n"
+            "Сейчас откроется выбор файла. Укажите JSON-ключ сервисного аккаунта "
+            "из Google Cloud (не саму таблицу).",
+        )
+        if not go:
+            return
+        if self._pick_credentials_file():
+            save_config(self.config_data)
+            self._try_connect(prompt_key=False)
+
+    def _pick_credentials_file(self, parent=None) -> bool:
+        chosen = filedialog.askopenfilename(
+            parent=parent or self,
+            title="JSON-ключ сервисного аккаунта Google",
+            filetypes=[("JSON", "*.json"), ("Все файлы", "*.*")],
+        )
+        if not chosen:
+            return False
+        try:
+            installed = install_credentials(Path(chosen))
+        except Exception as exc:
+            messagebox.showerror("Неверный ключ", str(exc), parent=parent or self)
+            return False
+        self.config_data.credentials = installed
+        return True
 
     def _run_bg(self, work: Callable, done: Callable) -> None:
         self._jobs += 1
@@ -984,11 +1028,70 @@ class SheetsHubApp(ctk.CTk):
         self._set_status(f"Экспортировано: {path}")
 
     def _open_tables_dialog(self) -> None:
-        dialog = self._dialog("Таблицы", "1100x620")
-        dialog.minsize(860, 480)
+        dialog = self._dialog("Таблицы", "1100x680")
+        dialog.minsize(860, 520)
         dialog.grid_columnconfigure(0, weight=1)
-        dialog.grid_rowconfigure(0, weight=1)
         dialog.grid_rowconfigure(1, weight=1)
+        dialog.grid_rowconfigure(2, weight=1)
+
+        account = ctk.CTkFrame(dialog, fg_color=BG, corner_radius=10, border_width=1, border_color=LINE)
+        account.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 8))
+        account.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            account,
+            text="Аккаунт Google",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            text_color=TEXT,
+        ).grid(row=0, column=0, columnspan=3, sticky="w", padx=12, pady=(10, 2))
+        ctk.CTkLabel(
+            account,
+            text="Не логин и пароль. Нужен JSON-ключ сервисного аккаунта. "
+            "Каждую таблицу откройте этому email как Редактор.",
+            text_color=MUTED,
+            font=ctk.CTkFont(size=12),
+            wraplength=980,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", padx=12, pady=(0, 8))
+
+        creds_path = self.config_data.credentials
+        email = ""
+        if self.client:
+            email = self.client.service_email
+        elif creds_path.exists():
+            email = credentials_email(creds_path)
+
+        ctk.CTkLabel(account, text="Ключ", text_color=MUTED, font=ctk.CTkFont(size=12, weight="bold")).grid(
+            row=2, column=0, sticky="w", padx=12, pady=(0, 4)
+        )
+        path_var = tk.StringVar(value=str(creds_path))
+        ctk.CTkEntry(
+            account,
+            textvariable=path_var,
+            height=34,
+            corner_radius=8,
+            border_color=BORDER,
+            fg_color=CARD,
+            text_color=TEXT,
+        ).grid(row=2, column=1, sticky="ew", padx=8, pady=(0, 4))
+
+        email_var = tk.StringVar(value=email or "файл ещё не выбран")
+        ctk.CTkLabel(account, text="Email", text_color=MUTED, font=ctk.CTkFont(size=12, weight="bold")).grid(
+            row=3, column=0, sticky="w", padx=12, pady=(0, 10)
+        )
+        ctk.CTkLabel(account, textvariable=email_var, text_color=GREEN, anchor="w").grid(
+            row=3, column=1, sticky="w", padx=8, pady=(0, 10)
+        )
+
+        def pick_key() -> None:
+            if self._pick_credentials_file(parent=dialog):
+                installed = self.config_data.credentials
+                path_var.set(str(installed))
+                email_var.set(credentials_email(installed) or installed.name)
+
+        self._outline_button(account, "Выбрать JSON-ключ…", pick_key, 180).grid(
+            row=2, column=2, padx=(0, 12), pady=(0, 4)
+        )
 
         sources_editor = _RefList(
             dialog,
@@ -996,7 +1099,7 @@ class SheetsHubApp(ctk.CTk):
             self.config_data.sources,
             "Источник",
         )
-        sources_editor.frame.grid(row=0, column=0, sticky="nsew", padx=16, pady=(16, 8))
+        sources_editor.frame.grid(row=1, column=0, sticky="nsew", padx=16, pady=8)
 
         dest_editor = _RefList(
             dialog,
@@ -1004,7 +1107,7 @@ class SheetsHubApp(ctk.CTk):
             self.config_data.destinations,
             "Назначение",
         )
-        dest_editor.frame.grid(row=1, column=0, sticky="nsew", padx=16, pady=8)
+        dest_editor.frame.grid(row=2, column=0, sticky="nsew", padx=16, pady=8)
 
         def save() -> None:
             sources = sources_editor.collect()
@@ -1014,10 +1117,10 @@ class SheetsHubApp(ctk.CTk):
             save_config(self.config_data)
             self._dest_headers.clear()
             dialog.destroy()
-            self._refresh_dest_menu()
-            self.reload_all()
+            self.client = None
+            self._try_connect()
 
-        self._primary_button(dialog, "Сохранить таблицы", save, 200).grid(row=2, column=0, pady=(0, 16))
+        self._primary_button(dialog, "Сохранить таблицы", save, 200).grid(row=3, column=0, pady=(0, 16))
 
 
 class _RefList:

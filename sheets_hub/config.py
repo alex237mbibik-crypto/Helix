@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import re
+import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -153,3 +155,28 @@ def save_config(config: AppConfig, path: Path | None = None) -> None:
         yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
+
+
+def credentials_email(path: Path) -> str:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    return str(data.get("client_email") or "").strip()
+
+
+def install_credentials(source: Path, dest: Path | None = None) -> Path:
+    target = dest or (ROOT / "credentials.json")
+    source = source.expanduser().resolve()
+    if not source.exists():
+        raise FileNotFoundError(source)
+    data = json.loads(source.read_text(encoding="utf-8"))
+    if data.get("type") != "service_account" or not data.get("client_email"):
+        raise ValueError(
+            "Это не ключ сервисного аккаунта Google. "
+            "В Google Cloud: IAM → Service Accounts → ключ JSON."
+        )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if source != target.resolve():
+        shutil.copy2(source, target)
+    return target

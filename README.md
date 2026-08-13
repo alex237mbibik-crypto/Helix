@@ -48,9 +48,10 @@ python -m sheets_hub
 1. Откройте [Google Cloud Console](https://console.cloud.google.com/).
 2. Создайте проект → **APIs & Services → Enable APIs** → включите **Google Sheets API**.
 3. **IAM & Admin → Service Accounts → Create**.
-4. У аккаунта откройте ключ **JSON** и сохраните его как `credentials.json` в корне проекта (рядом с `run.bat`).
-5. В JSON есть поле `client_email` — вида `sheets-hub@....iam.gserviceaccount.com`.
-6. Каждую нужную таблицу откройте в Google → **Настройки доступа** → добавьте этот email как **Редактор**.
+4. У аккаунта откройте ключ **JSON**.
+5. В программе нажмите **Таблицы → Выбрать JSON-ключ…** и укажите этот файл. Ключ сохранится рядом с программой как `credentials.json`.
+6. В JSON есть поле `client_email` — вида `sheets-hub@....iam.gserviceaccount.com`. Его же показывает окно **Таблицы**.
+7. Каждую нужную таблицу откройте в Google → **Настройки доступа** → добавьте этот email как **Редактор**.
 
 Без шага 6 API таблицу не увидит.
 
