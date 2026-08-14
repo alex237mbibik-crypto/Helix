@@ -871,13 +871,18 @@ class SheetsHubApp(ctk.CTk):
             self._render_table()
             self._render_info()
             extra = f" · {len(errors)} ошибок" if errors else ""
-            split_note = ""
-            if len(self.records) > raw_count:
-                split_note = f" · разбито на {len(self.records)} пунктов"
+            booked = sum(1 for item in self.records if item.layout == "calendar" and item.values.get("Статус") == "Занято")
+            slots = sum(1 for item in self.records if item.layout == "calendar")
             info_note = f" · справка: {len(self.info_records)}" if self.info_records else ""
-            self._set_status(
-                f"Строк: {raw_count} из {len(sources)} источников{split_note}{info_note}{extra}"
-            )
+            if slots:
+                self._set_status(f"Календарь: {slots} слотов, занято {booked}{info_note}{extra}")
+            else:
+                split_note = ""
+                if len(self.records) > raw_count:
+                    split_note = f" · разбито на {len(self.records)} пунктов"
+                self._set_status(
+                    f"Строк: {raw_count} из {len(sources)} источников{split_note}{info_note}{extra}"
+                )
             if errors:
                 messagebox.showwarning("Часть таблиц не загрузилась", "\n\n".join(errors[:8]))
             self._load_dest_headers()

@@ -89,28 +89,61 @@ class SheetsClient:
                 time.sleep(1.2 * (attempt + 1))
         raise last  # pragma: no cover
 
-    def _open_worksheet(self, ref: SheetRef):
-        spreadsheet_id = ref.normalized_id()
+    def _open_spreadsheet(self, url_or_id: str):
+        spreadsheet_id = parse_spreadsheet_id(url_or_id)
         if not spreadsheet_id or spreadsheet_id.upper().startswith("PASTE_"):
-            raise SheetsError(f"В «{ref.name}» не указан ID таблицы")
+            raise SheetsError("Не указан ID таблицы")
         try:
-            spreadsheet = self._call(lambda: self._gc.open_by_key(spreadsheet_id))
-            return spreadsheet.worksheet(ref.sheet)
+            return self._call(lambda: self._gc.open_by_key(spreadsheet_id))
         except gspread.exceptions.SpreadsheetNotFound as exc:
             raise SheetsError(
-                f"Таблица «{ref.name}» не найдена. "
+                "Таблица не найдена. "
                 f"Выдайте доступ {self.service_email} (Редактор)."
             ) from exc
-        except gspread.exceptions.WorksheetNotFound as exc:
-            raise SheetsError(f"В «{ref.name}» нет листа «{ref.sheet}»") from exc
         except gspread.exceptions.APIError as exc:
             raise SheetsError(f"Google API: {exc}") from exc
         except Exception as exc:
             raise _friendly_error(exc) from exc
 
+    def _match_sheet_title(self, available: list[str], wanted: str) -> str | None:
+        raw = (wanted or "").strip()
+        if not raw:
+            return None
+        for title in available:
+            if title.lower() == raw.lower():
+                return title
+        for title in available:
+            if raw.lower() in title.lower() or title.lower() in raw.lower():
+                return title
+        return None
+
+    def _open_worksheet(self, ref: SheetRef):
+        spreadsheet_id = ref.normalized_id()
+        if not spreadsheet_id or spreadsheet_id.upper().startswith("PASTE_"):
+            raise SheetsError(f"В «{ref.name}» не указан ID таблицы")
+        spreadsheet = self._open_spreadsheet(ref.spreadsheet_id)
+        available = [ws.title for ws in spreadsheet.worksheets()]
+        if not available:
+            raise SheetsError(f"В «{ref.name}» нет листов")
+        match = self._match_sheet_title(available, ref.sheet)
+        if match is None and len(available) == 1:
+            match = available[0]
+        if match is None:
+            raise SheetsError(
+                f"В «{ref.name}» нет листа «{ref.sheet}». "
+                f"В файле есть: {', '.join(available)}. "
+                "В поле «Лист» напишите все или точное имя вкладки внизу таблицы."
+            )
+        return spreadsheet.worksheet(match)
+
+    def _sheet_values(self, worksheet) -> list[list[str]]:
+        return self._call(
+            lambda: worksheet.get_all_values(value_render_option="FORMATTED_VALUE")
+        )
+
     def get_headers(self, ref: SheetRef) -> list[str]:
         worksheet = self._open_worksheet(ref)
-        rows = self._call(lambda: worksheet.get_all_values())
+        rows = self._sheet_values(worksheet)
         if not rows:
             return []
         if is_calendar_matrix(rows):
@@ -120,7 +153,7 @@ class SheetsClient:
     def fetch_source(self, source: SheetRef) -> list[Record]:
         spreadsheet_id = source.normalized_id()
         worksheet = self._open_worksheet(source)
-        rows = self._call(lambda: worksheet.get_all_values())
+        rows = self._sheet_values(worksheet)
         if not rows:
             return []
 
@@ -166,11 +199,20 @@ class SheetsClient:
         return records
 
     def expand_source(self, source: SheetRef) -> list[SheetRef]:
-        titles = requested_sheet_titles(source.sheet)
-        if titles is None:
-            titles = self.list_sheets(source.spreadsheet_id)
-        if not titles:
+        available = self.list_sheets(source.spreadsheet_id)
+        if not available:
             raise SheetsError(f"В «{source.name}» нет листов")
+        requested = requested_sheet_titles(source.sheet)
+        if requested is None:
+            titles = available
+        else:
+            titles = []
+            for name in requested:
+                match = self._match_sheet_title(available, name)
+                if match and match not in titles:
+                    titles.append(match)
+            if not titles:
+                titles = available
         many = len(titles) > 1
         expanded: list[SheetRef] = []
         for title in titles:
@@ -231,8 +273,7 @@ class SheetsClient:
         self._call(lambda: worksheet.delete_rows(record.row))
 
     def list_sheets(self, url_or_id: str) -> list[str]:
-        spreadsheet_id = parse_spreadsheet_id(url_or_id)
-        spreadsheet = self._call(lambda: self._gc.open_by_key(spreadsheet_id))
+        spreadsheet = self._open_spreadsheet(url_or_id)
         return [ws.title for ws in spreadsheet.worksheets()]
 
 

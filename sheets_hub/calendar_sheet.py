@@ -6,7 +6,10 @@ from sheets_hub.config import KIND_INFO, KIND_RECORDS, SheetRef, is_info_ref
 from sheets_hub.models import Record
 from sheets_hub.split import address_key, service_key
 
-_TIME_RE = re.compile(r"^\s*(\d{1,2})[:.\-](\d{2})\s*$")
+_TIME_RE = re.compile(
+    r"^\s*(?:\d{4}-\d{2}-\d{2}\s+)?(\d{1,2})[:.\-](\d{2})(?:[:.\-]\d{2})?\s*(?:am|pm)?\s*$",
+    re.IGNORECASE,
+)
 _PHONE_RE = re.compile(r"(\+?\d[\d\s\-()]{6,}\d)")
 _DATE_MARKERS = (
     "январ",
@@ -29,6 +32,24 @@ _DATE_MARKERS = (
     "пт",
     "сб",
     "вс",
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+    "aug",
+    "sep",
+    "oct",
+    "nov",
+    "dec",
+    "jan",
+    "feb",
+    "mar",
+    "apr",
+    "jun",
+    "jul",
 )
 _CRM_MARKERS = ("клиент", "фио", "телефон", "статус", "услуг", "дата", "время", "имя")
 _FREE_MARKERS = {"", "запись", "свободно", "free", "открыто"}
@@ -40,16 +61,23 @@ def _norm(text: str) -> str:
 
 
 def is_time(text: str) -> bool:
-    return bool(_TIME_RE.match((text or "").strip()))
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    return bool(_TIME_RE.match(raw))
 
 
 def is_date_header(text: str) -> bool:
     raw = _norm(text)
-    if not raw:
+    if not raw or is_time(text):
         return False
     if any(marker in raw for marker in _DATE_MARKERS):
         return True
-    return bool(re.search(r"\d{1,2}[./]\d{1,2}", raw))
+    if re.search(r"\d{1,2}[./]\d{1,2}", raw):
+        return True
+    if re.search(r"\d{4}-\d{1,2}-\d{1,2}", raw):
+        return True
+    return False
 
 
 def looks_like_crm(headers: list[str]) -> bool:
@@ -57,13 +85,32 @@ def looks_like_crm(headers: list[str]) -> bool:
     return sum(1 for marker in _CRM_MARKERS if marker in blob) >= 2
 
 
+def find_calendar_layout(rows: list[list[str]]) -> tuple[int, list[int]] | None:
+    """Return (header_row_index, date_column_indexes) or None."""
+    best: tuple[int, int, list[int]] | None = None
+    limit = min(8, len(rows))
+    for header_idx in range(limit):
+        header = rows[header_idx]
+        date_cols = [
+            idx
+            for idx, cell in enumerate(header)
+            if idx > 0 and is_date_header(cell or "")
+        ]
+        time_count = 0
+        for row in rows[header_idx + 1 :]:
+            if row and is_time(row[0] if row else ""):
+                time_count += 1
+        if len(date_cols) >= 1 and time_count >= 2:
+            score = len(date_cols) * 10 + time_count
+            if best is None or score > best[0]:
+                best = (score, header_idx, date_cols)
+    if best is None:
+        return None
+    return best[1], best[2]
+
+
 def is_calendar_matrix(rows: list[list[str]]) -> bool:
-    if len(rows) < 3:
-        return False
-    header = rows[0]
-    date_cols = [idx for idx, cell in enumerate(header) if idx > 0 and is_date_header(cell)]
-    time_rows = [row for row in rows[1:] if row and is_time(row[0] if row else "")]
-    return len(date_cols) >= 2 and len(time_rows) >= 2
+    return find_calendar_layout(rows) is not None
 
 
 def parse_corner(text: str) -> tuple[str, str]:
@@ -156,9 +203,14 @@ def parse_info_rows(
     source: SheetRef,
     spreadsheet_id: str,
     start_index: int = 0,
+    end_index: int | None = None,
+    skip_times: bool = False,
 ) -> list[Record]:
     records: list[Record] = []
-    for offset, row in enumerate(rows[start_index:], start=start_index + 1):
+    stop = len(rows) if end_index is None else end_index
+    for offset, row in enumerate(rows[start_index:stop], start=start_index + 1):
+        if skip_times and row and is_time(row[0] if row else ""):
+            continue
         text = _row_text(row)
         if not text:
             continue
@@ -171,18 +223,33 @@ def parse_calendar_rows(
     source: SheetRef,
     spreadsheet_id: str,
 ) -> list[Record]:
-    header = [(cell or "").strip() for cell in rows[0]]
-    address, service = parse_corner(header[0] if header else "")
+    layout = find_calendar_layout(rows)
+    if layout is None:
+        return []
+    header_idx, date_cols = layout
+    header = [(cell or "").strip() for cell in rows[header_idx]]
+    corner = ""
+    for row in rows[: header_idx + 1]:
+        if row and (row[0] or "").strip():
+            corner = row[0].strip()
+            break
+    address, service = parse_corner(corner)
     if source.address:
         address = source.address
     if source.service:
         service = source.service
 
-    date_cols = [idx for idx, cell in enumerate(header) if idx > 0 and is_date_header(cell)]
-    records: list[Record] = []
-    last_time_index = 0
+    records: list[Record] = parse_info_rows(
+        rows,
+        source,
+        spreadsheet_id,
+        start_index=0,
+        end_index=header_idx,
+        skip_times=True,
+    )
 
-    for offset, row in enumerate(rows[1:], start=2):
+    last_time_index = header_idx
+    for offset, row in enumerate(rows[header_idx + 1 :], start=header_idx + 2):
         time_text = (row[0] if row else "").strip()
         if not is_time(time_text):
             continue
@@ -196,7 +263,7 @@ def parse_calendar_rows(
                 name, phone = "", ""
             values = _with_tags(
                 {
-                    "Дата": header[col_idx],
+                    "Дата": header[col_idx] if col_idx < len(header) else "",
                     "Время": time_text,
                     "Клиент": name or display,
                     "Телефон": phone,
@@ -222,12 +289,20 @@ def parse_calendar_rows(
                 )
             )
 
-    records.extend(parse_info_rows(rows, source, spreadsheet_id, start_index=last_time_index + 1))
+    records.extend(
+        parse_info_rows(
+            rows,
+            source,
+            spreadsheet_id,
+            start_index=last_time_index + 1,
+            skip_times=True,
+        )
+    )
     return records
 
 
 def looks_like_notices(rows: list[list[str]]) -> bool:
-    if not rows:
+    if not rows or find_calendar_layout(rows):
         return False
     first = [cell.strip() for cell in rows[0] if (cell or "").strip()]
     if not first:
