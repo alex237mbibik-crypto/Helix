@@ -7,6 +7,7 @@ import certifi
 import gspread
 from google.oauth2.service_account import Credentials
 
+from sheets_hub.calendar_sheet import is_calendar_matrix, parse_sheet_rows
 from sheets_hub.config import (
     KIND_INFO,
     KIND_RECORDS,
@@ -109,14 +110,23 @@ class SheetsClient:
 
     def get_headers(self, ref: SheetRef) -> list[str]:
         worksheet = self._open_worksheet(ref)
-        return [cell.strip() for cell in self._call(lambda: worksheet.row_values(1)) if cell.strip()]
+        rows = self._call(lambda: worksheet.get_all_values())
+        if not rows:
+            return []
+        if is_calendar_matrix(rows):
+            return []
+        return [cell.strip() for cell in rows[0] if cell.strip()]
 
     def fetch_source(self, source: SheetRef) -> list[Record]:
         spreadsheet_id = source.normalized_id()
         worksheet = self._open_worksheet(source)
-        rows = self._call(worksheet.get_all_values)()
+        rows = self._call(lambda: worksheet.get_all_values())
         if not rows:
             return []
+
+        parsed = parse_sheet_rows(rows, source, spreadsheet_id)
+        if parsed is not None:
+            return parsed
 
         headers = [cell.strip() for cell in rows[0]]
         col_index = {header: idx + 1 for idx, header in enumerate(headers) if header}
@@ -197,7 +207,10 @@ class SheetsClient:
             raise SheetsError(f"В листе нет колонки «{field}»") from exc
         col = record.col_index[header]
         worksheet = self._call(lambda: self._gc.open_by_key(record.spreadsheet_id).worksheet(record.sheet))
-        self._call(lambda: worksheet.update_cell(record.row, col, value))
+        cell_value = value
+        if record.layout == "calendar" and field == "Клиент":
+            cell_value = value.strip() or "запись"
+        self._call(lambda: worksheet.update_cell(record.row, col, cell_value))
         record.values[field] = value
         if header != field:
             record.values[header] = value

@@ -115,6 +115,9 @@ def explode_record(record: Record) -> list[Record]:
 def explode_records(records: list[Record]) -> list[Record]:
     out: list[Record] = []
     for record in records:
+        if record.layout == "calendar":
+            out.append(record)
+            continue
         out.extend(explode_record(record))
     return out
 
