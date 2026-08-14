@@ -7,7 +7,14 @@ import certifi
 import gspread
 from google.oauth2.service_account import Credentials
 
-from sheets_hub.config import SheetRef, parse_spreadsheet_id
+from sheets_hub.config import (
+    KIND_INFO,
+    KIND_RECORDS,
+    SheetRef,
+    is_info_ref,
+    parse_spreadsheet_id,
+    requested_sheet_titles,
+)
 from sheets_hub.models import Record
 from sheets_hub.split import address_key, service_key
 from sheets_hub.ssl_setup import configure_tls
@@ -143,9 +150,32 @@ class SheetsClient:
                     col_index=col_index,
                     map=source.map,
                     origin_values=dict(values),
+                    kind=KIND_INFO if is_info_ref(source) else KIND_RECORDS,
                 )
             )
         return records
+
+    def expand_source(self, source: SheetRef) -> list[SheetRef]:
+        titles = requested_sheet_titles(source.sheet)
+        if titles is None:
+            titles = self.list_sheets(source.spreadsheet_id)
+        if not titles:
+            raise SheetsError(f"В «{source.name}» нет листов")
+        many = len(titles) > 1
+        expanded: list[SheetRef] = []
+        for title in titles:
+            expanded.append(
+                SheetRef(
+                    name=f"{source.name} / {title}" if many else source.name,
+                    spreadsheet_id=source.spreadsheet_id,
+                    sheet=title,
+                    map=source.map,
+                    service=source.service,
+                    address=source.address,
+                    kind=source.kind,
+                )
+            )
+        return expanded
 
     def fetch_all(self, sources: list[SheetRef]) -> tuple[list[Record], list[str]]:
         records: list[Record] = []
@@ -154,7 +184,8 @@ class SheetsClient:
             if source.is_placeholder():
                 continue
             try:
-                records.extend(self.fetch_source(source))
+                for part in self.expand_source(source):
+                    records.extend(self.fetch_source(part))
             except Exception as exc:
                 errors.append(f"{source.name}: {_friendly_error(exc)}")
         return records, errors

@@ -13,11 +13,16 @@ import tkinter as tk
 
 from sheets_hub.client import SheetsClient, SheetsError, values_for_destination
 from sheets_hub.config import (
+    KIND_INFO,
+    KIND_LABELS,
+    KIND_RECORDS,
     AppConfig,
     SheetRef,
     credentials_email,
+    expand_ref_locally,
     install_credentials,
     load_config,
+    requested_sheet_titles,
     save_config,
 )
 from sheets_hub.models import Record
@@ -38,6 +43,7 @@ STATUS_OPTIONS = ("Ожидание", "Подтверждено", "Отмене�
 
 GREEN = "#188038"
 GREEN_HOVER = "#137333"
+GREEN_SOFT = "#e6f4ea"
 BG = "#f8f9fa"
 CARD = "#ffffff"
 BORDER = "#5f6368"
@@ -174,6 +180,7 @@ class SheetsHubApp(ctk.CTk):
         self.config_data: AppConfig = load_config()
         self.client: SheetsClient | None = None
         self.records: list[Record] = []
+        self.info_records: list[Record] = []
         self._visible: list[Record] = []
         self._jobs = 0
         self._last_tree_width = 0
@@ -209,6 +216,7 @@ class SheetsHubApp(ctk.CTk):
         self._build_filter(container)
         self._build_status(container)
         self._build_table(container)
+        self._build_info_panel(container)
         self._build_footer(container)
         self._refresh_dest_menu()
 
@@ -383,7 +391,7 @@ class SheetsHubApp(ctk.CTk):
         search_box = _input_box(filter_area, "Поиск", "имя, телефон, услуга или любой текст из таблицы")
         search_box.grid(row=0, column=0, columnspan=2, sticky="ew", pady=6, padx=(0, 12))
         self.search_var = tk.StringVar()
-        self.search_var.trace_add("write", lambda *_: self._render_table())
+        self.search_var.trace_add("write", lambda *_: self._render_views())
         _styled_entry(
             search_box, "начните вводить текст для фильтра", textvariable=self.search_var
         ).pack(fill="x", padx=10, pady=(4, 10))
@@ -399,7 +407,7 @@ class SheetsHubApp(ctk.CTk):
         service_box = _input_box(filter_area, "Услуга", "показывать пункты только этой услуги")
         service_box.grid(row=1, column=0, columnspan=2, sticky="w", pady=6)
         self.service_filter = tk.StringVar(value="Все")
-        self.service_filter.trace_add("write", lambda *_: self._render_table())
+        self.service_filter.trace_add("write", lambda *_: self._render_views())
         self.service_menu = ctk.CTkOptionMenu(
             service_box,
             variable=self.service_filter,
@@ -418,7 +426,7 @@ class SheetsHubApp(ctk.CTk):
         address_box = _input_box(filter_area, "Адрес", "показывать пункты только этого адреса")
         address_box.grid(row=1, column=2, columnspan=2, sticky="w", pady=6, padx=(0, 8))
         self.address_filter = tk.StringVar(value="Все")
-        self.address_filter.trace_add("write", lambda *_: self._render_table())
+        self.address_filter.trace_add("write", lambda *_: self._render_views())
         self.address_menu = ctk.CTkOptionMenu(
             address_box,
             variable=self.address_filter,
@@ -482,10 +490,18 @@ class SheetsHubApp(ctk.CTk):
         )
         table_wrap.grid(row=4, column=0, sticky="nsew", padx=20, pady=(0, 8))
         table_wrap.grid_columnconfigure(0, weight=1)
-        table_wrap.grid_rowconfigure(0, weight=1)
+        table_wrap.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            table_wrap,
+            text="Календарь записи",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=TEXT,
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 4))
 
         inner = tk.Frame(table_wrap, bg=CARD, highlightthickness=0)
-        inner.grid(row=0, column=0, sticky="nsew", padx=1, pady=1)
+        inner.grid(row=1, column=0, sticky="nsew", padx=1, pady=(0, 1))
         inner.grid_columnconfigure(0, weight=1)
         inner.grid_rowconfigure(0, weight=1)
 
@@ -501,9 +517,53 @@ class SheetsHubApp(ctk.CTk):
         self.tree.bind("<Delete>", lambda *_: self._delete_row())
         self._style_treeview()
 
+    def _build_info_panel(self, parent: ctk.CTkFrame) -> None:
+        self.info_wrap = ctk.CTkFrame(
+            parent,
+            fg_color=GREEN_SOFT,
+            corner_radius=10,
+            border_width=1,
+            border_color="#ceead6",
+        )
+        self.info_wrap.grid(row=5, column=0, sticky="ew", padx=20, pady=(0, 8))
+        self.info_wrap.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            self.info_wrap,
+            text="Общая информация",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=TEXT,
+            anchor="w",
+        ).pack(fill="x", padx=12, pady=(10, 0))
+        ctk.CTkLabel(
+            self.info_wrap,
+            text="листы с типом «Общая информация» или вкладки вроде «Информация», «Прайс», «Контакты»",
+            font=ctk.CTkFont(size=11),
+            text_color=MUTED,
+            anchor="w",
+        ).pack(fill="x", padx=12, pady=(0, 4))
+
+        self.info_body = ctk.CTkScrollableFrame(
+            self.info_wrap,
+            fg_color="transparent",
+            height=160,
+        )
+        self.info_body.pack(fill="x", expand=True, padx=8, pady=(0, 10))
+        self.info_body.grid_columnconfigure(0, weight=1)
+        self._info_empty = ctk.CTkLabel(
+            self.info_body,
+            text="Пока пусто. В «Таблицы» у источника выберите тип «Общая информация» "
+            "или назовите вкладку «Информация».",
+            text_color=MUTED,
+            anchor="w",
+            justify="left",
+            wraplength=900,
+        )
+        self._info_empty.grid(row=0, column=0, sticky="w", padx=6, pady=6)
+
     def _build_footer(self, parent: ctk.CTkFrame) -> None:
         footer = ctk.CTkFrame(parent, fg_color="transparent")
-        footer.grid(row=5, column=0, sticky="ew", padx=22, pady=(4, 14))
+        footer.grid(row=6, column=0, sticky="ew", padx=22, pady=(4, 14))
         footer.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(
@@ -604,14 +664,34 @@ class SheetsHubApp(ctk.CTk):
     def _valid_destinations(self) -> list[SheetRef]:
         return [item for item in self.config_data.destinations if not item.is_placeholder()]
 
+    def _destination_candidates(self) -> list[SheetRef]:
+        if self._dest_by_label:
+            return list(self._dest_by_label.values())
+        return self._valid_destinations()
+
+    def _expand_destinations(self) -> list[SheetRef]:
+        dests = self._valid_destinations()
+        expanded: list[SheetRef] = []
+        for dest in dests:
+            titles = requested_sheet_titles(dest.sheet)
+            if titles is None and self.client:
+                try:
+                    expanded.extend(self.client.expand_source(dest))
+                    continue
+                except Exception:
+                    expanded.append(dest)
+                    continue
+            expanded.extend(expand_ref_locally(dest))
+        return expanded
+
     def _selected_destination(self) -> SheetRef | None:
         label = self.dest_var.get().strip()
         if label in self._dest_by_label:
             return self._dest_by_label[label]
-        return next((item for item in self._valid_destinations() if item.label() == label), None)
+        return next((item for item in self._destination_candidates() if item.label() == label), None)
 
     def _destination_for(self, values: dict[str, str], fallback: SheetRef | None = None) -> SheetRef | None:
-        dests = self._valid_destinations()
+        dests = self._destination_candidates()
         tagged = [item for item in dests if item.service or item.address]
         chosen = fallback or self._selected_destination()
         if tagged:
@@ -619,7 +699,7 @@ class SheetsHubApp(ctk.CTk):
         return chosen
 
     def _refresh_dest_menu(self) -> None:
-        dests = self._valid_destinations()
+        dests = self._expand_destinations()
         self._dest_by_label = {}
         labels: list[str] = []
         for dest in dests:
@@ -726,7 +806,9 @@ class SheetsHubApp(ctk.CTk):
         sources = self._valid_sources()
         if not sources:
             self.records = []
+            self.info_records = []
             self._render_table()
+            self._render_info()
             self._set_status("Нет таблиц-источников. Откройте «Таблицы» и вставьте ссылки.")
             return
         self._set_status("Читаю таблицы…")
@@ -736,15 +818,21 @@ class SheetsHubApp(ctk.CTk):
 
         def done(result):
             records, errors = result
-            raw_count = len(records)
-            self.records = explode_records(records)
+            booking = [item for item in records if item.kind != KIND_INFO]
+            self.info_records = [item for item in records if item.kind == KIND_INFO]
+            raw_count = len(booking)
+            self.records = explode_records(booking)
             self._refresh_split_filters()
             self._render_table()
+            self._render_info()
             extra = f" · {len(errors)} ошибок" if errors else ""
             split_note = ""
             if len(self.records) > raw_count:
                 split_note = f" · разбито на {len(self.records)} пунктов"
-            self._set_status(f"Строк: {raw_count} из {len(sources)} источников{split_note}{extra}")
+            info_note = f" · справка: {len(self.info_records)}" if self.info_records else ""
+            self._set_status(
+                f"Строк: {raw_count} из {len(sources)} источников{split_note}{info_note}{extra}"
+            )
             if errors:
                 messagebox.showwarning("Часть таблиц не загрузилась", "\n\n".join(errors[:8]))
             self._load_dest_headers()
@@ -848,6 +936,118 @@ class SheetsHubApp(ctk.CTk):
         self._visible = records
         self.count_label.configure(text=str(len(records)))
         self.after_idle(self._fit_columns)
+
+    def _render_views(self) -> None:
+        self._render_table()
+        self._render_info()
+
+    def _filtered_info(self) -> list[Record]:
+        query = self.search_var.get().strip().lower()
+        service_query = self.service_filter.get().strip()
+        address_query = self.address_filter.get().strip()
+        out: list[Record] = []
+        for record in self.info_records:
+            blob = " ".join([record.source_name, *record.values.values()]).lower()
+            if query and query not in blob:
+                continue
+            rec_service = service_value(record.values)
+            rec_address = address_value(record.values)
+            if service_query and service_query != "Все" and rec_service and rec_service != service_query:
+                continue
+            if address_query and address_query != "Все" and rec_address and rec_address != address_query:
+                continue
+            out.append(record)
+        return out
+
+    def _render_info(self) -> None:
+        for child in self.info_body.winfo_children():
+            child.destroy()
+
+        records = self._filtered_info()
+        if not records:
+            text = (
+                "Пока пусто. В «Таблицы» у источника выберите тип «Общая информация» "
+                "или назовите вкладку «Информация»."
+                if not self.info_records
+                else "Нет строк справки под текущий фильтр."
+            )
+            ctk.CTkLabel(
+                self.info_body,
+                text=text,
+                text_color=MUTED,
+                anchor="w",
+                justify="left",
+                wraplength=900,
+            ).grid(row=0, column=0, sticky="w", padx=6, pady=6)
+            return
+
+        groups: dict[str, list[Record]] = {}
+        for record in records:
+            groups.setdefault(record.source_name, []).append(record)
+
+        for idx, (title, items) in enumerate(groups.items()):
+            card = ctk.CTkFrame(
+                self.info_body,
+                fg_color=CARD,
+                corner_radius=8,
+                border_width=1,
+                border_color="#ceead6",
+            )
+            card.grid(row=idx, column=0, sticky="ew", padx=4, pady=4)
+            card.grid_columnconfigure(1, weight=1)
+            ctk.CTkLabel(
+                card,
+                text=title,
+                font=ctk.CTkFont(size=13, weight="bold"),
+                text_color=GREEN,
+                anchor="w",
+            ).grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(10, 4))
+
+            headers = [h for h in items[0].sheet_headers if h]
+            two_col = len(headers) == 2
+            for row_i, record in enumerate(items, start=1):
+                if two_col:
+                    left = str(record.values.get(headers[0], "")).strip()
+                    right = str(record.values.get(headers[1], "")).strip()
+                    if not left and not right:
+                        continue
+                    ctk.CTkLabel(
+                        card,
+                        text=left or "—",
+                        font=ctk.CTkFont(size=12, weight="bold"),
+                        text_color=TEXT,
+                        anchor="w",
+                    ).grid(row=row_i, column=0, sticky="nw", padx=(12, 16), pady=2)
+                    ctk.CTkLabel(
+                        card,
+                        text=right,
+                        font=ctk.CTkFont(size=12),
+                        text_color=TEXT,
+                        anchor="w",
+                        wraplength=720,
+                        justify="left",
+                    ).grid(row=row_i, column=1, sticky="ew", padx=(0, 12), pady=2)
+                    continue
+                parts = [
+                    f"{key}: {value}"
+                    for key, value in record.values.items()
+                    if str(value).strip() and key not in HIDDEN
+                ]
+                if not parts:
+                    continue
+                ctk.CTkLabel(
+                    card,
+                    text=" · ".join(parts),
+                    font=ctk.CTkFont(size=12),
+                    text_color=TEXT,
+                    anchor="w",
+                    wraplength=920,
+                    justify="left",
+                ).grid(row=row_i, column=0, columnspan=2, sticky="w", padx=12, pady=2)
+
+            ctk.CTkFrame(card, fg_color="transparent", height=8).grid(
+                row=len(items) + 1, column=0, columnspan=2
+            )
 
     def _sort_by(self, column: str) -> None:
         reverse = getattr(self, "_sort_desc", False)
@@ -1058,7 +1258,7 @@ class SheetsHubApp(ctk.CTk):
         self._set_status(f"Экспортировано: {path}")
 
     def _open_tables_dialog(self) -> None:
-        dialog = self._dialog("Таблицы", "1100x680")
+        dialog = self._dialog("Таблицы", "1180x700")
         dialog.minsize(860, 520)
         dialog.grid_columnconfigure(0, weight=1)
         dialog.grid_rowconfigure(1, weight=1)
@@ -1127,6 +1327,7 @@ class SheetsHubApp(ctk.CTk):
             "Откуда брать данные",
             self.config_data.sources,
             "Источник",
+            show_kind=True,
         )
         sources_editor.frame.grid(row=1, column=0, sticky="nsew", padx=16, pady=8)
 
@@ -1135,6 +1336,7 @@ class SheetsHubApp(ctk.CTk):
             "Куда вносить данные",
             self.config_data.destinations,
             "Назначение",
+            show_kind=False,
         )
         dest_editor.frame.grid(row=2, column=0, sticky="nsew", padx=16, pady=8)
 
@@ -1153,8 +1355,16 @@ class SheetsHubApp(ctk.CTk):
 
 
 class _RefList:
-    def __init__(self, parent, title: str, refs: list[SheetRef], placeholder: str) -> None:
+    def __init__(
+        self,
+        parent,
+        title: str,
+        refs: list[SheetRef],
+        placeholder: str,
+        show_kind: bool = False,
+    ) -> None:
         self.placeholder = placeholder
+        self.show_kind = show_kind
         self.rows: list[dict] = []
         self._next_row = 0
         self.frame = ctk.CTkFrame(parent, fg_color=BG, corner_radius=10, border_width=1, border_color=LINE)
@@ -1170,11 +1380,19 @@ class _RefList:
             font=ctk.CTkFont(size=15, weight="bold"),
             text_color=TEXT,
         ).grid(row=0, column=0, sticky="w")
+        hint = (
+            "тип «Записи» — в календарь; «Общая информация» — блок под ним. "
+            "Лист: все или Лист1, Заказы. Вкладки «Информация», «Прайс», «Контакты» попадут вниз сами."
+            if show_kind
+            else "одна ссылка — все вкладки: в поле «Лист» напишите все или Лист1, Заказы"
+        )
         ctk.CTkLabel(
             header,
-            text="для каждой строки: тип услуги и адрес",
+            text=hint,
             text_color=MUTED,
             font=ctk.CTkFont(size=12),
+            wraplength=820,
+            justify="left",
         ).grid(row=1, column=0, sticky="w", pady=(2, 0))
         ctk.CTkButton(
             header,
@@ -1198,7 +1416,7 @@ class _RefList:
             self.add_empty()
 
     def add_empty(self) -> None:
-        self._add_row(SheetRef(name=self.placeholder, spreadsheet_id="", sheet="Лист1"))
+        self._add_row(SheetRef(name=self.placeholder, spreadsheet_id="", sheet="все"))
 
     def _add_row(self, ref: SheetRef) -> None:
         index = self._next_row
@@ -1208,6 +1426,7 @@ class _RefList:
         sheet_var = tk.StringVar(value=ref.sheet or "")
         service_var = tk.StringVar(value=ref.service)
         address_var = tk.StringVar(value=ref.address)
+        kind_var = tk.StringVar(value=KIND_LABELS.get(ref.kind, KIND_LABELS[KIND_RECORDS]))
 
         row_frame = ctk.CTkFrame(
             self.body,
@@ -1222,7 +1441,7 @@ class _RefList:
         fields = [
             ("Название", "как будет видно в списке", name_var, 130, "Гинеколог"),
             ("Ссылка на таблицу", "вставьте URL из браузера: https://docs.google.com/spreadsheets/d/...", url_var, 0, "https://docs.google.com/spreadsheets/d/..."),
-            ("Лист", "имя вкладки внизу таблицы", sheet_var, 100, "Лист1"),
+            ("Лист", "пусто или все = все вкладки; несколько: Лист1, Заказы", sheet_var, 160, "все"),
             ("Тип услуги", "какая услуга у этой таблицы", service_var, 130, "Стрижка"),
             ("Адрес", "какой филиал у этой таблицы", address_var, 150, "ул. Ленина"),
         ]
@@ -1256,12 +1475,48 @@ class _RefList:
             entry.pack(fill="x", pady=(4, 0))
             widgets.append(entry)
 
+        if self.show_kind:
+            kind_box = ctk.CTkFrame(row_frame, fg_color="transparent")
+            kind_box.grid(row=0, column=5, sticky="w", padx=6, pady=8)
+            ctk.CTkLabel(
+                kind_box,
+                text="Тип",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                text_color=TEXT,
+                anchor="w",
+            ).pack(fill="x")
+            ctk.CTkLabel(
+                kind_box,
+                text="записи или справка под календарём",
+                font=ctk.CTkFont(size=10),
+                text_color=HINT,
+                anchor="w",
+                wraplength=160,
+                justify="left",
+            ).pack(fill="x")
+            kind_menu = ctk.CTkOptionMenu(
+                kind_box,
+                variable=kind_var,
+                values=[KIND_LABELS[KIND_RECORDS], KIND_LABELS[KIND_INFO]],
+                width=170,
+                height=36,
+                fg_color=CARD,
+                button_color=GREEN,
+                button_hover_color=GREEN_HOVER,
+                text_color=TEXT,
+                dropdown_fg_color=CARD,
+                dropdown_text_color=TEXT,
+            )
+            kind_menu.pack(fill="x", pady=(4, 0))
+            widgets.append(kind_menu)
+
         row_data = {
             "name": name_var,
             "url": url_var,
             "sheet": sheet_var,
             "service": service_var,
             "address": address_var,
+            "kind": kind_var,
             "map": dict(ref.map),
             "widgets": widgets,
         }
@@ -1284,7 +1539,7 @@ class _RefList:
             text_color=DANGER,
             command=remove,
         )
-        remove_btn.grid(row=0, column=5, padx=8, pady=8, sticky="n")
+        remove_btn.grid(row=0, column=6 if self.show_kind else 5, padx=8, pady=8, sticky="n")
         widgets.append(remove_btn)
         self.rows.append(row_data)
 
@@ -1298,10 +1553,11 @@ class _RefList:
                 SheetRef(
                     name=row["name"].get().strip() or self.placeholder,
                     spreadsheet_id=url,
-                    sheet=row["sheet"].get().strip() or "Лист1",
+                    sheet=row["sheet"].get().strip(),
                     map=row["map"],
                     service=row["service"].get().strip(),
                     address=row["address"].get().strip(),
+                    kind=KIND_INFO if row["kind"].get() == KIND_LABELS[KIND_INFO] else KIND_RECORDS,
                 )
             )
         return out

@@ -4,7 +4,7 @@ import json
 import re
 import shutil
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +45,63 @@ def parse_spreadsheet_id(url_or_id: str) -> str:
     return text
 
 
+KIND_RECORDS = "records"
+KIND_INFO = "info"
+KIND_LABELS = {
+    KIND_RECORDS: "Записи",
+    KIND_INFO: "Общая информация",
+}
+_INFO_KIND_ALIASES = {
+    "info",
+    "инфо",
+    "информация",
+    "общая информация",
+    "справка",
+    "прайс",
+}
+_INFO_SHEET_NAMES = {
+    "информация",
+    "инфо",
+    "общее",
+    "общая информация",
+    "справка",
+    "прайс",
+    "цены",
+    "условия",
+    "контакты",
+    "о нас",
+    "примечание",
+    "объявления",
+    "notes",
+    "info",
+    "general",
+    "about",
+    "notice",
+}
+
+
+def normalize_kind(value: str) -> str:
+    raw = (value or "").strip().lower()
+    if raw in _INFO_KIND_ALIASES or raw == KIND_INFO:
+        return KIND_INFO
+    return KIND_RECORDS
+
+
+def is_info_title(text: str) -> bool:
+    raw = (text or "").strip().lower()
+    if not raw:
+        return False
+    if raw in _INFO_SHEET_NAMES:
+        return True
+    return any(raw.startswith(marker) for marker in ("информ", "прайс", "справк", "объявлен"))
+
+
+def is_info_ref(ref: "SheetRef") -> bool:
+    if normalize_kind(ref.kind) == KIND_INFO:
+        return True
+    return is_info_title(ref.sheet)
+
+
 @dataclass
 class SheetRef:
     name: str
@@ -53,6 +110,7 @@ class SheetRef:
     map: dict[str, str] = field(default_factory=dict)
     service: str = ""
     address: str = ""
+    kind: str = KIND_RECORDS
 
     def normalized_id(self) -> str:
         return parse_spreadsheet_id(self.spreadsheet_id)
@@ -73,6 +131,27 @@ class SheetRef:
         return f"{self.name}|{self.spreadsheet_id}|{self.sheet}|{self.service}|{self.address}"
 
 
+_ALL_SHEETS = {"", "*", "все", "all", "все листы"}
+
+
+def requested_sheet_titles(text: str) -> list[str] | None:
+    """None — взять все вкладки файла. Иначе список имён листов."""
+    raw = (text or "").strip()
+    if raw.lower() in _ALL_SHEETS:
+        return None
+    parts = [part.strip() for part in re.split(r"\s*[,;/|]\s*", raw) if part.strip()]
+    return parts or None
+
+
+def expand_ref_locally(ref: SheetRef) -> list[SheetRef]:
+    titles = requested_sheet_titles(ref.sheet)
+    if not titles or len(titles) == 1:
+        if titles:
+            return [replace(ref, sheet=titles[0])]
+        return [ref]
+    return [replace(ref, name=f"{ref.name} / {title}", sheet=title) for title in titles]
+
+
 Source = SheetRef
 
 
@@ -90,10 +169,11 @@ def _load_refs(items: Any) -> list[SheetRef]:
             SheetRef(
                 name=str(item.get("name") or "Без имени"),
                 spreadsheet_id=str(item.get("spreadsheet_id") or ""),
-                sheet=str(item.get("sheet") or "Лист1"),
+                sheet=str(item.get("sheet") or ""),
                 map={str(k): str(v) for k, v in (item.get("map") or {}).items()},
                 service=str(item.get("service") or item.get("услуга") or ""),
                 address=str(item.get("address") or item.get("адрес") or ""),
+                kind=normalize_kind(str(item.get("kind") or item.get("тип") or KIND_RECORDS)),
             )
         )
     return refs
@@ -111,6 +191,8 @@ def _dump_ref(ref: SheetRef) -> dict[str, Any]:
         payload["service"] = ref.service
     if ref.address:
         payload["address"] = ref.address
+    if normalize_kind(ref.kind) == KIND_INFO:
+        payload["kind"] = KIND_INFO
     return payload
 
 

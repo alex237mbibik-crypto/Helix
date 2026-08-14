@@ -5,21 +5,29 @@
 # sources — откуда читать данные
 # destinations — куда писать новые строки и копировать записи
 # service / address — необязательно: одна таблица на тип услуги и адрес.
-# Если в ячейке несколько услуг (через запятую) или адресов (через ;),
-# программа разобьёт строку на отдельные пункты.
+# sheet: один лист, несколько через запятую, или все — тогда читаются все вкладки файла
+#   sheet: все
+#   sheet: Лист1, Заказы
+# kind: info — общая информация под календарём записи (не смешивается с записями)
+# Вкладки с именами Информация, Прайс, Контакты при sheet: все тоже идут вниз.
 
 credentials: credentials.json
 
 sources:
-  - name: Источник 1
+  - name: Клиника
     spreadsheet_id: PASTE_SPREADSHEET_ID_OR_URL
-    sheet: Лист1
+    sheet: все
     # service: Стрижка
     # address: ул. Ленина
 
-  - name: Источник 2
+  - name: Клиника 2
     spreadsheet_id: PASTE_ANOTHER_ID_OR_URL
-    sheet: Лист1
+    sheet: Лист1, Заказы
+
+  - name: Справка клиники
+    spreadsheet_id: PASTE_SPREADSHEET_ID_OR_URL
+    sheet: Информация
+    kind: info
 
 destinations:
   - name: Назначение

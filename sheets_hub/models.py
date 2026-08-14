@@ -15,6 +15,7 @@ class Record:
     map: dict[str, str] = field(default_factory=dict)
     origin_values: dict[str, str] = field(default_factory=dict)
     split_from: bool = False
+    kind: str = "records"
 
     def display_values(self) -> dict[str, str]:
         return {"Источник": self.source_name, **self.values}
