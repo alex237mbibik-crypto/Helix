@@ -6,6 +6,8 @@ from pathlib import Path
 import certifi
 import gspread
 from google.oauth2.service_account import Credentials
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from sheets_hub.calendar_sheet import is_calendar_matrix, parse_sheet_rows
 from sheets_hub.config import (
@@ -18,10 +20,10 @@ from sheets_hub.config import (
 )
 from sheets_hub.models import Record
 from sheets_hub.split import address_key, service_key
-from sheets_hub.ssl_setup import configure_tls
+from sheets_hub.ssl_setup import ca_bundle_path, configure_tls
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-_RETRY_ATTEMPTS = 4
+_RETRY_ATTEMPTS = 5
 
 
 class SheetsError(Exception):
@@ -64,17 +66,42 @@ class SheetsClient:
                 "Ссылка на таблицу — это не вход. Нажмите «Таблицы» → «Выбрать JSON-ключ…» "
                 "и укажите файл ключа сервисного аккаунта из Google Cloud."
             )
-        creds = Credentials.from_service_account_file(str(credentials_path), scopes=SCOPES)
+        self._credentials_path = credentials_path
+        self._connect()
+
+    def _connect(self) -> None:
+        configure_tls()
+        creds = Credentials.from_service_account_file(str(self._credentials_path), scopes=SCOPES)
         self._gc = gspread.authorize(creds)
+        self._tune_session()
+        self.service_email = creds.service_account_email
+
+    def _tune_session(self) -> None:
         session = getattr(getattr(self._gc, "http_client", None), "session", None)
         if session is None:
             session = getattr(self._gc, "session", None)
-        if session is not None:
-            session.verify = certifi.where()
-        self.service_email = creds.service_account_email
+        if session is None:
+            return
+        ca = ca_bundle_path() or certifi.where()
+        session.verify = ca
+        retry = Retry(
+            total=5,
+            connect=5,
+            read=5,
+            status=5,
+            backoff_factor=0.7,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=False,
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retry, pool_connections=4, pool_maxsize=4)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        session.headers["Connection"] = "close"
 
     def _call(self, work):
         last: BaseException | None = None
+        rebuilt = False
         for attempt in range(_RETRY_ATTEMPTS):
             try:
                 return work()
@@ -86,6 +113,9 @@ class SheetsClient:
                 last = exc
                 if not _is_network_error(exc) or attempt == _RETRY_ATTEMPTS - 1:
                     raise
+                if not rebuilt:
+                    self._connect()
+                    rebuilt = True
                 time.sleep(1.2 * (attempt + 1))
         raise last  # pragma: no cover
 

@@ -818,7 +818,7 @@ class SheetsHubApp(ctk.CTk):
         self.config_data.credentials = installed
         return True
 
-    def _run_bg(self, work: Callable, done: Callable) -> None:
+    def _run_bg(self, work: Callable, done: Callable, *, alert: bool = True) -> None:
         self._jobs += 1
         self.refresh_btn.configure(state="disabled")
 
@@ -829,17 +829,18 @@ class SheetsHubApp(ctk.CTk):
                 result = work()
             except Exception as exc:
                 error = exc
-            self.after(0, lambda: self._finish_bg(done, result, error))
+            self.after(0, lambda: self._finish_bg(done, result, error, alert=alert))
 
         threading.Thread(target=runner, daemon=True).start()
 
-    def _finish_bg(self, done: Callable, result, error) -> None:
+    def _finish_bg(self, done: Callable, result, error, alert: bool = True) -> None:
         self._jobs = max(0, self._jobs - 1)
         if self._jobs == 0:
             self.refresh_btn.configure(state="normal")
         if error:
             self._set_status(f"Ошибка: {error}")
-            messagebox.showerror("Ошибка", str(error))
+            if alert:
+                messagebox.showerror("Ошибка", str(error))
             return
         done(result)
 
@@ -885,6 +886,8 @@ class SheetsHubApp(ctk.CTk):
                 )
             if errors:
                 messagebox.showwarning("Часть таблиц не загрузилась", "\n\n".join(errors[:8]))
+                if any("подключиться к Google" in item for item in errors):
+                    return
             self._load_dest_headers()
 
         self._run_bg(work, done)
@@ -910,7 +913,7 @@ class SheetsHubApp(ctk.CTk):
             if selected and selected.dest_key() == dest.dest_key():
                 self._rebuild_add_fields(headers)
 
-        self._run_bg(work, done)
+        self._run_bg(work, done, alert=False)
 
     def _date_value(self, record: Record) -> str:
         for key, value in record.values.items():
