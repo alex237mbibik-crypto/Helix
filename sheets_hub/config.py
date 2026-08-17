@@ -36,7 +36,7 @@ _ID_FROM_URL = re.compile(r"/spreadsheets/d/([a-zA-Z0-9-_]+)")
 
 
 def parse_spreadsheet_id(url_or_id: str) -> str:
-    text = (url_or_id or "").strip()
+    text = re.sub(r"\s+", "", url_or_id or "")
     match = _ID_FROM_URL.search(text)
     if match:
         return match.group(1)
@@ -162,6 +162,29 @@ class AppConfig:
     destinations: list[SheetRef]
 
 
+def usable_refs(refs: list[SheetRef]) -> list[SheetRef]:
+    return [item for item in refs if not item.is_placeholder()]
+
+
+def _ref_identity(ref: SheetRef) -> tuple[str, str]:
+    try:
+        sid = ref.normalized_id()
+    except ValueError:
+        sid = re.sub(r"\s+", "", ref.spreadsheet_id or "")
+    return sid, (ref.sheet or "").strip().lower()
+
+
+def merge_tables(sources: list[SheetRef], destinations: list[SheetRef]) -> list[SheetRef]:
+    """Один список: читаем и пишем в те же таблицы. Пустые PASTE_ не прячут заполненные."""
+    merged: dict[tuple[str, str], SheetRef] = {}
+    for ref in [*usable_refs(sources), *usable_refs(destinations)]:
+        key = _ref_identity(ref)
+        existing = merged.get(key)
+        if existing is None or ((ref.service or ref.address) and not (existing.service or existing.address)):
+            merged[key] = ref
+    return list(merged.values())
+
+
 def _load_refs(items: Any) -> list[SheetRef]:
     refs: list[SheetRef] = []
     for item in items or []:
@@ -213,10 +236,14 @@ def load_config(path: Path | None = None) -> AppConfig:
         creds = ROOT / creds
 
     destinations = _load_refs(raw.get("destinations") or raw.get("targets"))
+    sources = _load_refs(raw.get("sources"))
+    tables = merge_tables(sources, destinations)
+    if not tables:
+        tables = sources or destinations
     return AppConfig(
         credentials=creds,
-        sources=_load_refs(raw.get("sources")),
-        destinations=destinations,
+        sources=tables,
+        destinations=list(tables),
     )
 
 
@@ -228,10 +255,12 @@ def save_config(config: AppConfig, path: Path | None = None) -> None:
     except ValueError:
         creds_value = str(config.credentials)
 
+    tables = merge_tables(config.sources, config.destinations) or config.sources
+    dumped = [_dump_ref(item) for item in tables]
     payload = {
         "credentials": creds_value,
-        "sources": [_dump_ref(source) for source in config.sources],
-        "destinations": [_dump_ref(dest) for dest in config.destinations],
+        "sources": dumped,
+        "destinations": dumped,
     }
     config_path.write_text(
         yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
