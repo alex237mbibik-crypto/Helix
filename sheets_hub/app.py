@@ -122,18 +122,18 @@ def _input_box(parent, title: str, hint: str) -> ctk.CTkFrame:
 
 
 def _styled_entry(parent, placeholder: str, **kwargs) -> ctk.CTkEntry:
-    return ctk.CTkEntry(
-        parent,
-        height=36,
-        corner_radius=6,
-        border_width=2,
-        border_color=BORDER,
-        fg_color=CARD,
-        text_color=TEXT,
-        placeholder_text=placeholder,
-        placeholder_text_color="#9aa0a6",
-        **kwargs,
-    )
+    options = {
+        "height": 36,
+        "corner_radius": 6,
+        "border_width": 2,
+        "border_color": BORDER,
+        "fg_color": CARD,
+        "text_color": TEXT,
+        "placeholder_text": placeholder,
+        "placeholder_text_color": "#9aa0a6",
+    }
+    options.update(kwargs)
+    return ctk.CTkEntry(parent, **options)
 
 
 def _status_tag(value: str) -> str | None:
