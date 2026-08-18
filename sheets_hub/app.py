@@ -94,6 +94,13 @@ def _time_sort_key(text: str) -> tuple[int, int]:
     return int(match.group(1)), int(match.group(2))
 
 
+def _short_time(text: str) -> str:
+    match = re.search(r"(\d{1,2})[:.\-](\d{2})", text or "")
+    if not match:
+        return (text or "").strip()
+    return f"{int(match.group(1))}:{match.group(2)}"
+
+
 def _input_box(parent, title: str, hint: str) -> ctk.CTkFrame:
     box = ctk.CTkFrame(
         parent,
@@ -224,7 +231,7 @@ class SheetsHubApp(ctk.CTk):
 
     def _build_header(self, parent: ctk.CTkFrame) -> None:
         header = ctk.CTkFrame(parent, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", padx=20, pady=(18, 8))
+        header.grid(row=0, column=0, sticky="ew", padx=16, pady=(10, 4))
         header.grid_columnconfigure(1, weight=1)
 
         title_box = ctk.CTkFrame(header, fg_color="transparent")
@@ -258,7 +265,7 @@ class SheetsHubApp(ctk.CTk):
 
     def _build_filter(self, parent: ctk.CTkFrame) -> None:
         filter_area = ctk.CTkFrame(parent, fg_color="transparent")
-        filter_area.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 4))
+        filter_area.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 2))
         filter_area.grid_columnconfigure(0, weight=1)
 
         self.search_var = tk.StringVar()
@@ -285,7 +292,7 @@ class SheetsHubApp(ctk.CTk):
             text_color=MUTED,
             font=ctk.CTkFont(size=13),
         )
-        self.status.grid(row=2, column=0, sticky="ew", padx=22, pady=(0, 6))
+        self.status.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 4))
 
     def _build_table(self, parent: ctk.CTkFrame) -> None:
         table_wrap = ctk.CTkFrame(
@@ -295,7 +302,7 @@ class SheetsHubApp(ctk.CTk):
             border_width=1,
             border_color="#e0e0e0",
         )
-        table_wrap.grid(row=3, column=0, sticky="nsew", padx=20, pady=(0, 8))
+        table_wrap.grid(row=3, column=0, sticky="nsew", padx=16, pady=(0, 8))
         table_wrap.grid_columnconfigure(0, weight=1)
         table_wrap.grid_rowconfigure(1, weight=1)
 
@@ -305,7 +312,7 @@ class SheetsHubApp(ctk.CTk):
             font=ctk.CTkFont(size=14, weight="bold"),
             text_color=TEXT,
             anchor="w",
-        ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 4))
+        ).grid(row=0, column=0, sticky="w", padx=12, pady=(8, 2))
 
         inner = tk.Frame(table_wrap, bg=CARD, highlightthickness=0)
         inner.grid(row=1, column=0, sticky="nsew", padx=1, pady=(0, 1))
@@ -322,7 +329,20 @@ class SheetsHubApp(ctk.CTk):
         self.tree.bind("<Delete>", lambda *_: self._delete_row())
         self._style_treeview()
 
-        self.cal_host = tk.Frame(inner, bg=CARD, highlightthickness=0)
+        self.cal_canvas = tk.Canvas(inner, bg=CARD, highlightthickness=0, bd=0)
+        self.cal_vsb = ttk.Scrollbar(inner, orient="vertical", command=self.cal_canvas.yview)
+        self.cal_hsb = ttk.Scrollbar(inner, orient="horizontal", command=self.cal_canvas.xview)
+        self.cal_canvas.configure(yscrollcommand=self.cal_vsb.set, xscrollcommand=self.cal_hsb.set)
+        self.cal_host = tk.Frame(self.cal_canvas, bg=CARD)
+        self._cal_window = self.cal_canvas.create_window((0, 0), window=self.cal_host, anchor="nw")
+        self.cal_host.bind("<Configure>", self._on_cal_host_configure)
+        self.cal_canvas.bind("<Configure>", self._on_cal_canvas_configure)
+        self.cal_canvas.bind("<Enter>", lambda *_: self.cal_canvas.focus_set())
+        self.cal_canvas.bind("<MouseWheel>", self._on_cal_wheel)
+        self.cal_host.bind("<MouseWheel>", self._on_cal_wheel)
+        self.cal_canvas.bind("<Shift-MouseWheel>", self._on_cal_shift_wheel)
+        self.bind_all("<MouseWheel>", self._on_cal_wheel)
+        self.bind_all("<Shift-MouseWheel>", self._on_cal_shift_wheel)
 
     def _build_info_panel(self, parent: ctk.CTkFrame) -> None:
         self.info_wrap = ctk.CTkFrame(
@@ -403,6 +423,52 @@ class SheetsHubApp(ctk.CTk):
         remainder = usable % n
         for i, col in enumerate(columns):
             self.tree.column(col, width=base + (1 if i < remainder else 0), stretch=True, minwidth=80)
+
+    def _on_cal_host_configure(self, _event=None) -> None:
+        self.cal_canvas.configure(scrollregion=self.cal_canvas.bbox("all"))
+
+    def _on_cal_canvas_configure(self, event) -> None:
+        width = max(event.width, self.cal_host.winfo_reqwidth())
+        self.cal_canvas.itemconfigure(self._cal_window, width=width)
+
+    def _on_cal_wheel(self, event) -> None:
+        if not self._pointer_over_calendar(event):
+            return
+        steps = self._wheel_steps(event)
+        if steps:
+            self.cal_canvas.yview_scroll(steps, "units")
+        return "break"
+
+    def _on_cal_shift_wheel(self, event) -> None:
+        if not self._pointer_over_calendar(event):
+            return
+        steps = self._wheel_steps(event)
+        if steps:
+            self.cal_canvas.xview_scroll(steps, "units")
+        return "break"
+
+    def _pointer_over_calendar(self, event) -> bool:
+        canvas = getattr(self, "cal_canvas", None)
+        if canvas is None or not canvas.winfo_ismapped():
+            return False
+        try:
+            x, y = canvas.winfo_rootx(), canvas.winfo_rooty()
+            w, h = canvas.winfo_width(), canvas.winfo_height()
+        except tk.TclError:
+            return False
+        return x <= event.x_root <= x + w and y <= event.y_root <= y + h
+
+    def _wheel_steps(self, event) -> int:
+        if sys.platform == "darwin":
+            return int(-event.delta)
+        return int(-event.delta / 120) if event.delta else 0
+
+    def _refresh_cal_scroll(self) -> None:
+        self.cal_host.update_idletasks()
+        self.cal_canvas.configure(scrollregion=self.cal_canvas.bbox("all"))
+        self.cal_canvas.yview_moveto(0)
+        width = max(self.cal_canvas.winfo_width(), self.cal_host.winfo_reqwidth())
+        self.cal_canvas.itemconfigure(self._cal_window, width=width)
 
     def _set_status(self, text: str) -> None:
         self.status.configure(text=text)
@@ -593,9 +659,13 @@ class SheetsHubApp(ctk.CTk):
         if on:
             self.tree.grid_remove()
             self.vsb.grid_remove()
-            self.cal_host.grid(row=0, column=0, sticky="nsew")
+            self.cal_canvas.grid(row=0, column=0, sticky="nsew")
+            self.cal_vsb.grid(row=0, column=1, sticky="ns")
+            self.cal_hsb.grid(row=1, column=0, sticky="ew")
         else:
-            self.cal_host.grid_remove()
+            self.cal_canvas.grid_remove()
+            self.cal_vsb.grid_remove()
+            self.cal_hsb.grid_remove()
             self.tree.grid(row=0, column=0, sticky="nsew")
             self.vsb.grid(row=0, column=1, sticky="ns")
 
@@ -610,6 +680,7 @@ class SheetsHubApp(ctk.CTk):
             block = tk.Frame(self.cal_host, bg=CARD, highlightthickness=0)
             block.grid(row=index, column=0, sticky="nsew", pady=(0, 10))
             self._draw_one_calendar(block, name, items)
+        self.after_idle(self._refresh_cal_scroll)
 
     def _draw_one_calendar(self, block: tk.Frame, name: str, items: list[Record]) -> None:
         dates = list(dict.fromkeys(item.values.get("Дата", "") for item in items if item.values.get("Дата")))
@@ -632,16 +703,6 @@ class SheetsHubApp(ctk.CTk):
             anchor="w",
         ).grid(row=0, column=0, columnspan=len(dates) + 1, sticky="w", padx=4, pady=(0, 6))
 
-        tk.Label(
-            block,
-            text="Время",
-            bg=GREEN,
-            fg="#ffffff",
-            font=_ui_font(11, bold=True),
-            padx=8,
-            pady=8,
-        ).grid(row=1, column=0, sticky="nsew", padx=1, pady=1)
-
         for col, date in enumerate(dates, start=1):
             weekend = any(part in date.lower() for part in ("сб", "вс"))
             tk.Label(
@@ -649,21 +710,32 @@ class SheetsHubApp(ctk.CTk):
                 text=date,
                 bg=GREEN,
                 fg="#fce8e6" if weekend else "#ffffff",
-                font=_ui_font(11, bold=True),
-                padx=6,
-                pady=8,
-                wraplength=140,
+                font=_ui_font(10, bold=True),
+                padx=4,
+                pady=4,
+                wraplength=120,
             ).grid(row=1, column=col, sticky="nsew", padx=1, pady=1)
 
+        tk.Label(
+            block,
+            text="Время",
+            bg=GREEN,
+            fg="#ffffff",
+            font=_ui_font(10, bold=True),
+            padx=6,
+            pady=4,
+        ).grid(row=1, column=0, sticky="nsew", padx=1, pady=1)
+
         for row, time in enumerate(times, start=2):
+            block.grid_rowconfigure(row, minsize=26)
             tk.Label(
                 block,
-                text=time,
+                text=_short_time(time),
                 bg=SLOT_TIME,
                 fg=TEXT,
-                font=_ui_font(12, bold=True),
-                padx=8,
-                pady=8,
+                font=_ui_font(11, bold=True),
+                padx=6,
+                pady=2,
             ).grid(row=row, column=0, sticky="nsew", padx=1, pady=1)
             for col, date in enumerate(dates, start=1):
                 record = cell_map.get((time, date))
@@ -677,9 +749,7 @@ class SheetsHubApp(ctk.CTk):
         if status == "Не записывать":
             bg, fg, text = SLOT_BLOCKED, MUTED, "не записывать"
         elif status == "Занято":
-            name = record.values.get("Клиент", "").strip()
-            phone = record.values.get("Телефон", "").strip()
-            text = f"{name}\n{phone}".strip() if phone else name
+            text = record.values.get("Клиент", "").strip() or "занято"
             bg, fg = SLOT_GREEN, TEXT
         else:
             bg, fg, text = SLOT_GREEN, "#1b5e20", "запись"
@@ -688,12 +758,12 @@ class SheetsHubApp(ctk.CTk):
             text=text,
             bg=bg,
             fg=fg,
-            font=_ui_font(11, bold=status == "Занято"),
-            wraplength=150,
+            font=_ui_font(10, bold=status == "Занято"),
+            wraplength=0,
             justify="left",
-            padx=6,
-            pady=8,
-            anchor="nw",
+            padx=4,
+            pady=1,
+            anchor="w",
         )
         label.grid(row=row, column=col, sticky="nsew", padx=1, pady=1)
         label.bind("<Button-1>", lambda _event, item=record: self._edit_calendar_cell(item))
@@ -806,8 +876,18 @@ class SheetsHubApp(ctk.CTk):
     def _dialog(self, title: str, size: str) -> ctk.CTkToplevel:
         dialog = ctk.CTkToplevel(self)
         dialog.title(title)
-        dialog.geometry(size)
         dialog.configure(fg_color=CARD)
+        try:
+            width, height = (int(part) for part in size.lower().split("x", 1))
+        except ValueError:
+            width, height = 480, 280
+        screen_w = max(640, self.winfo_screenwidth())
+        screen_h = max(480, self.winfo_screenheight())
+        width = min(width, screen_w - 80)
+        height = min(height, screen_h - 120)
+        x = max(20, (screen_w - width) // 2)
+        y = max(40, (screen_h - height) // 3)
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
         dialog.transient(self)
         dialog.grab_set()
         return dialog
@@ -929,11 +1009,8 @@ class SheetsHubApp(ctk.CTk):
         self._run_bg(work, done)
 
     def _open_tables_dialog(self) -> None:
-        self.update_idletasks()
-        width = max(980, self.winfo_width() - 48)
-        height = max(560, self.winfo_height() - 48)
-        dialog = self._dialog("Таблицы", f"{width}x{height}")
-        dialog.minsize(880, 480)
+        dialog = self._dialog("Таблицы", "820x420")
+        dialog.minsize(640, 320)
         dialog.grid_columnconfigure(0, weight=1)
         dialog.grid_rowconfigure(1, weight=1)
 
