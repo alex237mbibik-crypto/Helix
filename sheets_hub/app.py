@@ -172,7 +172,7 @@ class SheetsHubApp(ctk.CTk):
         self._sort_desc = False
         self._picked: Record | None = None
         self._last_error_message = ""
-        self.source_filter_var = tk.StringVar(value="Все таблицы")
+        self.source_filter_var = tk.StringVar(value="")
 
         self._build()
         self.after(200, self._try_connect)
@@ -290,7 +290,7 @@ class SheetsHubApp(ctk.CTk):
         ).pack(side="left", padx=(0, 8))
         self.source_filter = ctk.CTkComboBox(
             source_box,
-            values=["Все таблицы"],
+            values=[""],
             variable=self.source_filter_var,
             width=190,
             height=32,
@@ -309,6 +309,7 @@ class SheetsHubApp(ctk.CTk):
             command=lambda _value: self._render_views(),
         )
         self.source_filter.pack(side="left")
+        self.source_filter.set("Таблица")
         ctk.CTkLabel(
             filter_area,
             text="Нажмите ячейку, чтобы записать имя. Пустое поле — слот свободен.",
@@ -602,7 +603,7 @@ class SheetsHubApp(ctk.CTk):
 
     def _run_bg(self, work: Callable, done: Callable, *, alert: bool = True) -> None:
         self._jobs += 1
-        self.refresh_btn.configure(state="disabled")
+        self.refresh_btn.configure(text="Обновляю…")
 
         def runner() -> None:
             error = None
@@ -618,7 +619,7 @@ class SheetsHubApp(ctk.CTk):
     def _finish_bg(self, done: Callable, result, error, alert: bool = True) -> None:
         self._jobs = max(0, self._jobs - 1)
         if self._jobs == 0:
-            self.refresh_btn.configure(state="normal")
+            self.refresh_btn.configure(text="Обновить")
         if error:
             self._set_status(f"Ошибка: {error}")
             if alert:
@@ -636,6 +637,9 @@ class SheetsHubApp(ctk.CTk):
         if not sources:
             self.records = []
             self.info_records = []
+            self.source_filter.configure(values=[""])
+            self.source_filter_var.set("")
+            self.source_filter.set("Таблица")
             self._render_table()
             self._render_info()
             self._set_status("Нет таблиц. Откройте «Таблицы» и вставьте ссылку на Google Таблицу.")
@@ -688,7 +692,7 @@ class SheetsHubApp(ctk.CTk):
         source_name = self.source_filter_var.get().strip()
         out = []
         for record in self.records:
-            if source_name and source_name != "Все таблицы" and record.source_name != source_name:
+            if source_name and record.source_name != source_name:
                 continue
             blob = " ".join([record.source_name, *record.values.values()]).lower()
             if query and query not in blob:
@@ -881,20 +885,22 @@ class SheetsHubApp(ctk.CTk):
 
     def _refresh_source_filter_options(self, booking: list[Record], info: list[Record]) -> None:
         names = sorted({record.source_name for record in [*booking, *info] if record.source_name})
-        values = ["Все таблицы", *names]
-        current = self.source_filter_var.get().strip() or "Все таблицы"
+        values = names or [""]
+        current = self.source_filter_var.get().strip()
         self.source_filter.configure(values=values)
         if current not in values:
-            self.source_filter_var.set("Все таблицы")
+            self.source_filter_var.set(values[0])
         else:
             self.source_filter_var.set(current)
+        if values == [""]:
+            self.source_filter.set("Таблица")
 
     def _filtered_info(self) -> list[Record]:
         query = self.search_var.get().strip().lower()
         source_name = self.source_filter_var.get().strip()
         out: list[Record] = []
         for record in self.info_records:
-            if source_name and source_name != "Все таблицы" and record.source_name != source_name:
+            if source_name and record.source_name != source_name:
                 continue
             blob = " ".join([record.source_name, *record.values.values()]).lower()
             if query and query not in blob:
