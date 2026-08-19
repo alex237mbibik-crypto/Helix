@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import csv
 import io
+import shutil
+import subprocess
+import sys
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -26,7 +29,7 @@ from sheets_hub.config import (
 )
 from sheets_hub.models import Record
 from sheets_hub.split import address_key, service_key
-from sheets_hub.ssl_setup import configure_tls, session_verify_target
+from sheets_hub.ssl_setup import ca_bundle_path, configure_tls, session_verify_target
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 _RETRY_ATTEMPTS = 5
@@ -65,30 +68,92 @@ def _friendly_error(exc: BaseException) -> SheetsError:
     return SheetsError(str(exc))
 
 
-def _public_session() -> requests.Session:
-    configure_tls()
-    session = requests.Session()
-    session.verify = session_verify_target()
-    session.headers["User-Agent"] = "SheetsHub/1.0"
-    return session
-
-
-def _fetch_public_csv(spreadsheet_id: str, sheet: str = "") -> list[list[str]]:
+def _public_csv_url(spreadsheet_id: str, sheet: str = "") -> str:
     if sheet.strip():
-        url = (
+        return (
             f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export"
             f"?format=csv&sheet={quote(sheet.strip())}"
         )
-    else:
-        url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export?format=csv"
-    try:
-        resp = _public_session().get(url, timeout=_HTTP_TIMEOUT)
-        resp.raise_for_status()
-        text = resp.content.decode("utf-8-sig", errors="replace")
-    except Exception as exc:
-        raise SheetsError(f"Публичное чтение таблицы не удалось: {exc}") from exc
+    return f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export?format=csv"
+
+
+def _parse_csv_text(text: str) -> list[list[str]]:
     rows = list(csv.reader(io.StringIO(text)))
     return [[(cell or "").replace("\u202f", " ").strip() for cell in row] for row in rows]
+
+
+def _fetch_url_curl(url: str) -> str:
+    curl = shutil.which("curl.exe") or shutil.which("curl")
+    if not curl:
+        raise OSError("curl не найден")
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    result = subprocess.run(
+        [curl, "-fsSL", "--ssl-no-revoke", "--max-time", "30", url],
+        capture_output=True,
+        timeout=35,
+        creationflags=flags if sys.platform == "win32" else 0,
+    )
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or b"").decode("utf-8", errors="replace").strip()
+        raise SheetsError(err or f"curl завершился с кодом {result.returncode}")
+    return result.stdout.decode("utf-8-sig", errors="replace")
+
+
+def _fetch_url_powershell(url: str) -> str:
+    if sys.platform != "win32":
+        raise OSError("PowerShell доступен только в Windows")
+    safe_url = url.replace("'", "''")
+    command = f"(Invoke-WebRequest -Uri '{safe_url}' -UseBasicParsing).Content"
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Command", command],
+        capture_output=True,
+        timeout=40,
+        creationflags=flags,
+    )
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or b"").decode("utf-8", errors="replace").strip()
+        raise SheetsError(err or f"PowerShell завершился с кодом {result.returncode}")
+    return result.stdout.decode("utf-8-sig", errors="replace")
+
+
+def _fetch_url_requests(url: str, *, verify: bool | str) -> str:
+    session = requests.Session()
+    session.verify = verify
+    session.headers["User-Agent"] = "SheetsHub/1.0"
+    resp = session.get(url, timeout=_HTTP_TIMEOUT)
+    resp.raise_for_status()
+    return resp.content.decode("utf-8-sig", errors="replace")
+
+
+def _fetch_public_csv(spreadsheet_id: str, sheet: str = "") -> list[list[str]]:
+    url = _public_csv_url(spreadsheet_id, sheet)
+    attempts: list[tuple[str, object]] = []
+    if sys.platform == "win32":
+        attempts.extend(
+            [
+                ("curl (Windows)", lambda: _fetch_url_curl(url)),
+                ("PowerShell", lambda: _fetch_url_powershell(url)),
+            ]
+        )
+    configure_tls()
+    attempts.append(("Python", lambda: _fetch_url_requests(url, verify=session_verify_target())))
+    ca = ca_bundle_path()
+    if ca:
+        attempts.append(("Python + cacert.pem", lambda c=ca: _fetch_url_requests(url, verify=c)))
+
+    errors: list[str] = []
+    for label, fetch in attempts:
+        try:
+            return _parse_csv_text(fetch())
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
+
+    raise SheetsError(
+        "Не удалось скачать таблицу ни одним способом.\n"
+        + "\n".join(errors[-3:])
+        + "\n\nОтключите VPN и проверку HTTPS в антивирусе."
+    )
 
 
 def _can_try_public_read(source: SheetRef) -> bool:
