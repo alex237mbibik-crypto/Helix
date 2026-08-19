@@ -24,6 +24,7 @@ from sheets_hub.ssl_setup import ca_bundle_path, configure_tls
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 _RETRY_ATTEMPTS = 5
+_HTTP_TIMEOUT = (10, 30)
 
 
 class SheetsError(Exception):
@@ -98,6 +99,15 @@ class SheetsClient:
         session.mount("https://", adapter)
         session.mount("http://", adapter)
         session.headers["Connection"] = "close"
+        if not getattr(session, "_sheets_hub_timeout_wrapped", False):
+            original_request = session.request
+
+            def request_with_timeout(method, url, **kwargs):
+                kwargs.setdefault("timeout", _HTTP_TIMEOUT)
+                return original_request(method, url, **kwargs)
+
+            session.request = request_with_timeout
+            session._sheets_hub_timeout_wrapped = True
 
     def _call(self, work):
         last: BaseException | None = None
