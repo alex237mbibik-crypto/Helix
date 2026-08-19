@@ -171,6 +171,7 @@ class SheetsHubApp(ctk.CTk):
         self._last_tree_width = 0
         self._sort_desc = False
         self._picked: Record | None = None
+        self._last_error_message = ""
 
         self._build()
         self.after(200, self._try_connect)
@@ -344,6 +345,28 @@ class SheetsHubApp(ctk.CTk):
         self.bind_all("<MouseWheel>", self._on_cal_wheel)
         self.bind_all("<Shift-MouseWheel>", self._on_cal_shift_wheel)
 
+        self.empty_state = ctk.CTkFrame(inner, fg_color=CARD, corner_radius=10)
+        self.empty_state.grid_columnconfigure(0, weight=1)
+        self.empty_title = ctk.CTkLabel(
+            self.empty_state,
+            text="",
+            text_color=TEXT,
+            font=ctk.CTkFont(size=18, weight="bold"),
+        )
+        self.empty_title.grid(row=0, column=0, pady=(120, 8), padx=24)
+        self.empty_text = ctk.CTkLabel(
+            self.empty_state,
+            text="",
+            text_color=MUTED,
+            font=ctk.CTkFont(size=13),
+            justify="center",
+            wraplength=560,
+        )
+        self.empty_text.grid(row=1, column=0, pady=(0, 14), padx=24)
+        self.empty_retry = self._primary_button(self.empty_state, "Повторить", self.reload_all, 140)
+        self.empty_retry.grid(row=2, column=0, pady=(0, 120))
+        self.empty_state.grid_remove()
+
     def _build_info_panel(self, parent: ctk.CTkFrame) -> None:
         self.info_wrap = ctk.CTkFrame(
             parent,
@@ -473,6 +496,20 @@ class SheetsHubApp(ctk.CTk):
     def _set_status(self, text: str) -> None:
         self.status.configure(text=text)
 
+    def _show_empty_state(self, title: str, message: str, *, can_retry: bool) -> None:
+        self.tree.grid_remove()
+        self.vsb.grid_remove()
+        self.cal_canvas.grid_remove()
+        self.cal_vsb.grid_remove()
+        self.cal_hsb.grid_remove()
+        self.empty_title.configure(text=title)
+        self.empty_text.configure(text=message)
+        self.empty_retry.grid() if can_retry else self.empty_retry.grid_remove()
+        self.empty_state.grid(row=0, column=0, columnspan=2, sticky="nsew")
+
+    def _hide_empty_state(self) -> None:
+        self.empty_state.grid_remove()
+
     def _tables(self) -> list[SheetRef]:
         tables = merge_tables(self.config_data.sources, self.config_data.destinations)
         return tables or usable_refs(self.config_data.sources) or usable_refs(self.config_data.destinations)
@@ -562,6 +599,7 @@ class SheetsHubApp(ctk.CTk):
             self._try_connect()
             if not self.client:
                 return
+        self._last_error_message = ""
         sources = self._valid_sources()
         if not sources:
             self.records = []
@@ -577,6 +615,7 @@ class SheetsHubApp(ctk.CTk):
 
         def done(result):
             records, errors = result
+            self._last_error_message = "\n\n".join(errors[:8]) if errors else ""
             booking = [item for item in records if item.kind != KIND_INFO]
             self.info_records = [item for item in records if item.kind == KIND_INFO]
             raw_count = len(booking)
@@ -627,6 +666,23 @@ class SheetsHubApp(ctk.CTk):
 
     def _render_table(self) -> None:
         records = self._filtered_records()
+        if not records:
+            title = "Нет данных"
+            message = "Пока нечего показать. Проверьте ссылку на таблицу и имя листа в «Таблицы»."
+            can_retry = False
+            if self._last_error_message:
+                title = "Нет связи с Google"
+                message = (
+                    "Таблица не загрузилась из Google.\n"
+                    "Отключите VPN, выключите проверку HTTPS в антивирусе и нажмите «Повторить»."
+                )
+                can_retry = True
+            self._show_empty_state(title, message, can_retry=can_retry)
+            self._visible = []
+            self.count_label.configure(text="0")
+            return
+
+        self._hide_empty_state()
         calendar = [item for item in records if item.layout == "calendar"]
         if calendar:
             self._show_calendar(True)
