@@ -172,6 +172,7 @@ class SheetsHubApp(ctk.CTk):
         self._sort_desc = False
         self._picked: Record | None = None
         self._last_error_message = ""
+        self.source_filter_var = tk.StringVar(value="Все таблицы")
 
         self._build()
         self.after(200, self._try_connect)
@@ -271,19 +272,38 @@ class SheetsHubApp(ctk.CTk):
 
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_: self._render_views())
+        self.source_filter_var.trace_add("write", lambda *_: self._render_views())
         _styled_entry(
             filter_area,
             "Поиск по имени, дате или телефону",
             height=32,
             textvariable=self.search_var,
-        ).grid(row=0, column=0, sticky="ew")
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.source_filter = ctk.CTkOptionMenu(
+            filter_area,
+            values=["Все таблицы"],
+            variable=self.source_filter_var,
+            width=220,
+            height=32,
+            corner_radius=6,
+            fg_color=CARD,
+            button_color=HOVER,
+            button_hover_color=LINE,
+            text_color=TEXT,
+            dropdown_fg_color=CARD,
+            dropdown_text_color=TEXT,
+            dropdown_hover_color=HOVER,
+            font=ctk.CTkFont(size=13),
+            command=lambda _value: self._render_views(),
+        )
+        self.source_filter.grid(row=0, column=1, sticky="e")
         ctk.CTkLabel(
             filter_area,
             text="Нажмите ячейку, чтобы записать имя. Пустое поле — слот свободен.",
             text_color=MUTED,
             font=ctk.CTkFont(size=12),
             anchor="w",
-        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
     def _build_status(self, parent: ctk.CTkFrame) -> None:
         self.status = ctk.CTkLabel(
@@ -618,6 +638,7 @@ class SheetsHubApp(ctk.CTk):
             self._last_error_message = "\n\n".join(errors[:8]) if errors else ""
             booking = [item for item in records if item.kind != KIND_INFO]
             self.info_records = [item for item in records if item.kind == KIND_INFO]
+            self._refresh_source_filter_options(booking, self.info_records)
             raw_count = len(booking)
             self.records = explode_records(booking)
             self._render_table()
@@ -652,8 +673,11 @@ class SheetsHubApp(ctk.CTk):
 
     def _filtered_records(self) -> list[Record]:
         query = self.search_var.get().strip().lower()
+        source_name = self.source_filter_var.get().strip()
         out = []
         for record in self.records:
+            if source_name and source_name != "Все таблицы" and record.source_name != source_name:
+                continue
             blob = " ".join([record.source_name, *record.values.values()]).lower()
             if query and query not in blob:
                 continue
@@ -843,10 +867,23 @@ class SheetsHubApp(ctk.CTk):
         self._render_table()
         self._render_info()
 
+    def _refresh_source_filter_options(self, booking: list[Record], info: list[Record]) -> None:
+        names = sorted({record.source_name for record in [*booking, *info] if record.source_name})
+        values = ["Все таблицы", *names]
+        current = self.source_filter_var.get().strip() or "Все таблицы"
+        self.source_filter.configure(values=values)
+        if current not in values:
+            self.source_filter_var.set("Все таблицы")
+        else:
+            self.source_filter_var.set(current)
+
     def _filtered_info(self) -> list[Record]:
         query = self.search_var.get().strip().lower()
+        source_name = self.source_filter_var.get().strip()
         out: list[Record] = []
         for record in self.info_records:
+            if source_name and source_name != "Все таблицы" and record.source_name != source_name:
+                continue
             blob = " ".join([record.source_name, *record.values.values()]).lower()
             if query and query not in blob:
                 continue
