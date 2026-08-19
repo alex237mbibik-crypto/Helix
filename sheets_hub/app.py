@@ -269,6 +269,7 @@ class SheetsHubApp(ctk.CTk):
         filter_area = ctk.CTkFrame(parent, fg_color="transparent")
         filter_area.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 2))
         filter_area.grid_columnconfigure(0, weight=1)
+        filter_area.grid_columnconfigure(1, weight=0)
 
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_: self._render_views())
@@ -279,24 +280,35 @@ class SheetsHubApp(ctk.CTk):
             height=32,
             textvariable=self.search_var,
         ).grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        self.source_filter = ctk.CTkOptionMenu(
-            filter_area,
+        source_box = ctk.CTkFrame(filter_area, fg_color="transparent")
+        source_box.grid(row=0, column=1, sticky="e")
+        ctk.CTkLabel(
+            source_box,
+            text="Таблица",
+            text_color=MUTED,
+            font=ctk.CTkFont(size=12),
+        ).pack(side="left", padx=(0, 8))
+        self.source_filter = ctk.CTkComboBox(
+            source_box,
             values=["Все таблицы"],
             variable=self.source_filter_var,
-            width=220,
+            width=190,
             height=32,
             corner_radius=6,
+            border_width=1,
+            border_color=BORDER,
             fg_color=CARD,
-            button_color=HOVER,
-            button_hover_color=LINE,
+            button_color=LINE,
+            button_hover_color=HOVER,
             text_color=TEXT,
             dropdown_fg_color=CARD,
             dropdown_text_color=TEXT,
             dropdown_hover_color=HOVER,
             font=ctk.CTkFont(size=13),
+            state="readonly",
             command=lambda _value: self._render_views(),
         )
-        self.source_filter.grid(row=0, column=1, sticky="e")
+        self.source_filter.pack(side="left")
         ctk.CTkLabel(
             filter_area,
             text="Нажмите ячейку, чтобы записать имя. Пустое поле — слот свободен.",
