@@ -623,6 +623,8 @@ class SheetsHubApp(ctk.CTk):
             self._render_table()
             self._render_info()
             extra = f" · {len(errors)} ошибок" if errors else ""
+            if getattr(self.client, "read_only_public", False):
+                extra += " · только чтение (обход SSL)"
             booked = sum(1 for item in self.records if item.layout == "calendar" and item.values.get("Статус") == "Занято")
             slots = sum(1 for item in self.records if item.layout == "calendar")
             info_note = f" · справка: {len(self.info_records)}" if self.info_records else ""
@@ -637,6 +639,8 @@ class SheetsHubApp(ctk.CTk):
                 )
             if errors:
                 messagebox.showwarning("Часть таблиц не загрузилась", "\n\n".join(errors[:8]))
+            elif getattr(self.client, "read_notes", None):
+                messagebox.showinfo("Календарь загружен", "\n\n".join(self.client.read_notes[:3]))
 
         self._run_bg(work, done)
 

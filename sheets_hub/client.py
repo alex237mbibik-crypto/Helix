@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import csv
+import io
 import time
+from dataclasses import replace
 from pathlib import Path
+from urllib.parse import quote
 
 import gspread
+import requests
 from google.auth.transport.requests import AuthorizedSession
 from google.oauth2.service_account import Credentials
 from requests.adapters import HTTPAdapter
@@ -14,6 +19,7 @@ from sheets_hub.config import (
     KIND_INFO,
     KIND_RECORDS,
     SheetRef,
+    expand_ref_locally,
     is_info_ref,
     parse_spreadsheet_id,
     requested_sheet_titles,
@@ -52,10 +58,42 @@ def _friendly_error(exc: BaseException) -> SheetsError:
     if _is_network_error(exc):
         return SheetsError(
             "Не удалось подключиться к Google (обрыв защищённого соединения).\n"
+            "Это не проблема доступа к таблице — роль «Редактор» тут ни при чём.\n"
             "Проверьте интернет, отключите VPN, в антивирусе выключите проверку HTTPS.\n"
             "В Google Cloud у проекта должен быть включён Google Sheets API."
         )
     return SheetsError(str(exc))
+
+
+def _public_session() -> requests.Session:
+    configure_tls()
+    session = requests.Session()
+    session.verify = session_verify_target()
+    session.headers["User-Agent"] = "SheetsHub/1.0"
+    return session
+
+
+def _fetch_public_csv(spreadsheet_id: str, sheet: str = "") -> list[list[str]]:
+    if sheet.strip():
+        url = (
+            f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export"
+            f"?format=csv&sheet={quote(sheet.strip())}"
+        )
+    else:
+        url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export?format=csv"
+    try:
+        resp = _public_session().get(url, timeout=_HTTP_TIMEOUT)
+        resp.raise_for_status()
+        text = resp.content.decode("utf-8-sig", errors="replace")
+    except Exception as exc:
+        raise SheetsError(f"Публичное чтение таблицы не удалось: {exc}") from exc
+    rows = list(csv.reader(io.StringIO(text)))
+    return [[(cell or "").replace("\u202f", " ").strip() for cell in row] for row in rows]
+
+
+def _can_try_public_read(source: SheetRef) -> bool:
+    spreadsheet_id = source.normalized_id()
+    return bool(spreadsheet_id) and not spreadsheet_id.upper().startswith("PASTE_")
 
 
 class SheetsClient:
@@ -68,6 +106,8 @@ class SheetsClient:
                 "и укажите файл ключа сервисного аккаунта из Google Cloud."
             )
         self._credentials_path = credentials_path
+        self.read_only_public = False
+        self.read_notes: list[str] = []
         self._connect()
 
     def _connect(self) -> None:
@@ -178,10 +218,8 @@ class SheetsClient:
             return []
         return [cell.strip() for cell in rows[0] if cell.strip()]
 
-    def fetch_source(self, source: SheetRef) -> list[Record]:
+    def _records_from_rows(self, source: SheetRef, rows: list[list[str]]) -> list[Record]:
         spreadsheet_id = source.normalized_id()
-        worksheet = self._open_worksheet(source)
-        rows = self._sheet_values(worksheet)
         if not rows:
             return []
 
@@ -226,6 +264,22 @@ class SheetsClient:
             )
         return records
 
+    def _fetch_source_public(self, source: SheetRef) -> list[Record]:
+        spreadsheet_id = source.normalized_id()
+        sheet = (source.sheet or "").strip()
+        titles = requested_sheet_titles(source.sheet)
+        if titles and len(titles) == 1:
+            sheet = titles[0]
+        rows = _fetch_public_csv(spreadsheet_id, sheet)
+        part = replace(source, sheet=sheet or source.sheet or "лист 1")
+        return self._records_from_rows(part, rows)
+
+    def fetch_source(self, source: SheetRef) -> list[Record]:
+        spreadsheet_id = source.normalized_id()
+        worksheet = self._open_worksheet(source)
+        rows = self._sheet_values(worksheet)
+        return self._records_from_rows(source, rows)
+
     def expand_source(self, source: SheetRef) -> list[SheetRef]:
         available = self.list_sheets(source.spreadsheet_id)
         if not available:
@@ -257,9 +311,16 @@ class SheetsClient:
             )
         return expanded
 
+    def _should_try_public_read(self, exc: BaseException) -> bool:
+        if isinstance(exc, SheetsError):
+            return "подключиться к Google" in str(exc) or "защищённого соединения" in str(exc)
+        return _is_network_error(exc)
+
     def fetch_all(self, sources: list[SheetRef]) -> tuple[list[Record], list[str]]:
         records: list[Record] = []
         errors: list[str] = []
+        self.read_only_public = False
+        self.read_notes = []
         for source in sources:
             if source.is_placeholder():
                 continue
@@ -267,8 +328,22 @@ class SheetsClient:
                 for part in self.expand_source(source):
                     records.extend(self.fetch_source(part))
             except Exception as exc:
-                msg = str(exc) if isinstance(exc, SheetsError) else str(_friendly_error(exc))
-                errors.append(f"{source.name}: {msg}")
+                if _can_try_public_read(source) and self._should_try_public_read(exc):
+                    try:
+                        for part in expand_ref_locally(source):
+                            records.extend(self._fetch_source_public(part))
+                        self.read_only_public = True
+                        note = (
+                            f"{source.name}: Google API недоступен — календарь прочитан напрямую. "
+                            "Запись в таблицу может не работать, пока не починится SSL."
+                        )
+                        self.read_notes.append(note)
+                    except Exception as pub_exc:
+                        msg = str(pub_exc) if isinstance(pub_exc, SheetsError) else str(_friendly_error(pub_exc))
+                        errors.append(f"{source.name}: {msg}")
+                else:
+                    msg = str(exc) if isinstance(exc, SheetsError) else str(_friendly_error(exc))
+                    errors.append(f"{source.name}: {msg}")
         return records, errors
 
     def update_cell(self, record: Record, field: str, value: str) -> None:
