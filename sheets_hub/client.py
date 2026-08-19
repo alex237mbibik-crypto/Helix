@@ -3,8 +3,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-import certifi
 import gspread
+from google.auth.transport.requests import AuthorizedSession
 from google.oauth2.service_account import Credentials
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -20,7 +20,7 @@ from sheets_hub.config import (
 )
 from sheets_hub.models import Record
 from sheets_hub.split import address_key, service_key
-from sheets_hub.ssl_setup import ca_bundle_path, configure_tls
+from sheets_hub.ssl_setup import configure_tls, session_verify_target
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 _RETRY_ATTEMPTS = 5
@@ -73,18 +73,14 @@ class SheetsClient:
     def _connect(self) -> None:
         configure_tls()
         creds = Credentials.from_service_account_file(str(self._credentials_path), scopes=SCOPES)
-        self._gc = gspread.authorize(creds)
-        self._tune_session()
+        session = self._build_session(creds)
+        self._gc = gspread.authorize(None, session=session)
+        self._gc.set_timeout(_HTTP_TIMEOUT)
         self.service_email = creds.service_account_email
 
-    def _tune_session(self) -> None:
-        session = getattr(getattr(self._gc, "http_client", None), "session", None)
-        if session is None:
-            session = getattr(self._gc, "session", None)
-        if session is None:
-            return
-        ca = ca_bundle_path() or certifi.where()
-        session.verify = ca
+    def _build_session(self, creds: Credentials) -> AuthorizedSession:
+        session = AuthorizedSession(creds)
+        session.verify = session_verify_target()
         retry = Retry(
             total=5,
             connect=5,
@@ -99,15 +95,7 @@ class SheetsClient:
         session.mount("https://", adapter)
         session.mount("http://", adapter)
         session.headers["Connection"] = "close"
-        if not getattr(session, "_sheets_hub_timeout_wrapped", False):
-            original_request = session.request
-
-            def request_with_timeout(method, url, **kwargs):
-                kwargs.setdefault("timeout", _HTTP_TIMEOUT)
-                return original_request(method, url, **kwargs)
-
-            session.request = request_with_timeout
-            session._sheets_hub_timeout_wrapped = True
+        return session
 
     def _call(self, work):
         last: BaseException | None = None
@@ -279,7 +267,8 @@ class SheetsClient:
                 for part in self.expand_source(source):
                     records.extend(self.fetch_source(part))
             except Exception as exc:
-                errors.append(f"{source.name}: {_friendly_error(exc)}")
+                msg = str(exc) if isinstance(exc, SheetsError) else str(_friendly_error(exc))
+                errors.append(f"{source.name}: {msg}")
         return records, errors
 
     def update_cell(self, record: Record, field: str, value: str) -> None:

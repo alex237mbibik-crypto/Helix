@@ -672,9 +672,16 @@ class SheetsHubApp(ctk.CTk):
             can_retry = False
             if self._last_error_message:
                 title = "Нет связи с Google"
+                share = ""
+                if self.client and getattr(self.client, "service_email", ""):
+                    share = (
+                        f"\n\nТаблицу откройте для доступа:\n{self.client.service_email}\n"
+                        "(роль «Редактор» в Google Таблице)."
+                    )
                 message = (
                     "Таблица не загрузилась из Google.\n"
                     "Отключите VPN, выключите проверку HTTPS в антивирусе и нажмите «Повторить»."
+                    f"{share}"
                 )
                 can_retry = True
             self._show_empty_state(title, message, can_retry=can_retry)
