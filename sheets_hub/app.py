@@ -35,8 +35,12 @@ GREEN_HOVER = "#137333"
 GREEN_SOFT = "#e6f4ea"
 SLOT_GREEN = "#7cb342"
 SLOT_BOOKED = "#558b2f"
-SLOT_BLOCKED = "#ffffff"
+SLOT_BLOCKED = "#f1f3f4"
 SLOT_TIME = "#f1f3f4"
+SLOT_OUTLINE = "#000000"
+CAL_TIME_W = 64
+CAL_DATE_W = 128
+CAL_ROW_H = 30
 INFO_TONES = {
     "warn": ("#f8d7c4", "#c5221f"),
     "ok": ("#7cb342", "#202124"),
@@ -294,15 +298,23 @@ class SheetsHubApp(ctk.CTk):
             text_color=MUTED,
             font=ctk.CTkFont(size=12),
         ).pack(side="left", padx=(0, 8))
-        self.source_filter = ctk.CTkComboBox(
+        # Общая обводка вокруг текста и стрелки (у CTkComboBox кнопка иначе снаружи рамки).
+        combo_wrap = ctk.CTkFrame(
             source_box,
-            values=[""],
-            variable=self.source_filter_var,
-            width=190,
-            height=32,
+            fg_color=CARD,
             corner_radius=6,
             border_width=1,
             border_color=BORDER,
+        )
+        combo_wrap.pack(side="left")
+        self.source_filter = ctk.CTkComboBox(
+            combo_wrap,
+            values=[""],
+            variable=self.source_filter_var,
+            width=190,
+            height=30,
+            corner_radius=5,
+            border_width=0,
             fg_color=CARD,
             button_color=CARD,
             button_hover_color=HOVER,
@@ -314,7 +326,7 @@ class SheetsHubApp(ctk.CTk):
             state="readonly",
             command=lambda _value: self._on_source_filter_changed(),
         )
-        self.source_filter.pack(side="left")
+        self.source_filter.pack(side="left", padx=1, pady=1)
         self.source_filter.set("Таблица")
         ctk.CTkLabel(
             filter_area,
@@ -426,8 +438,10 @@ class SheetsHubApp(ctk.CTk):
             widget.bind("<Shift-MouseWheel>", self._on_cal_shift_wheel)
         self.bind_all("<MouseWheel>", self._on_cal_wheel)
         self.bind_all("<Shift-MouseWheel>", self._on_cal_shift_wheel)
-        self._cal_time_col_w = 64
+        self._cal_time_col_w = CAL_TIME_W
+        self._cal_date_w = CAL_DATE_W
         self._cal_date_cols = 0
+        self._cal_total_w = 0
 
         self.empty_state = ctk.CTkFrame(inner, fg_color=CARD, corner_radius=10)
         self.empty_state.grid_columnconfigure(0, weight=1)
@@ -558,6 +572,7 @@ class SheetsHubApp(ctk.CTk):
 
     def _sync_calendar_widths(self) -> None:
         req_w = max(
+            getattr(self, "_cal_total_w", 0),
             self.cal_host.winfo_reqwidth(),
             self.cal_header_host.winfo_reqwidth(),
             self.cal_canvas.winfo_width(),
@@ -920,6 +935,8 @@ class SheetsHubApp(ctk.CTk):
                 bg, fg = (("#e8f0e0", MUTED) if query else (SLOT_GREEN, "#1b5e20"))
             try:
                 label.configure(bg=bg, fg=fg)
+                cell = getattr(label, "_cell", None) or label.master
+                cell.configure(bg=bg)
             except tk.TclError:
                 pass
 
@@ -932,22 +949,26 @@ class SheetsHubApp(ctk.CTk):
         if status == "Не записывать":
             text = "не записывать"
             bold = False
+            bg, fg = SLOT_BLOCKED, MUTED
         elif status == "Занято":
             text = record.values.get("Клиент", "").strip() or "занято"
             bold = True
+            bg, fg = SLOT_GREEN, TEXT
         else:
             text = "запись"
             bold = False
+            bg, fg = SLOT_GREEN, "#1b5e20"
         try:
             label._record = record
-            label.configure(text=text, font=_ui_font(11, bold=bold))
+            label.configure(text=text, font=_ui_font(11, bold=bold), bg=bg, fg=fg)
+            cell = getattr(label, "_cell", None) or label.master
+            cell.configure(bg=bg)
         except tk.TclError:
             return False
         calendar = [item for item in self._source_records() if item.layout == "calendar"]
         self._calendar_fp = self._calendar_fingerprint(calendar)
         self._apply_calendar_search_styles()
         return True
-
     def _columns(self, records: list[Record]) -> list[str]:
         seen: list[str] = []
         for record in records:
@@ -1081,58 +1102,94 @@ class SheetsHubApp(ctk.CTk):
         header = self.cal_header_host
         body = self.cal_host
         time_w = self._cal_time_col_w
-        date_w = 112
+        date_w = self._cal_date_w
+        self._cal_total_w = time_w + date_w * max(len(dates), 1)
 
-        header.grid_columnconfigure(0, weight=0, minsize=time_w)
-        body.grid_columnconfigure(0, weight=0, minsize=time_w)
-        for col, _date in enumerate(dates, start=1):
-            header.grid_columnconfigure(col, weight=0, minsize=date_w)
-            body.grid_columnconfigure(col, weight=0, minsize=date_w)
+        # Одинаковая ширина столбцов у шапки и сетки — иначе длинные имена разъезжают даты.
+        for host in (header, body):
+            host.grid_columnconfigure(0, minsize=time_w, weight=0)
+            for col in range(1, len(dates) + 1):
+                host.grid_columnconfigure(col, minsize=date_w, weight=0)
 
-        tk.Label(
+        self._cal_header_cell(
             header,
+            0,
+            0,
+            time_w,
             text="Время",
             bg=GREEN,
             fg="#ffffff",
             font=_ui_font(10, bold=True),
-            padx=6,
-            pady=6,
-            width=6,
-        ).grid(row=0, column=0, sticky="nsew", padx=1, pady=1)
-
+        )
         for col, date in enumerate(dates, start=1):
             weekend = any(part in date.lower() for part in ("сб", "вс"))
-            tk.Label(
+            self._cal_header_cell(
                 header,
+                0,
+                col,
+                date_w,
                 text=date,
                 bg=GREEN,
                 fg="#fce8e6" if weekend else "#ffffff",
                 font=_ui_font(10, bold=True),
-                padx=4,
-                pady=6,
-                wraplength=date_w - 8,
-                width=12,
-            ).grid(row=0, column=col, sticky="nsew", padx=1, pady=1)
+                wraplength=date_w - 10,
+            )
 
         for row, time in enumerate(times):
-            body.grid_rowconfigure(row, weight=1, minsize=28)
-            tk.Label(
+            body.grid_rowconfigure(row, weight=1, minsize=CAL_ROW_H)
+            self._cal_body_cell(
                 body,
+                row,
+                0,
+                time_w,
                 text=_short_time(time),
                 bg=SLOT_TIME,
                 fg=TEXT,
                 font=_ui_font(12, bold=True),
-                padx=6,
-                pady=2,
-                width=6,
-            ).grid(row=row, column=0, sticky="nsew", padx=1, pady=1)
+                anchor="center",
+                justify="center",
+            )
             for col, date in enumerate(dates, start=1):
                 record = cell_map.get((time, date))
-                self._draw_slot(body, record, row, col)
+                self._draw_slot(body, record, row, col, date_w)
 
-    def _draw_slot(self, parent: tk.Frame, record: Record | None, row: int, col: int) -> None:
+    def _cal_header_cell(self, parent: tk.Frame, row: int, col: int, width: int, **kwargs) -> tk.Label:
+        cell = tk.Frame(
+            parent,
+            width=width,
+            height=34,
+            bg=kwargs.get("bg", GREEN),
+            highlightthickness=1,
+            highlightbackground=SLOT_OUTLINE,
+            highlightcolor=SLOT_OUTLINE,
+            bd=0,
+        )
+        cell.grid(row=row, column=col, sticky="nsew")
+        cell.grid_propagate(False)
+        label = tk.Label(cell, padx=4, pady=6, **kwargs)
+        label.pack(fill="both", expand=True)
+        return label
+
+    def _cal_body_cell(self, parent: tk.Frame, row: int, col: int, width: int, **kwargs) -> tk.Label:
+        cell = tk.Frame(
+            parent,
+            width=width,
+            height=CAL_ROW_H,
+            bg=kwargs.get("bg", CARD),
+            highlightthickness=1,
+            highlightbackground=SLOT_OUTLINE,
+            highlightcolor=SLOT_OUTLINE,
+            bd=0,
+        )
+        cell.grid(row=row, column=col, sticky="nsew")
+        cell.grid_propagate(False)
+        label = tk.Label(cell, padx=4, pady=2, **kwargs)
+        label.pack(fill="both", expand=True)
+        return label
+
+    def _draw_slot(self, parent: tk.Frame, record: Record | None, row: int, col: int, width: int) -> None:
         if record is None:
-            tk.Label(parent, text="", bg="#eeeeee").grid(row=row, column=col, sticky="nsew", padx=1, pady=1)
+            self._cal_body_cell(parent, row, col, width, text="", bg="#eeeeee")
             return
         status = record.values.get("Статус", "")
         if status == "Не записывать":
@@ -1142,20 +1199,21 @@ class SheetsHubApp(ctk.CTk):
             bg, fg = SLOT_GREEN, TEXT
         else:
             bg, fg, text = SLOT_GREEN, "#1b5e20", "запись"
-        label = tk.Label(
+        label = self._cal_body_cell(
             parent,
+            row,
+            col,
+            width,
             text=text,
             bg=bg,
             fg=fg,
             font=_ui_font(11, bold=status == "Занято"),
-            wraplength=0,
+            wraplength=width - 10,
             justify="left",
-            padx=4,
-            pady=2,
             anchor="w",
         )
-        label.grid(row=row, column=col, sticky="nsew", padx=1, pady=1)
         label._record = record
+        label._cell = label.master
         self._slot_labels[(record.values.get("Время", ""), record.values.get("Дата", ""))] = label
         label.bind("<Button-1>", lambda _event, item=record: self._edit_calendar_cell(item))
 
