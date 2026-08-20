@@ -24,7 +24,6 @@ from sheets_hub.config import (
     KIND_RECORDS,
     SheetRef,
     companion_info_titles,
-    expand_ref_locally,
     is_info_ref,
     is_info_title,
     parse_spreadsheet_id,
@@ -72,7 +71,13 @@ def _friendly_error(exc: BaseException) -> SheetsError:
     return SheetsError(str(exc))
 
 
-def _public_csv_url(spreadsheet_id: str, sheet: str = "") -> str:
+def _public_csv_url(spreadsheet_id: str, sheet: str = "", gid: str = "") -> str:
+    # gid надёжнее имени: «АВГУСТ 2026 (ГИНЕКОЛОГ)» по sheet= часто отдаёт первый лист.
+    if str(gid).strip():
+        return (
+            f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export"
+            f"?format=csv&gid={quote(str(gid).strip())}"
+        )
     if sheet.strip():
         return (
             f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export"
@@ -146,8 +151,9 @@ def _fetch_url_requests(url: str, *, verify: bool | str) -> str:
     return resp.content.decode("utf-8-sig", errors="replace")
 
 
-def _fetch_public_csv(spreadsheet_id: str, sheet: str = "") -> list[list[str]]:
-    url = _public_csv_url(spreadsheet_id, sheet)
+def _fetch_public_csv(spreadsheet_id: str, sheet: str = "", gid: str = "") -> list[list[str]]:
+    resolved_gid = str(gid or "").strip() or _lookup_sheet_gid(spreadsheet_id, sheet)
+    url = _public_csv_url(spreadsheet_id, sheet=sheet if not resolved_gid else "", gid=resolved_gid)
     # Сначала самые быстрые варианты для Windows с битым SSL.
     attempts: list[tuple[str, object]] = []
     if sys.platform == "win32":
@@ -189,11 +195,25 @@ def _fetch_public_csv(spreadsheet_id: str, sheet: str = "") -> list[list[str]]:
     )
 
 
-_SHEET_TITLE_RE = re.compile(
-    r'\["([^"]{1,120})",\d{5,}(?:,\d+){0,6}\]|'
-    r'"name"\s*:\s*"([^"\\]{1,120})"[^}]{0,80}"sheetId"\s*:',
-    re.IGNORECASE,
-)
+# spreadsheet_id -> {sheet_title_lower: gid}
+_SHEET_GID_CACHE: dict[str, dict[str, str]] = {}
+
+
+def _lookup_sheet_gid(spreadsheet_id: str, sheet: str) -> str:
+    raw = (sheet or "").strip()
+    if not raw:
+        return ""
+    mapping = _SHEET_GID_CACHE.get(spreadsheet_id) or {}
+    if raw in mapping:
+        return mapping[raw]
+    low = raw.lower()
+    for title, gid in mapping.items():
+        if title.lower() == low:
+            return gid
+    for title, gid in mapping.items():
+        if low in title.lower() or title.lower() in low:
+            return gid
+    return ""
 
 
 def _fetch_url_text(url: str) -> str:
@@ -212,31 +232,37 @@ def _fetch_url_text(url: str) -> str:
         return _fetch_url_requests(url, verify=session_verify_target())
 
 
-def _list_public_sheet_titles(spreadsheet_id: str) -> list[str]:
-    """Имена вкладок без Sheets API (из публичной HTML-страницы)."""
-    urls = (
-        f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/htmlview",
-        f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit",
+def _list_public_sheets(spreadsheet_id: str) -> list[tuple[str, str]]:
+    """[(title, gid), ...] из публичной htmlview — без Sheets API."""
+    url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/htmlview"
+    try:
+        text = _fetch_url_text(url)
+    except Exception:
+        return []
+    pairs = re.findall(
+        r'items\.push\(\{\s*name:\s*"([^"]+)"\s*,\s*pageUrl:\s*"([^"]+)"',
+        text,
     )
-    titles: list[str] = []
+    out: list[tuple[str, str]] = []
     seen: set[str] = set()
-    for url in urls:
-        try:
-            text = _fetch_url_text(url)
-        except Exception:
+    gid_map: dict[str, str] = {}
+    for name, page_url in pairs:
+        title = (name or "").strip()
+        if not title or title.lower() in seen:
             continue
-        for match in _SHEET_TITLE_RE.finditer(text):
-            name = (match.group(1) or match.group(2) or "").strip()
-            if not name or name.lower() in seen:
-                continue
-            # Отсекаем мусор из HTML.
-            if any(bad in name.lower() for bad in ("http", "function", "null", "<", ">")):
-                continue
-            seen.add(name.lower())
-            titles.append(name)
-        if titles:
-            break
-    return titles
+        gid_match = re.search(r"gid=(\d+)", page_url.replace("\\/", "/"))
+        gid = gid_match.group(1) if gid_match else ""
+        seen.add(title.lower())
+        out.append((title, gid))
+        if gid:
+            gid_map[title] = gid
+    if gid_map:
+        _SHEET_GID_CACHE[spreadsheet_id] = gid_map
+    return out
+
+
+def _list_public_sheet_titles(spreadsheet_id: str) -> list[str]:
+    return [title for title, _gid in _list_public_sheets(spreadsheet_id)]
 
 
 def _parts_for_source(source: SheetRef, available: list[str] | None = None) -> list[SheetRef]:
@@ -256,6 +282,11 @@ def _parts_for_source(source: SheetRef, available: list[str] | None = None) -> l
     if not titles:
         return [source]
     calendar_title = prefer_sheet_title(titles, source.sheet)
+    # Не брать справку как «календарь», если есть месячный лист.
+    if is_info_title(calendar_title):
+        non_info = [title for title in titles if not is_info_title(title)]
+        if non_info:
+            calendar_title = prefer_sheet_title(non_info, source.sheet)
     parts = [replace(source, sheet=calendar_title)]
     for title in companion_info_titles(titles, calendar_title):
         parts.append(replace(source, sheet=title, kind=KIND_INFO))
@@ -471,9 +502,10 @@ class SheetsClient:
         return _is_network_error(exc)
 
     def _load_source_public(self, source: SheetRef) -> list[Record]:
+        sid = source.normalized_id()
         available: list[str] = []
         try:
-            available = _list_public_sheet_titles(source.normalized_id())
+            available = _list_public_sheet_titles(sid)
         except Exception:
             available = []
         if not available:
@@ -481,15 +513,7 @@ class SheetsClient:
                 available = self.list_sheets(source.spreadsheet_id)
             except Exception:
                 available = []
-        if available:
-            parts = _parts_for_source(source, available)
-        else:
-            # Без списка вкладок — календарь из конфига / первая вкладка + типичные справки.
-            parts = list(expand_ref_locally(source))
-            cal = (parts[0].sheet or "").strip()
-            for name in ("УСЛУГИ врача", "Услуги врача", "Информация", "Справка"):
-                if name.lower() != cal.lower():
-                    parts.append(replace(source, sheet=name, kind=KIND_INFO))
+        parts = _parts_for_source(source, available or None)
         loaded: list[Record] = []
         errors: list[Exception] = []
         for part in parts:
@@ -499,6 +523,35 @@ class SheetsClient:
                 if is_info_ref(part) or is_info_title(part.sheet):
                     continue
                 errors.append(exc)
+
+        has_calendar = any(item.layout == "calendar" for item in loaded)
+        # Если взяли только «УСЛУГИ», а календарь на другой вкладке — догружаем.
+        if not has_calendar and available:
+            for title in available:
+                if is_info_title(title):
+                    continue
+                if any(part.sheet == title for part in parts):
+                    continue
+                try:
+                    extra = self._fetch_source_public(replace(source, sheet=title))
+                except Exception:
+                    continue
+                if any(item.layout == "calendar" for item in extra):
+                    loaded.extend(extra)
+                    has_calendar = True
+                    for info_title in companion_info_titles(available, title):
+                        if any(part.sheet == info_title for part in parts):
+                            continue
+                        try:
+                            loaded.extend(
+                                self._fetch_source_public(
+                                    replace(source, sheet=info_title, kind=KIND_INFO)
+                                )
+                            )
+                        except Exception:
+                            pass
+                    break
+
         if loaded:
             return loaded
         if errors:

@@ -19,6 +19,7 @@ from sheets_hub.config import (
     SheetRef,
     credentials_email,
     install_credentials,
+    is_info_title,
     load_config,
     merge_tables,
     save_config,
@@ -741,12 +742,7 @@ class SheetsHubApp(ctk.CTk):
         if not selected or selected == "Таблица":
             self._schedule_render(immediate=True)
             return
-        # Уже показана эта таблица — просто перерисовать.
-        if any(record.source_name == selected for record in self.records) or any(
-            record.source_name == selected for record in self.info_records
-        ):
-            self._schedule_render(immediate=True)
-            return
+        # Всегда перечитываем выбранную таблицу — иначе в справке может остаться чужое.
         if self.client:
             self.reload_all()
     def _try_connect(self, prompt_key: bool = True) -> None:
@@ -853,7 +849,7 @@ class SheetsHubApp(ctk.CTk):
             records, errors = result
             self._last_error_message = "\n\n".join(errors[:8]) if errors else ""
             booking = [item for item in records if item.kind != KIND_INFO]
-            self.info_records = [item for item in records if item.kind == KIND_INFO]
+            self.info_records = self._dedupe_info([item for item in records if item.kind == KIND_INFO])
             self._sync_source_filter_from_config()
             if selected_name and selected_name in [
                 ref.name for ref in self._tables() if not ref.is_placeholder()
@@ -1293,27 +1289,60 @@ class SheetsHubApp(ctk.CTk):
             return item.spreadsheet_id, item.sheet
         return None
 
+    def _selected_spreadsheet_id(self) -> str:
+        sources = self._selected_sources()
+        if not sources:
+            return ""
+        try:
+            return sources[0].normalized_id()
+        except ValueError:
+            return ""
+
+    def _dedupe_info(self, records: list[Record]) -> list[Record]:
+        seen: set[str] = set()
+        out: list[Record] = []
+        for record in records:
+            text = str(record.values.get("Текст") or "").strip()
+            if not text:
+                text = "\n".join(
+                    str(value).strip()
+                    for key, value in record.values.items()
+                    if str(value).strip() and key not in HIDDEN and not str(key).startswith("_")
+                )
+            key = " ".join(text.lower().split())
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(record)
+        return out
+
     def _filtered_info(self) -> list[Record]:
         query = self.search_var.get().strip().lower()
         source_name = self.source_filter_var.get().strip()
         sheet_key = self._active_sheet_key()
-        active_sid = sheet_key[0] if sheet_key else ""
+        selected_sid = self._selected_spreadsheet_id()
         out: list[Record] = []
+        seen: set[str] = set()
         for record in self.info_records:
-            if source_name and record.source_name != source_name:
+            # Только выбранная таблица из списка «Таблица».
+            if source_name and source_name != "Таблица" and record.source_name != source_name:
                 continue
-            # Справка с того же календаря или соседняя вкладка той же книги (УСЛУГИ и т.п.).
+            if selected_sid and record.spreadsheet_id != selected_sid:
+                continue
             if sheet_key:
                 same_sheet = (record.spreadsheet_id, record.sheet) == sheet_key
-                same_book_info = (
-                    record.spreadsheet_id == active_sid
-                    and record.sheet != sheet_key[1]
-                )
-                if not same_sheet and not same_book_info:
+                # Соседняя вкладка-справка той же книги (например «УСЛУГИ врача»).
+                companion = record.spreadsheet_id == sheet_key[0] and is_info_title(record.sheet)
+                if not same_sheet and not companion:
                     continue
-            blob = " ".join([record.source_name, *record.values.values()]).lower()
+            text = str(record.values.get("Текст") or "").strip()
+            blob = " ".join([record.source_name, text, *record.values.values()]).lower()
             if query and query not in blob:
                 continue
+            dedupe_key = " ".join(text.lower().split()) if text else blob
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
             out.append(record)
         return out
 

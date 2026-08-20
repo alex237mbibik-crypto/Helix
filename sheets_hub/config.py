@@ -95,10 +95,8 @@ def is_info_title(text: str) -> bool:
         return False
     if raw in _INFO_SHEET_NAMES:
         return True
-    return any(
-        raw.startswith(marker) or marker in raw
-        for marker in ("информ", "прайс", "справк", "объявлен", "услуг")
-    )
+    # Только явные префиксы — иначе «услуг» внутри длинных названий даёт ложные совпадения.
+    return any(raw.startswith(marker) for marker in ("информ", "прайс", "справк", "объявлен", "услуг"))
 
 
 def is_info_ref(ref: "SheetRef") -> bool:
