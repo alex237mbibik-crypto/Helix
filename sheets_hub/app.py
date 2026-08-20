@@ -408,27 +408,19 @@ class SheetsHubApp(ctk.CTk):
             corner_radius=10,
             border_width=1,
             border_color="#ceead6",
-            height=118,
         )
-        self.info_wrap.grid_propagate(False)
         self.info_wrap.grid_columnconfigure(0, weight=1)
-        self.info_wrap.grid_rowconfigure(1, weight=1)
 
         ctk.CTkLabel(
             self.info_wrap,
             text="Общая информация",
-            font=ctk.CTkFont(size=11, weight="bold"),
+            font=ctk.CTkFont(size=12, weight="bold"),
             text_color=MUTED,
             anchor="w",
-        ).grid(row=0, column=0, sticky="ew", padx=8, pady=(4, 0))
+        ).pack(fill="x", padx=10, pady=(6, 0))
 
-        self.info_body = ctk.CTkScrollableFrame(
-            self.info_wrap,
-            fg_color="transparent",
-            height=88,
-            corner_radius=0,
-        )
-        self.info_body.grid(row=1, column=0, sticky="nsew", padx=4, pady=(2, 4))
+        self.info_body = ctk.CTkFrame(self.info_wrap, fg_color="transparent")
+        self.info_body.pack(fill="x", padx=6, pady=(4, 8))
         self.info_body.grid_columnconfigure(0, weight=1)
         self.info_wrap.grid_remove()
 
@@ -499,10 +491,24 @@ class SheetsHubApp(ctk.CTk):
 
     def _on_cal_host_configure(self, _event=None) -> None:
         self.cal_canvas.configure(scrollregion=self.cal_canvas.bbox("all"))
+        self._fit_calendar_to_canvas()
 
     def _on_cal_canvas_configure(self, event) -> None:
-        width = max(event.width, self.cal_host.winfo_reqwidth())
-        self.cal_canvas.itemconfigure(self._cal_window, width=width)
+        self._fit_calendar_to_canvas(event.width, event.height)
+
+    def _fit_calendar_to_canvas(self, width: int | None = None, height: int | None = None) -> None:
+        if width is None:
+            width = self.cal_canvas.winfo_width()
+        if height is None:
+            height = self.cal_canvas.winfo_height()
+        if width < 40 or height < 40:
+            return
+        req_w = max(width, self.cal_host.winfo_reqwidth())
+        req_h = max(height, self.cal_host.winfo_reqheight())
+        # Растягиваем сетку на всю высоту области, чтобы не было пустого поля снизу.
+        self.cal_canvas.itemconfigure(self._cal_window, width=req_w, height=req_h)
+        self.cal_host.configure(width=req_w, height=req_h)
+        self.cal_canvas.configure(scrollregion=(0, 0, req_w, req_h))
 
     def _on_cal_wheel(self, event) -> None:
         if not self._pointer_over_calendar(event):
@@ -538,10 +544,8 @@ class SheetsHubApp(ctk.CTk):
 
     def _refresh_cal_scroll(self) -> None:
         self.cal_host.update_idletasks()
-        self.cal_canvas.configure(scrollregion=self.cal_canvas.bbox("all"))
         self.cal_canvas.yview_moveto(0)
-        width = max(self.cal_canvas.winfo_width(), self.cal_host.winfo_reqwidth())
-        self.cal_canvas.itemconfigure(self._cal_window, width=width)
+        self._fit_calendar_to_canvas()
 
     def _set_status(self, text: str) -> None:
         self.status.configure(text=text)
@@ -850,14 +854,16 @@ class SheetsHubApp(ctk.CTk):
         for child in self.cal_host.winfo_children():
             child.destroy()
         self.cal_host.grid_columnconfigure(0, weight=1)
+        self.cal_host.grid_rowconfigure(0, weight=1)
         groups: dict[tuple[str, str, str], list[Record]] = {}
         for record in records:
             groups.setdefault((record.spreadsheet_id, record.sheet, record.source_name), []).append(record)
         for index, ((_, _, name), items) in enumerate(groups.items()):
+            self.cal_host.grid_rowconfigure(index, weight=1)
             block = tk.Frame(self.cal_host, bg=CARD, highlightthickness=0)
-            block.grid(row=index, column=0, sticky="nsew", pady=(0, 10))
+            block.grid(row=index, column=0, sticky="nsew", pady=(0, 4))
             self._draw_one_calendar(block, name, items)
-        self.after_idle(self._refresh_cal_scroll)
+        self.after_idle(self._fit_calendar_to_canvas)
 
     def _draw_one_calendar(self, block: tk.Frame, name: str, items: list[Record]) -> None:
         dates = list(dict.fromkeys(item.values.get("Дата", "") for item in items if item.values.get("Дата")))
@@ -870,6 +876,8 @@ class SheetsHubApp(ctk.CTk):
         block.grid_columnconfigure(0, weight=0)
         for col, _date in enumerate(dates, start=1):
             block.grid_columnconfigure(col, weight=1)
+        block.grid_rowconfigure(0, weight=0)
+        block.grid_rowconfigure(1, weight=0)
 
         tk.Label(
             block,
@@ -878,7 +886,7 @@ class SheetsHubApp(ctk.CTk):
             fg=TEXT,
             font=_ui_font(13, bold=True),
             anchor="w",
-        ).grid(row=0, column=0, columnspan=len(dates) + 1, sticky="w", padx=4, pady=(0, 6))
+        ).grid(row=0, column=0, columnspan=len(dates) + 1, sticky="ew", padx=4, pady=(0, 4))
 
         for col, date in enumerate(dates, start=1):
             weekend = any(part in date.lower() for part in ("сб", "вс"))
@@ -904,7 +912,7 @@ class SheetsHubApp(ctk.CTk):
         ).grid(row=1, column=0, sticky="nsew", padx=1, pady=1)
 
         for row, time in enumerate(times, start=2):
-            block.grid_rowconfigure(row, minsize=30)
+            block.grid_rowconfigure(row, weight=1, minsize=28)
             tk.Label(
                 block,
                 text=_short_time(time),
@@ -912,7 +920,7 @@ class SheetsHubApp(ctk.CTk):
                 fg=TEXT,
                 font=_ui_font(12, bold=True),
                 padx=6,
-                pady=3,
+                pady=2,
             ).grid(row=row, column=0, sticky="nsew", padx=1, pady=1)
             for col, date in enumerate(dates, start=1):
                 record = cell_map.get((time, date))
@@ -1006,14 +1014,14 @@ class SheetsHubApp(ctk.CTk):
                 text=text,
                 bg=bg,
                 fg=fg,
-                font=_ui_font(10, bold=tone in {"warn", "ok"}),
-                wraplength=920,
+                font=_ui_font(12, bold=tone in {"warn", "ok"}),
+                wraplength=980,
                 justify="left",
                 anchor="w",
-                padx=8,
-                pady=3,
+                padx=10,
+                pady=6,
             )
-            card.grid(row=idx, column=0, sticky="ew", padx=2, pady=1)
+            card.grid(row=idx, column=0, sticky="ew", padx=2, pady=2)
         self.info_body.grid_columnconfigure(0, weight=1)
 
     def _sort_by(self, column: str) -> None:
