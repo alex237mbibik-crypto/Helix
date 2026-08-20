@@ -32,8 +32,8 @@ from sheets_hub.split import address_key, service_key
 from sheets_hub.ssl_setup import ca_bundle_path, configure_tls, session_verify_target
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-_RETRY_ATTEMPTS = 5
-_HTTP_TIMEOUT = (10, 30)
+_RETRY_ATTEMPTS = 2
+_HTTP_TIMEOUT = (5, 15)
 
 
 class SheetsError(Exception):
@@ -82,15 +82,20 @@ def _parse_csv_text(text: str) -> list[list[str]]:
     return [[(cell or "").replace("\u202f", " ").strip() for cell in row] for row in rows]
 
 
-def _fetch_url_curl(url: str) -> str:
+def _fetch_url_curl(url: str, *, insecure: bool = False) -> str:
     curl = shutil.which("curl.exe") or shutil.which("curl")
     if not curl:
         raise OSError("curl не найден")
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    cmd = [curl, "-fsSL", "--max-time", "20", url]
+    if insecure:
+        cmd.insert(1, "-k")
+    else:
+        cmd.insert(1, "--ssl-no-revoke")
     result = subprocess.run(
-        [curl, "-fsSL", "--ssl-no-revoke", "--max-time", "30", url],
+        cmd,
         capture_output=True,
-        timeout=35,
+        timeout=25,
         creationflags=flags if sys.platform == "win32" else 0,
     )
     if result.returncode != 0:
@@ -118,6 +123,13 @@ def _fetch_url_powershell(url: str) -> str:
 
 
 def _fetch_url_requests(url: str, *, verify: bool | str) -> str:
+    if verify is False:
+        try:
+            import urllib3
+
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        except Exception:
+            pass
     session = requests.Session()
     session.verify = verify
     session.headers["User-Agent"] = "SheetsHub/1.0"
@@ -133,19 +145,27 @@ def _fetch_public_csv(spreadsheet_id: str, sheet: str = "") -> list[list[str]]:
         attempts.extend(
             [
                 ("curl (Windows)", lambda: _fetch_url_curl(url)),
+                ("curl без проверки SSL", lambda: _fetch_url_curl(url, insecure=True)),
                 ("PowerShell", lambda: _fetch_url_powershell(url)),
             ]
         )
+    else:
+        attempts.append(("curl", lambda: _fetch_url_curl(url)))
     configure_tls()
     attempts.append(("Python", lambda: _fetch_url_requests(url, verify=session_verify_target())))
     ca = ca_bundle_path()
     if ca:
         attempts.append(("Python + cacert.pem", lambda c=ca: _fetch_url_requests(url, verify=c)))
+    attempts.append(("Python без проверки SSL", lambda: _fetch_url_requests(url, verify=False)))
 
     errors: list[str] = []
     for label, fetch in attempts:
         try:
-            return _parse_csv_text(fetch())
+            text = fetch()
+            rows = _parse_csv_text(text)
+            if not rows:
+                raise SheetsError("пустой ответ")
+            return rows
         except Exception as exc:
             errors.append(f"{label}: {exc}")
 
@@ -187,11 +207,11 @@ class SheetsClient:
         session = AuthorizedSession(creds)
         session.verify = session_verify_target()
         retry = Retry(
-            total=5,
-            connect=5,
-            read=5,
-            status=5,
-            backoff_factor=0.7,
+            total=1,
+            connect=1,
+            read=1,
+            status=1,
+            backoff_factor=0.3,
             status_forcelist=(429, 500, 502, 503, 504),
             allowed_methods=False,
             raise_on_status=False,
@@ -346,24 +366,12 @@ class SheetsClient:
         return self._records_from_rows(source, rows)
 
     def expand_source(self, source: SheetRef) -> list[SheetRef]:
-        available = self.list_sheets(source.spreadsheet_id)
-        if not available:
-            raise SheetsError(f"В «{source.name}» нет листов")
         requested = requested_sheet_titles(source.sheet)
-        if requested is None:
-            titles = available
-        else:
-            titles = []
-            for name in requested:
-                match = self._match_sheet_title(available, name)
-                if match and match not in titles:
-                    titles.append(match)
-            if not titles:
-                titles = available
-        many = len(titles) > 1
-        expanded: list[SheetRef] = []
-        for title in titles:
-            expanded.append(
+        # Если имя листа уже указано — не ходим в API за списком вкладок
+        # (на Windows это часто зависает на SSL).
+        if requested is not None:
+            many = len(requested) > 1
+            return [
                 SheetRef(
                     name=f"{source.name} / {title}" if many else source.name,
                     spreadsheet_id=source.spreadsheet_id,
@@ -373,13 +381,49 @@ class SheetsClient:
                     address=source.address,
                     kind=source.kind,
                 )
+                for title in requested
+            ]
+
+        available = self.list_sheets(source.spreadsheet_id)
+        if not available:
+            raise SheetsError(f"В «{source.name}» нет листов")
+        many = len(available) > 1
+        return [
+            SheetRef(
+                name=f"{source.name} / {title}" if many else source.name,
+                spreadsheet_id=source.spreadsheet_id,
+                sheet=title,
+                map=source.map,
+                service=source.service,
+                address=source.address,
+                kind=source.kind,
             )
-        return expanded
+            for title in available
+        ]
 
     def _should_try_public_read(self, exc: BaseException) -> bool:
         if isinstance(exc, SheetsError):
-            return "подключиться к Google" in str(exc) or "защищённого соединения" in str(exc)
+            text = str(exc)
+            return (
+                "подключиться к Google" in text
+                or "защищённого соединения" in text
+                or "Публичное чтение" in text
+                or "Не удалось скачать" in text
+            )
         return _is_network_error(exc)
+
+    def _load_source_public(self, source: SheetRef) -> list[Record]:
+        loaded: list[Record] = []
+        for part in expand_ref_locally(source):
+            loaded.extend(self._fetch_source_public(part))
+        return loaded
+
+    def _mark_public_read(self, source_name: str) -> None:
+        self.read_only_public = True
+        self.read_notes.append(
+            f"{source_name}: календарь прочитан напрямую (обход SSL). "
+            "Запись в ячейки может не работать, пока не починится соединение с Google API."
+        )
 
     def fetch_all(self, sources: list[SheetRef]) -> tuple[list[Record], list[str]]:
         records: list[Record] = []
@@ -389,20 +433,26 @@ class SheetsClient:
         for source in sources:
             if source.is_placeholder():
                 continue
+
+            # С известным именем листа сначала пробуем прямой CSV —
+            # так Windows не зависает на Google API / SSL.
+            titles = requested_sheet_titles(source.sheet)
+            if titles and _can_try_public_read(source):
+                try:
+                    records.extend(self._load_source_public(source))
+                    self._mark_public_read(source.name)
+                    continue
+                except Exception:
+                    pass
+
             try:
                 for part in self.expand_source(source):
                     records.extend(self.fetch_source(part))
             except Exception as exc:
                 if _can_try_public_read(source) and self._should_try_public_read(exc):
                     try:
-                        for part in expand_ref_locally(source):
-                            records.extend(self._fetch_source_public(part))
-                        self.read_only_public = True
-                        note = (
-                            f"{source.name}: Google API недоступен — календарь прочитан напрямую. "
-                            "Запись в таблицу может не работать, пока не починится SSL."
-                        )
-                        self.read_notes.append(note)
+                        records.extend(self._load_source_public(source))
+                        self._mark_public_read(source.name)
                     except Exception as pub_exc:
                         msg = str(pub_exc) if isinstance(pub_exc, SheetsError) else str(_friendly_error(pub_exc))
                         errors.append(f"{source.name}: {msg}")
