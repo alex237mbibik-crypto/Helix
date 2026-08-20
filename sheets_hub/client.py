@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 import shutil
 import subprocess
 import sys
@@ -22,8 +23,10 @@ from sheets_hub.config import (
     KIND_INFO,
     KIND_RECORDS,
     SheetRef,
+    companion_info_titles,
     expand_ref_locally,
     is_info_ref,
+    is_info_title,
     parse_spreadsheet_id,
     prefer_sheet_title,
     requested_sheet_titles,
@@ -184,6 +187,79 @@ def _fetch_public_csv(spreadsheet_id: str, sheet: str = "") -> list[list[str]]:
         + "\n".join(errors[-3:])
         + "\n\nОтключите VPN и проверку HTTPS в антивирусе."
     )
+
+
+_SHEET_TITLE_RE = re.compile(
+    r'\["([^"]{1,120})",\d{5,}(?:,\d+){0,6}\]|'
+    r'"name"\s*:\s*"([^"\\]{1,120})"[^}]{0,80}"sheetId"\s*:',
+    re.IGNORECASE,
+)
+
+
+def _fetch_url_text(url: str) -> str:
+    if sys.platform == "win32":
+        try:
+            return _fetch_url_curl(url, insecure=True)
+        except Exception:
+            pass
+        try:
+            return _fetch_url_powershell(url)
+        except Exception:
+            pass
+    try:
+        return _fetch_url_curl(url)
+    except Exception:
+        return _fetch_url_requests(url, verify=session_verify_target())
+
+
+def _list_public_sheet_titles(spreadsheet_id: str) -> list[str]:
+    """Имена вкладок без Sheets API (из публичной HTML-страницы)."""
+    urls = (
+        f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/htmlview",
+        f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit",
+    )
+    titles: list[str] = []
+    seen: set[str] = set()
+    for url in urls:
+        try:
+            text = _fetch_url_text(url)
+        except Exception:
+            continue
+        for match in _SHEET_TITLE_RE.finditer(text):
+            name = (match.group(1) or match.group(2) or "").strip()
+            if not name or name.lower() in seen:
+                continue
+            # Отсекаем мусор из HTML.
+            if any(bad in name.lower() for bad in ("http", "function", "null", "<", ">")):
+                continue
+            seen.add(name.lower())
+            titles.append(name)
+        if titles:
+            break
+    return titles
+
+
+def _parts_for_source(source: SheetRef, available: list[str] | None = None) -> list[SheetRef]:
+    """Календарный лист + соседние вкладки-справки той же книги."""
+    requested = requested_sheet_titles(source.sheet)
+    if requested is not None and len(requested) == 1 and not is_info_title(requested[0]):
+        calendar = replace(source, sheet=requested[0])
+        parts = [calendar]
+        if available:
+            for title in companion_info_titles(available, requested[0]):
+                parts.append(replace(source, sheet=title, kind=KIND_INFO))
+        return parts
+    if requested is not None and len(requested) > 1:
+        return [replace(source, sheet=title) for title in requested]
+
+    titles = available or []
+    if not titles:
+        return [source]
+    calendar_title = prefer_sheet_title(titles, source.sheet)
+    parts = [replace(source, sheet=calendar_title)]
+    for title in companion_info_titles(titles, calendar_title):
+        parts.append(replace(source, sheet=title, kind=KIND_INFO))
+    return parts
 
 
 def _can_try_public_read(source: SheetRef) -> bool:
@@ -366,7 +442,6 @@ class SheetsClient:
         if titles:
             sheet = titles[0]
         elif sheet.lower() in {"", "*", "все", "all", "все листы"}:
-            # Без имени листа Google отдаёт первую вкладку — этого достаточно.
             sheet = ""
         rows = _fetch_public_csv(spreadsheet_id, sheet)
         part = replace(source, sheet=sheet or source.sheet or "лист 1")
@@ -378,17 +453,11 @@ class SheetsClient:
         return self._records_from_rows(source, rows)
 
     def expand_source(self, source: SheetRef) -> list[SheetRef]:
-        requested = requested_sheet_titles(source.sheet)
-        # Всегда один лист на таблицу: «все» больше не тянет все вкладки сразу.
-        if requested is not None:
-            title = requested[0]
-            return [replace(source, sheet=title)]
-
         available = self.list_sheets(source.spreadsheet_id)
-        if not available:
+        parts = _parts_for_source(source, available)
+        if not parts:
             raise SheetsError(f"В «{source.name}» нет листов")
-        title = prefer_sheet_title(available, source.sheet)
-        return [replace(source, sheet=title)]
+        return parts
 
     def _should_try_public_read(self, exc: BaseException) -> bool:
         if isinstance(exc, SheetsError):
@@ -402,10 +471,39 @@ class SheetsClient:
         return _is_network_error(exc)
 
     def _load_source_public(self, source: SheetRef) -> list[Record]:
+        available: list[str] = []
+        try:
+            available = _list_public_sheet_titles(source.normalized_id())
+        except Exception:
+            available = []
+        if not available:
+            try:
+                available = self.list_sheets(source.spreadsheet_id)
+            except Exception:
+                available = []
+        if available:
+            parts = _parts_for_source(source, available)
+        else:
+            # Без списка вкладок — календарь из конфига / первая вкладка + типичные справки.
+            parts = list(expand_ref_locally(source))
+            cal = (parts[0].sheet or "").strip()
+            for name in ("УСЛУГИ врача", "Услуги врача", "Информация", "Справка"):
+                if name.lower() != cal.lower():
+                    parts.append(replace(source, sheet=name, kind=KIND_INFO))
         loaded: list[Record] = []
-        for part in expand_ref_locally(source):
-            loaded.extend(self._fetch_source_public(part))
-        return loaded
+        errors: list[Exception] = []
+        for part in parts:
+            try:
+                loaded.extend(self._fetch_source_public(part))
+            except Exception as exc:
+                if is_info_ref(part) or is_info_title(part.sheet):
+                    continue
+                errors.append(exc)
+        if loaded:
+            return loaded
+        if errors:
+            raise errors[0]
+        raise SheetsError(f"Не удалось прочитать «{source.name}»")
 
     def _mark_public_read(self, source_name: str) -> None:
         self.read_only_public = True

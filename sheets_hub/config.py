@@ -72,6 +72,8 @@ _INFO_SHEET_NAMES = {
     "о нас",
     "примечание",
     "объявления",
+    "услуги",
+    "услуги врача",
     "notes",
     "info",
     "general",
@@ -93,7 +95,10 @@ def is_info_title(text: str) -> bool:
         return False
     if raw in _INFO_SHEET_NAMES:
         return True
-    return any(raw.startswith(marker) for marker in ("информ", "прайс", "справк", "объявлен"))
+    return any(
+        raw.startswith(marker) or marker in raw
+        for marker in ("информ", "прайс", "справк", "объявлен", "услуг")
+    )
 
 
 def is_info_ref(ref: "SheetRef") -> bool:
@@ -101,6 +106,18 @@ def is_info_ref(ref: "SheetRef") -> bool:
         return True
     return is_info_title(ref.sheet)
 
+
+def companion_info_titles(available: list[str], calendar_title: str = "") -> list[str]:
+    """Вкладки-справки той же книги (например «УСЛУГИ врача»), кроме календаря."""
+    skip = (calendar_title or "").strip().lower()
+    out: list[str] = []
+    for title in available:
+        name = (title or "").strip()
+        if not name or name.lower() == skip:
+            continue
+        if is_info_title(name):
+            out.append(name)
+    return out
 
 @dataclass
 class SheetRef:

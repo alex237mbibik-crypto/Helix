@@ -442,6 +442,8 @@ class SheetsHubApp(ctk.CTk):
         self._cal_date_w = CAL_DATE_W
         self._cal_date_cols = 0
         self._cal_total_w = 0
+        self._cal_col_frames: dict[int, list[tk.Frame]] = {}
+        self._cal_resizing = False
 
         self.empty_state = ctk.CTkFrame(inner, fg_color=CARD, corner_radius=10)
         self.empty_state.grid_columnconfigure(0, weight=1)
@@ -483,9 +485,12 @@ class SheetsHubApp(ctk.CTk):
             anchor="w",
         ).pack(fill="x", padx=10, pady=(6, 0))
 
+        # Обычный блок без скролла; при переполнении подменим на scrollable.
         self.info_body = ctk.CTkFrame(self.info_wrap, fg_color="transparent")
         self.info_body.pack(fill="x", padx=6, pady=(4, 8))
         self.info_body.grid_columnconfigure(0, weight=1)
+        self._info_scroll = None
+        self._info_max_h = 220
         self.info_wrap.grid_remove()
 
     def _style_treeview(self) -> None:
@@ -559,36 +564,82 @@ class SheetsHubApp(ctk.CTk):
     def _on_cal_x_canvas_configure(self, event) -> None:
         # Высота внутреннего блока = видимая высота горизонтального canvas.
         self.cal_x_canvas.itemconfigure(self._cal_x_window, height=max(1, event.height))
-        self._fit_calendar_to_canvas()
+        self._stretch_calendar_to_viewport()
 
     def _on_cal_host_configure(self, _event=None) -> None:
         # Только scrollregion по ширине/содержимому — без постоянной перестройки высоты.
         self.cal_canvas.configure(scrollregion=self.cal_canvas.bbox("all"))
-        self._sync_calendar_widths()
+        if not self._cal_resizing:
+            self._sync_calendar_widths()
 
     def _on_cal_canvas_configure(self, event) -> None:
         self.cal_canvas.itemconfigure(self._cal_window, width=max(event.width, self.cal_host.winfo_reqwidth()))
         self.cal_canvas.configure(scrollregion=self.cal_canvas.bbox("all"))
 
+    def _calendar_viewport_width(self) -> int:
+        try:
+            return max(1, self.cal_x_canvas.winfo_width())
+        except tk.TclError:
+            return 1
+
+    def _compute_date_col_width(self) -> int:
+        cols = max(self._cal_date_cols, 1)
+        avail = self._calendar_viewport_width() - self._cal_time_col_w
+        if avail < CAL_DATE_W:
+            return CAL_DATE_W
+        return max(CAL_DATE_W, avail // cols)
+
+    def _stretch_calendar_to_viewport(self) -> None:
+        if self._cal_date_cols <= 0 or not self._cal_col_frames:
+            self._sync_calendar_widths()
+            self._fit_calendar_height()
+            return
+        date_w = self._compute_date_col_width()
+        if abs(date_w - self._cal_date_w) >= 2 or self._cal_total_w < self._calendar_viewport_width():
+            self._apply_calendar_column_widths(date_w)
+        else:
+            self._sync_calendar_widths()
+        self._fit_calendar_height()
+
+    def _apply_calendar_column_widths(self, date_w: int) -> None:
+        self._cal_resizing = True
+        try:
+            time_w = self._cal_time_col_w
+            self._cal_date_w = date_w
+            self._cal_total_w = time_w + date_w * max(self._cal_date_cols, 1)
+            for host in (self.cal_header_host, self.cal_host):
+                host.grid_columnconfigure(0, minsize=time_w, weight=0)
+                for col in range(1, self._cal_date_cols + 1):
+                    host.grid_columnconfigure(col, minsize=date_w, weight=0)
+            for col, frames in self._cal_col_frames.items():
+                width = time_w if col == 0 else date_w
+                for frame in frames:
+                    try:
+                        frame.configure(width=width)
+                        for child in frame.winfo_children():
+                            if isinstance(child, tk.Label):
+                                child.configure(wraplength=max(20, width - 10))
+                    except tk.TclError:
+                        pass
+            self._sync_calendar_widths()
+        finally:
+            self._cal_resizing = False
+
     def _sync_calendar_widths(self) -> None:
+        view_w = self._calendar_viewport_width()
         req_w = max(
             getattr(self, "_cal_total_w", 0),
             self.cal_host.winfo_reqwidth(),
             self.cal_header_host.winfo_reqwidth(),
-            self.cal_canvas.winfo_width(),
+            view_w,
             1,
         )
         self.cal_canvas.itemconfigure(self._cal_window, width=req_w)
-        self.cal_x_canvas.itemconfigure(
-            self._cal_x_window,
-            width=max(req_w, self.cal_x_canvas.winfo_width()),
-        )
+        self.cal_x_canvas.itemconfigure(self._cal_x_window, width=req_w)
         self.cal_x_canvas.configure(scrollregion=self.cal_x_canvas.bbox("all"))
         self.cal_canvas.configure(scrollregion=self.cal_canvas.bbox("all"))
 
-    def _fit_calendar_to_canvas(self, width: int | None = None, height: int | None = None) -> None:
-        self._sync_calendar_widths()
-        # Вертикально слоты заполняют область y-canvas, если контент короче окна.
+    def _fit_calendar_height(self) -> None:
         body_h = self.cal_canvas.winfo_height()
         req_h = max(body_h, self.cal_host.winfo_reqheight(), 1)
         if body_h > self.cal_host.winfo_reqheight():
@@ -598,6 +649,8 @@ class SheetsHubApp(ctk.CTk):
             self.cal_canvas.itemconfigure(self._cal_window, height=req_h)
         self.cal_canvas.configure(scrollregion=self.cal_canvas.bbox("all"))
 
+    def _fit_calendar_to_canvas(self, width: int | None = None, height: int | None = None) -> None:
+        self._stretch_calendar_to_viewport()
     def _on_cal_wheel(self, event) -> None:
         if not self._pointer_over_calendar(event):
             return
@@ -641,8 +694,7 @@ class SheetsHubApp(ctk.CTk):
         self.cal_x_host.update_idletasks()
         self.cal_canvas.yview_moveto(0)
         self.cal_x_canvas.xview_moveto(0)
-        self._fit_calendar_to_canvas()
-        self._sync_calendar_widths()
+        self._stretch_calendar_to_viewport()
 
     def _set_status(self, text: str) -> None:
         self.status.configure(text=text)
@@ -1068,6 +1120,7 @@ class SheetsHubApp(ctk.CTk):
 
     def _draw_calendars(self, records: list[Record]) -> None:
         self._slot_labels = {}
+        self._cal_col_frames = {}
         try:
             self.cal_canvas.grid_remove()
         except Exception:
@@ -1102,10 +1155,11 @@ class SheetsHubApp(ctk.CTk):
         header = self.cal_header_host
         body = self.cal_host
         time_w = self._cal_time_col_w
-        date_w = self._cal_date_w
+        # Сразу берём ширину окна, если уже известна — иначе минимум.
+        date_w = self._compute_date_col_width() if self._calendar_viewport_width() > 40 else self._cal_date_w
+        self._cal_date_w = date_w
         self._cal_total_w = time_w + date_w * max(len(dates), 1)
 
-        # Одинаковая ширина столбцов у шапки и сетки — иначе длинные имена разъезжают даты.
         for host in (header, body):
             host.grid_columnconfigure(0, minsize=time_w, weight=0)
             for col in range(1, len(dates) + 1):
@@ -1153,6 +1207,9 @@ class SheetsHubApp(ctk.CTk):
                 record = cell_map.get((time, date))
                 self._draw_slot(body, record, row, col, date_w)
 
+    def _register_cal_cell(self, col: int, cell: tk.Frame) -> None:
+        self._cal_col_frames.setdefault(col, []).append(cell)
+
     def _cal_header_cell(self, parent: tk.Frame, row: int, col: int, width: int, **kwargs) -> tk.Label:
         cell = tk.Frame(
             parent,
@@ -1166,6 +1223,7 @@ class SheetsHubApp(ctk.CTk):
         )
         cell.grid(row=row, column=col, sticky="nsew")
         cell.grid_propagate(False)
+        self._register_cal_cell(col, cell)
         label = tk.Label(cell, padx=4, pady=6, **kwargs)
         label.pack(fill="both", expand=True)
         return label
@@ -1183,6 +1241,7 @@ class SheetsHubApp(ctk.CTk):
         )
         cell.grid(row=row, column=col, sticky="nsew")
         cell.grid_propagate(False)
+        self._register_cal_cell(col, cell)
         label = tk.Label(cell, padx=4, pady=2, **kwargs)
         label.pack(fill="both", expand=True)
         return label
@@ -1238,29 +1297,74 @@ class SheetsHubApp(ctk.CTk):
         query = self.search_var.get().strip().lower()
         source_name = self.source_filter_var.get().strip()
         sheet_key = self._active_sheet_key()
+        active_sid = sheet_key[0] if sheet_key else ""
         out: list[Record] = []
         for record in self.info_records:
             if source_name and record.source_name != source_name:
                 continue
-            # Справка только от того же листа, что и текущий календарь.
-            if sheet_key and (record.spreadsheet_id, record.sheet) != sheet_key:
-                continue
+            # Справка с того же календаря или соседняя вкладка той же книги (УСЛУГИ и т.п.).
+            if sheet_key:
+                same_sheet = (record.spreadsheet_id, record.sheet) == sheet_key
+                same_book_info = (
+                    record.spreadsheet_id == active_sid
+                    and record.sheet != sheet_key[1]
+                )
+                if not same_sheet and not same_book_info:
+                    continue
             blob = " ".join([record.source_name, *record.values.values()]).lower()
             if query and query not in blob:
                 continue
             out.append(record)
         return out
 
-    def _render_info(self) -> None:
+    def _info_host(self) -> ctk.CTkFrame:
+        return self._info_scroll if self._info_scroll is not None else self.info_body
+
+    def _reset_info_host(self, *, scrollable: bool) -> ctk.CTkFrame:
+        if self._info_scroll is not None:
+            self._info_scroll.destroy()
+            self._info_scroll = None
         for child in self.info_body.winfo_children():
             child.destroy()
+        if scrollable:
+            self.info_body.pack_forget()
+            self._info_scroll = ctk.CTkScrollableFrame(
+                self.info_wrap,
+                fg_color="transparent",
+                height=self._info_max_h,
+            )
+            self._info_scroll.pack(fill="x", padx=6, pady=(4, 8))
+            self._info_scroll.grid_columnconfigure(0, weight=1)
+            return self._info_scroll
+        try:
+            self.info_body.pack(fill="x", padx=6, pady=(4, 8))
+        except tk.TclError:
+            pass
+        self.info_body.grid_columnconfigure(0, weight=1)
+        return self.info_body
 
+    def _render_info(self) -> None:
         records = self._filtered_info()
         if not records:
+            self._reset_info_host(scrollable=False)
             self.info_wrap.grid_remove()
             return
         self.info_wrap.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 8))
 
+        # Сначала рисуем без скролла; если не влезает — перерисуем со скроллом.
+        host = self._reset_info_host(scrollable=False)
+        cards = self._fill_info_cards(host, records)
+        if not cards:
+            self.info_wrap.grid_remove()
+            return
+        self.update_idletasks()
+        need_scroll = host.winfo_reqheight() > self._info_max_h
+        if need_scroll:
+            host = self._reset_info_host(scrollable=True)
+            self._fill_info_cards(host, records)
+
+    def _fill_info_cards(self, host, records: list[Record]) -> list[tk.Label]:
+        cards: list[tk.Label] = []
         for idx, record in enumerate(records):
             text = str(record.values.get("Текст") or "").strip()
             if not text:
@@ -1273,20 +1377,23 @@ class SheetsHubApp(ctk.CTk):
                 continue
             tone = record.values.get("_tone") or info_tone(text)
             bg, fg = INFO_TONES.get(tone, INFO_TONES["info"])
+            wrap = max(480, self.winfo_width() - 80) if self.winfo_width() > 100 else 980
             card = tk.Label(
-                self.info_body,
+                host,
                 text=text,
                 bg=bg,
                 fg=fg,
                 font=_ui_font(12, bold=tone in {"warn", "ok"}),
-                wraplength=980,
+                wraplength=wrap,
                 justify="left",
                 anchor="w",
                 padx=10,
                 pady=6,
             )
             card.grid(row=idx, column=0, sticky="ew", padx=2, pady=2)
-        self.info_body.grid_columnconfigure(0, weight=1)
+            cards.append(card)
+        host.grid_columnconfigure(0, weight=1)
+        return cards
 
     def _sort_by(self, column: str) -> None:
         reverse = getattr(self, "_sort_desc", False)
