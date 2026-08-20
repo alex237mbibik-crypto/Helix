@@ -163,6 +163,7 @@ class SheetsHubApp(ctk.CTk):
         self.info_records: list[Record] = []
         self._visible: list[Record] = []
         self._jobs = 0
+        self._cal_frozen = False
         self._last_tree_width = 0
         self._sort_desc = False
         self._picked: Record | None = None
@@ -263,7 +264,7 @@ class SheetsHubApp(ctk.CTk):
         toolbar = ctk.CTkFrame(header, fg_color="transparent")
         toolbar.grid(row=0, column=2, sticky="e")
 
-        self.refresh_btn = self._primary_button(toolbar, "Обновить", self.reload_all, 110)
+        self.refresh_btn = self._primary_button(toolbar, "Обновить", self.reload_all, 120)
         self.refresh_btn.pack(side="left", padx=(0, 8))
         self._outline_button(toolbar, "Таблицы", self._open_tables_dialog, 110).pack(side="left")
 
@@ -559,22 +560,26 @@ class SheetsHubApp(ctk.CTk):
             pass
 
     def _on_cal_x_canvas_configure(self, event) -> None:
-        # Высоту всегда синхронизируем — иначе после отрисовки остаётся пустое окно.
+        if self._cal_resizing or self._cal_scroll_lock or getattr(self, "_cal_frozen", False):
+            return
         try:
+            # Высота окна = высота viewport; контент слотов не растягиваем здесь.
             self.cal_x_canvas.itemconfigure(self._cal_x_window, height=max(1, event.height))
         except tk.TclError:
-            return
-        if self._cal_resizing or self._cal_scroll_lock:
             return
         self._schedule_calendar_stretch()
 
     def _on_cal_host_configure(self, _event=None) -> None:
+        if self._cal_resizing or self._cal_scroll_lock:
+            return
         try:
             self.cal_canvas.configure(scrollregion=self.cal_canvas.bbox("all"))
         except tk.TclError:
             pass
 
     def _on_cal_canvas_configure(self, event) -> None:
+        if self._cal_resizing or self._cal_scroll_lock or getattr(self, "_cal_frozen", False):
+            return
         try:
             req_w = max(event.width, getattr(self, "_cal_total_w", 0), 1)
             self.cal_canvas.itemconfigure(self._cal_window, width=req_w)
@@ -596,6 +601,8 @@ class SheetsHubApp(ctk.CTk):
         return max(CAL_DATE_W, avail // cols)
 
     def _schedule_calendar_stretch(self) -> None:
+        if getattr(self, "_cal_frozen", False):
+            return
         if self._cal_stretch_after_id is not None:
             try:
                 self.after_cancel(self._cal_stretch_after_id)
@@ -605,6 +612,8 @@ class SheetsHubApp(ctk.CTk):
 
     def _stretch_calendar_to_viewport(self) -> None:
         self._cal_stretch_after_id = None
+        if getattr(self, "_cal_frozen", False):
+            return
         if self._cal_date_cols <= 0 or not self._cal_col_frames:
             self._sync_calendar_widths()
             return
@@ -628,8 +637,8 @@ class SheetsHubApp(ctk.CTk):
             for host in (self.cal_header_host, self.cal_host):
                 host.grid_columnconfigure(0, minsize=time_w, weight=0)
                 for col in range(1, self._cal_date_cols + 1):
-                    # weight=1 — ширина колонок от окна программы, не от листа.
-                    host.grid_columnconfigure(col, minsize=max(CAL_DATE_W, date_w), weight=1)
+                    # Равные колонки по ширине окна; weight=0 — без «расползания» при Обновить.
+                    host.grid_columnconfigure(col, minsize=date_w, weight=0)
             for col, frames in self._cal_col_frames.items():
                 width = time_w if col == 0 else date_w
                 cell_w = max(8, width - 2)
@@ -657,16 +666,38 @@ class SheetsHubApp(ctk.CTk):
             self.cal_x_canvas.itemconfigure(self._cal_x_window, width=req_w)
             self.cal_x_canvas.configure(scrollregion=self.cal_x_canvas.bbox("all"))
             self.cal_canvas.configure(scrollregion=self.cal_canvas.bbox("all"))
+            self._sync_calendar_scrollbars()
+        except tk.TclError:
+            pass
+
+    def _sync_calendar_scrollbars(self) -> None:
+        """Показывать полосы только когда контент реально не влезает — иначе двойные «пустые» полосы."""
+        try:
+            view_w = max(1, self.cal_x_canvas.winfo_width())
+            view_h = max(1, self.cal_canvas.winfo_height())
+            need_x = getattr(self, "_cal_total_w", 0) > view_w + 2
+            body_h = max(self.cal_host.winfo_reqheight(), 1)
+            need_y = body_h > view_h + 2
+            if need_x:
+                self.cal_hsb.grid(row=2, column=0, sticky="ew")
+            else:
+                self.cal_hsb.grid_remove()
+                self.cal_x_canvas.xview_moveto(0)
+            if need_y:
+                self.cal_vsb.grid(row=1, column=1, sticky="ns")
+            else:
+                self.cal_vsb.grid_remove()
+                self.cal_canvas.yview_moveto(0)
         except tk.TclError:
             pass
 
     def _fit_calendar_height(self) -> None:
-        # Не меняем height у cal_host — из‑за этого ломались размеры и цвета при скролле.
+        # Только высота контента — не растягивать слоты на весь canvas (серая «дыра» и двойной скролл).
         try:
-            body_h = max(1, self.cal_canvas.winfo_height())
-            req_h = max(body_h, self.cal_host.winfo_reqheight(), 1)
+            req_h = max(self.cal_host.winfo_reqheight(), 1)
             self.cal_canvas.itemconfigure(self._cal_window, height=req_h)
             self.cal_canvas.configure(scrollregion=self.cal_canvas.bbox("all"))
+            self._sync_calendar_scrollbars()
         except tk.TclError:
             pass
 
@@ -727,7 +758,6 @@ class SheetsHubApp(ctk.CTk):
             self.cal_host.update_idletasks()
             self.cal_header_host.update_idletasks()
             self.cal_x_host.update_idletasks()
-            # Принудительно задаём высоту внутренней области — иначе после draw бывает «пусто».
             x_h = max(1, self.cal_x_canvas.winfo_height())
             self.cal_x_canvas.itemconfigure(self._cal_x_window, height=x_h)
             self.cal_canvas.yview_moveto(0)
@@ -735,6 +765,7 @@ class SheetsHubApp(ctk.CTk):
             self._cal_viewport_w = 0
             self._stretch_calendar_to_viewport()
             self._fit_calendar_height()
+            self._sync_calendar_scrollbars()
         except tk.TclError:
             pass
 
@@ -839,7 +870,8 @@ class SheetsHubApp(ctk.CTk):
 
     def _run_bg(self, work: Callable, done: Callable, *, alert: bool = True) -> None:
         self._jobs += 1
-        self.refresh_btn.configure(text="Обновляю…")
+        # Текст той же длины — иначе кнопка расширяется и ломает сетку календаря.
+        self.refresh_btn.configure(text="Читаю…", state="disabled")
 
         def runner() -> None:
             error = None
@@ -855,8 +887,10 @@ class SheetsHubApp(ctk.CTk):
     def _finish_bg(self, done: Callable, result, error, alert: bool = True) -> None:
         self._jobs = max(0, self._jobs - 1)
         if self._jobs == 0:
-            self.refresh_btn.configure(text="Обновить")
+            self.refresh_btn.configure(text="Обновить", state="normal")
+            self._cal_frozen = False
         if error:
+            self._cal_frozen = False
             self._set_status(f"Ошибка: {error}")
             if alert:
                 messagebox.showerror("Ошибка", str(error))
@@ -880,13 +914,15 @@ class SheetsHubApp(ctk.CTk):
             self._set_status("Нет таблиц. Откройте «Таблицы» и вставьте ссылку на Google Таблицу.")
             return
         selected_name = sources[0].name
-        # Не очищаем экран до прихода данных — иначе белая вспышка.
+        # Замораживаем сетку до прихода данных — иначе Configure от статуса/кнопки её ломает.
+        self._cal_frozen = True
         self._set_status(f"Читаю «{selected_name}»…")
 
         def work():
             return self.client.fetch_all(sources)
 
         def done(result):
+            self._cal_frozen = False
             records, errors = result
             self._last_error_message = "\n\n".join(errors[:8]) if errors else ""
             booking = [item for item in records if item.kind != KIND_INFO]
@@ -1172,17 +1208,19 @@ class SheetsHubApp(ctk.CTk):
                 return
             ((_, _, name), items) = next(iter(groups.items()))
             self._draw_one_calendar(name, items)
-            # Канвасы должны оставаться в сетке.
             try:
                 self.cal_canvas.grid(row=1, column=0, sticky="nsew")
                 self.cal_x_canvas.grid(row=1, column=0, sticky="nsew")
             except tk.TclError:
                 pass
         finally:
-            self._cal_resizing = False
-        self.after_idle(self._refresh_cal_scroll)
-        self.after(50, self._refresh_cal_scroll)
-        self.after_idle(self._apply_calendar_search_styles)
+            # Снимаем флаг только после укладки размеров — иначе Configure ломает сетку.
+            self.after_idle(self._finish_calendar_draw)
+
+    def _finish_calendar_draw(self) -> None:
+        self._cal_resizing = False
+        self._refresh_cal_scroll()
+        self._apply_calendar_search_styles()
 
     def _draw_one_calendar(self, name: str, items: list[Record]) -> None:
         # Сетка и цвета — только UI приложения. Из таблицы берём дату/время/текст слота.
@@ -1207,7 +1245,7 @@ class SheetsHubApp(ctk.CTk):
         for host in (header, body):
             host.grid_columnconfigure(0, minsize=time_w, weight=0)
             for col in range(1, len(dates) + 1):
-                host.grid_columnconfigure(col, minsize=max(CAL_DATE_W, date_w), weight=1)
+                host.grid_columnconfigure(col, minsize=date_w, weight=0)
 
         self._cal_header_cell(
             header,
@@ -1324,7 +1362,8 @@ class SheetsHubApp(ctk.CTk):
 
     def _render_views(self) -> None:
         self._render_table()
-        self._render_info()
+        # Справку после календаря — иначе update_idletasks в info ломает сетку на «Обновить».
+        self.after_idle(self._render_info)
 
     def _active_sheet_key(self) -> tuple[str, str] | None:
         for record in self.records:
@@ -1403,13 +1442,31 @@ class SheetsHubApp(ctk.CTk):
             child.destroy()
         if scrollable:
             self.info_body.pack_forget()
-            self._info_scroll = ctk.CTkScrollableFrame(
-                self.info_wrap,
-                fg_color="transparent",
-                height=self._info_max_h,
-            )
+            try:
+                self._info_scroll = ctk.CTkScrollableFrame(
+                    self.info_wrap,
+                    fg_color="transparent",
+                    height=self._info_max_h,
+                    orientation="vertical",
+                )
+            except TypeError:
+                self._info_scroll = ctk.CTkScrollableFrame(
+                    self.info_wrap,
+                    fg_color="transparent",
+                    height=self._info_max_h,
+                )
             self._info_scroll.pack(fill="x", padx=6, pady=(4, 8))
             self._info_scroll.grid_columnconfigure(0, weight=1)
+            for name in ("_scrollbar_horizontal", "horizontal_scrollbar", "_parent_scrollbar"):
+                bar = getattr(self._info_scroll, name, None)
+                if bar is not None:
+                    try:
+                        bar.grid_remove()
+                    except Exception:
+                        try:
+                            bar.pack_forget()
+                        except Exception:
+                            pass
             return self._info_scroll
         try:
             self.info_body.pack(fill="x", padx=6, pady=(4, 8))
