@@ -33,7 +33,7 @@ from sheets_hub.ssl_setup import ca_bundle_path, configure_tls, session_verify_t
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 _RETRY_ATTEMPTS = 2
-_HTTP_TIMEOUT = (5, 15)
+_HTTP_TIMEOUT = (3, 12)
 
 
 class SheetsError(Exception):
@@ -87,7 +87,7 @@ def _fetch_url_curl(url: str, *, insecure: bool = False) -> str:
     if not curl:
         raise OSError("curl не найден")
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    cmd = [curl, "-fsSL", "--max-time", "20", url]
+    cmd = [curl, "-fsSL", "--max-time", "12", "--connect-timeout", "5", url]
     if insecure:
         cmd.insert(1, "-k")
     else:
@@ -95,7 +95,7 @@ def _fetch_url_curl(url: str, *, insecure: bool = False) -> str:
     result = subprocess.run(
         cmd,
         capture_output=True,
-        timeout=25,
+        timeout=15,
         creationflags=flags if sys.platform == "win32" else 0,
     )
     if result.returncode != 0:
@@ -108,12 +108,16 @@ def _fetch_url_powershell(url: str) -> str:
     if sys.platform != "win32":
         raise OSError("PowerShell доступен только в Windows")
     safe_url = url.replace("'", "''")
-    command = f"(Invoke-WebRequest -Uri '{safe_url}' -UseBasicParsing).Content"
+    # Короткий таймаут, чтобы не висеть минутами при SSL-блоке.
+    command = (
+        "$ProgressPreference='SilentlyContinue'; "
+        f"(Invoke-WebRequest -Uri '{safe_url}' -UseBasicParsing -TimeoutSec 12).Content"
+    )
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-Command", command],
         capture_output=True,
-        timeout=40,
+        timeout=16,
         creationflags=flags,
     )
     if result.returncode != 0:
@@ -140,23 +144,28 @@ def _fetch_url_requests(url: str, *, verify: bool | str) -> str:
 
 def _fetch_public_csv(spreadsheet_id: str, sheet: str = "") -> list[list[str]]:
     url = _public_csv_url(spreadsheet_id, sheet)
+    # Сначала самые быстрые варианты для Windows с битым SSL.
     attempts: list[tuple[str, object]] = []
     if sys.platform == "win32":
         attempts.extend(
             [
-                ("curl (Windows)", lambda: _fetch_url_curl(url)),
                 ("curl без проверки SSL", lambda: _fetch_url_curl(url, insecure=True)),
+                ("curl (Windows)", lambda: _fetch_url_curl(url)),
+                ("Python без проверки SSL", lambda: _fetch_url_requests(url, verify=False)),
                 ("PowerShell", lambda: _fetch_url_powershell(url)),
             ]
         )
     else:
-        attempts.append(("curl", lambda: _fetch_url_curl(url)))
+        attempts.extend(
+            [
+                ("curl", lambda: _fetch_url_curl(url)),
+                ("Python", lambda: _fetch_url_requests(url, verify=session_verify_target())),
+            ]
+        )
     configure_tls()
-    attempts.append(("Python", lambda: _fetch_url_requests(url, verify=session_verify_target())))
     ca = ca_bundle_path()
     if ca:
         attempts.append(("Python + cacert.pem", lambda c=ca: _fetch_url_requests(url, verify=c)))
-    attempts.append(("Python без проверки SSL", lambda: _fetch_url_requests(url, verify=False)))
 
     errors: list[str] = []
     for label, fetch in attempts:

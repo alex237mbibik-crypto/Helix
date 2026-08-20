@@ -173,8 +173,10 @@ class SheetsHubApp(ctk.CTk):
         self._picked: Record | None = None
         self._last_error_message = ""
         self.source_filter_var = tk.StringVar(value="")
+        self._suppress_source_trace = False
 
         self._build()
+        self._sync_source_filter_from_config()
         self.after(200, self._try_connect)
 
     def _fit_to_screen(self) -> None:
@@ -273,7 +275,6 @@ class SheetsHubApp(ctk.CTk):
 
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_: self._render_views())
-        self.source_filter_var.trace_add("write", lambda *_: self._render_views())
         _styled_entry(
             filter_area,
             "Поиск по имени, дате или телефону",
@@ -306,7 +307,7 @@ class SheetsHubApp(ctk.CTk):
             dropdown_hover_color=HOVER,
             font=ctk.CTkFont(size=13),
             state="readonly",
-            command=lambda _value: self._render_views(),
+            command=lambda _value: self._on_source_filter_changed(),
         )
         self.source_filter.pack(side="left")
         self.source_filter.set("Таблица")
@@ -550,6 +551,50 @@ class SheetsHubApp(ctk.CTk):
     def _valid_sources(self) -> list[SheetRef]:
         return self._tables()
 
+    def _selected_sources(self) -> list[SheetRef]:
+        tables = [ref for ref in self._tables() if not ref.is_placeholder()]
+        if not tables:
+            return []
+        selected = self.source_filter_var.get().strip()
+        if selected:
+            matched = [ref for ref in tables if ref.name == selected]
+            if matched:
+                return matched
+        return [tables[0]]
+
+    def _sync_source_filter_from_config(self) -> None:
+        names = [ref.name for ref in self._tables() if not ref.is_placeholder() and ref.name]
+        values = names or [""]
+        current = self.source_filter_var.get().strip()
+        self._suppress_source_trace = True
+        try:
+            self.source_filter.configure(values=values)
+            if current in values and current:
+                self.source_filter_var.set(current)
+            elif values and values[0]:
+                self.source_filter_var.set(values[0])
+            else:
+                self.source_filter_var.set("")
+                self.source_filter.set("Таблица")
+        finally:
+            self._suppress_source_trace = False
+
+    def _on_source_filter_changed(self, *_args) -> None:
+        if getattr(self, "_suppress_source_trace", False):
+            return
+        selected = self.source_filter_var.get().strip()
+        if not selected or selected == "Таблица":
+            self._render_views()
+            return
+        # Уже показана эта таблица — просто перерисовать.
+        if any(record.source_name == selected for record in self.records) or any(
+            record.source_name == selected for record in self.info_records
+        ):
+            self._render_views()
+            return
+        if self.client:
+            self.reload_all()
+
     def _try_connect(self, prompt_key: bool = True) -> None:
         if not self.config_data.credentials.exists():
             self.client = None
@@ -633,18 +678,21 @@ class SheetsHubApp(ctk.CTk):
             if not self.client:
                 return
         self._last_error_message = ""
-        sources = self._valid_sources()
+        self._sync_source_filter_from_config()
+        sources = self._selected_sources()
         if not sources:
             self.records = []
             self.info_records = []
-            self.source_filter.configure(values=[""])
-            self.source_filter_var.set("")
-            self.source_filter.set("Таблица")
+            self._sync_source_filter_from_config()
             self._render_table()
             self._render_info()
             self._set_status("Нет таблиц. Откройте «Таблицы» и вставьте ссылку на Google Таблицу.")
             return
-        self._set_status("Читаю таблицы…")
+        selected_name = sources[0].name
+        self.records = []
+        self.info_records = []
+        self._render_views()
+        self._set_status(f"Читаю «{selected_name}»…")
 
         def work():
             return self.client.fetch_all(sources)
@@ -654,30 +702,36 @@ class SheetsHubApp(ctk.CTk):
             self._last_error_message = "\n\n".join(errors[:8]) if errors else ""
             booking = [item for item in records if item.kind != KIND_INFO]
             self.info_records = [item for item in records if item.kind == KIND_INFO]
-            self._refresh_source_filter_options(booking, self.info_records)
+            self._sync_source_filter_from_config()
+            if selected_name and selected_name in [
+                ref.name for ref in self._tables() if not ref.is_placeholder()
+            ]:
+                self._suppress_source_trace = True
+                try:
+                    self.source_filter_var.set(selected_name)
+                finally:
+                    self._suppress_source_trace = False
             raw_count = len(booking)
             self.records = explode_records(booking)
             self._render_table()
             self._render_info()
             extra = f" · {len(errors)} ошибок" if errors else ""
             if getattr(self.client, "read_only_public", False):
-                extra += " · только чтение (обход SSL)"
+                extra += " · только чтение"
             booked = sum(1 for item in self.records if item.layout == "calendar" and item.values.get("Статус") == "Занято")
             slots = sum(1 for item in self.records if item.layout == "calendar")
             info_note = f" · справка: {len(self.info_records)}" if self.info_records else ""
             if slots:
-                self._set_status(f"Календарь: {slots} слотов, занято {booked}{info_note}{extra}")
+                self._set_status(f"{selected_name}: {slots} слотов, занято {booked}{info_note}{extra}")
             else:
                 split_note = ""
                 if len(self.records) > raw_count:
                     split_note = f" · разбито на {len(self.records)} пунктов"
                 self._set_status(
-                    f"Строк: {raw_count} из {len(sources)} источников{split_note}{info_note}{extra}"
+                    f"{selected_name}: строк {raw_count}{split_note}{info_note}{extra}"
                 )
             if errors:
-                messagebox.showwarning("Часть таблиц не загрузилась", "\n\n".join(errors[:8]))
-            elif getattr(self.client, "read_notes", None):
-                messagebox.showinfo("Календарь загружен", "\n\n".join(self.client.read_notes[:3]))
+                messagebox.showwarning("Таблица не загрузилась", "\n\n".join(errors[:8]))
 
         self._run_bg(work, done)
 
@@ -882,18 +936,6 @@ class SheetsHubApp(ctk.CTk):
     def _render_views(self) -> None:
         self._render_table()
         self._render_info()
-
-    def _refresh_source_filter_options(self, booking: list[Record], info: list[Record]) -> None:
-        names = sorted({record.source_name for record in [*booking, *info] if record.source_name})
-        values = names or [""]
-        current = self.source_filter_var.get().strip()
-        self.source_filter.configure(values=values)
-        if current not in values:
-            self.source_filter_var.set(values[0])
-        else:
-            self.source_filter_var.set(current)
-        if values == [""]:
-            self.source_filter.set("Таблица")
 
     def _filtered_info(self) -> list[Record]:
         query = self.search_var.get().strip().lower()
