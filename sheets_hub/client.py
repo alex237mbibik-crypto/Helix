@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import re
 import shutil
 import subprocess
@@ -13,6 +14,7 @@ from urllib.parse import quote
 
 import gspread
 import requests
+from google.auth import jwt as google_jwt
 from google.auth.transport.requests import AuthorizedSession
 from google.oauth2.service_account import Credentials
 from requests.adapters import HTTPAdapter
@@ -36,7 +38,10 @@ from sheets_hub.ssl_setup import ca_bundle_path, configure_tls, session_verify_t
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 _RETRY_ATTEMPTS = 2
-_HTTP_TIMEOUT = (3, 12)
+_HTTP_TIMEOUT = (3, 8)
+_PROBE_TIMEOUT = (2, 5)
+_TOKEN_URL = "https://oauth2.googleapis.com/token"
+_SHEETS_VALUES_URL = "https://sheets.googleapis.com/v4/spreadsheets/{sid}/values/{range}"
 
 
 class SheetsError(Exception):
@@ -293,6 +298,125 @@ def _parts_for_source(source: SheetRef, available: list[str] | None = None) -> l
     return parts
 
 
+def _col_to_a1(col: int) -> str:
+    """1-based column index → A, B, … AA."""
+    if col < 1:
+        raise ValueError("col must be >= 1")
+    letters: list[str] = []
+    n = col
+    while n:
+        n, rem = divmod(n - 1, 26)
+        letters.append(chr(65 + rem))
+    return "".join(reversed(letters))
+
+
+def _a1_range(sheet: str, row: int, col: int) -> str:
+    cell = f"{_col_to_a1(col)}{row}"
+    safe = (sheet or "Sheet1").replace("'", "''")
+    return f"'{safe}'!{cell}"
+
+
+def _curl_json(
+    method: str,
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    body: dict | None = None,
+    form: dict[str, str] | None = None,
+) -> dict:
+    """HTTP JSON через curl -k — обход битого SSL в Python на Windows."""
+    curl = shutil.which("curl.exe") or shutil.which("curl")
+    if not curl:
+        raise SheetsError("curl не найден — запись через обход SSL недоступна")
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    cmd = [
+        curl,
+        "-k",
+        "-fsSL",
+        "--max-time",
+        "20",
+        "--connect-timeout",
+        "8",
+        "-X",
+        method.upper(),
+        url,
+    ]
+    for key, value in (headers or {}).items():
+        cmd.extend(["-H", f"{key}: {value}"])
+    if body is not None:
+        cmd.extend(["-H", "Content-Type: application/json; charset=utf-8"])
+        cmd.extend(["--data-binary", json.dumps(body, ensure_ascii=False)])
+    if form is not None:
+        for key, value in form.items():
+            cmd.extend(["--data-urlencode", f"{key}={value}"])
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        timeout=25,
+        creationflags=flags if sys.platform == "win32" else 0,
+    )
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or b"").decode("utf-8", errors="replace").strip()
+        raise SheetsError(err or f"curl {method} завершился с кодом {result.returncode}")
+    text = result.stdout.decode("utf-8-sig", errors="replace").strip()
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise SheetsError(f"Неожиданный ответ API: {text[:200]}") from exc
+
+
+def _access_token_via_curl(credentials_path: Path) -> str:
+    creds = Credentials.from_service_account_file(str(credentials_path), scopes=SCOPES)
+    now = int(time.time())
+    payload = {
+        "iss": creds.service_account_email,
+        "sub": creds.service_account_email,
+        "aud": _TOKEN_URL,
+        "iat": now,
+        "exp": now + 3600,
+        "scope": " ".join(SCOPES),
+    }
+    assertion = google_jwt.encode(creds.signer, payload)
+    if isinstance(assertion, bytes):
+        assertion = assertion.decode("ascii")
+    data = _curl_json(
+        "POST",
+        _TOKEN_URL,
+        form={
+            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+            "assertion": assertion,
+        },
+    )
+    token = str(data.get("access_token") or "").strip()
+    if not token:
+        raise SheetsError(f"Не получили access_token: {data}")
+    return token
+
+
+def _update_cell_via_curl(
+    credentials_path: Path,
+    spreadsheet_id: str,
+    sheet: str,
+    row: int,
+    col: int,
+    value: str,
+) -> None:
+    token = _access_token_via_curl(credentials_path)
+    cell_range = _a1_range(sheet, row, col)
+    url = (
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/"
+        f"{quote(cell_range, safe='')}?valueInputOption=USER_ENTERED"
+    )
+    _curl_json(
+        "PUT",
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+        body={"range": cell_range, "majorDimension": "ROWS", "values": [[value]]},
+    )
+
+
 def _can_try_public_read(source: SheetRef) -> bool:
     spreadsheet_id = source.normalized_id()
     return bool(spreadsheet_id) and not spreadsheet_id.upper().startswith("PASTE_")
@@ -541,11 +665,8 @@ class SheetsClient:
             available = _list_public_sheet_titles(sid)
         except Exception:
             available = []
-        if not available:
-            try:
-                available = self.list_sheets(source.spreadsheet_id)
-            except Exception:
-                available = []
+        # Не зовём Sheets API list_sheets здесь — на Windows это часто зависает
+        # и весь UI остаётся на «Обновляю…».
         parts = _parts_for_source(source, available or None)
         loaded: list[Record] = []
         errors: list[Exception] = []
@@ -592,15 +713,15 @@ class SheetsClient:
         raise SheetsError(f"Не удалось прочитать «{source.name}»")
 
     def _mark_public_read(self, source_name: str, spreadsheet_id: str = "") -> None:
-        # CSV-чтение не запрещает запись: если API жив — пишем как обычно.
-        if spreadsheet_id and self.probe_api(spreadsheet_id):
-            self.read_only_public = False
-            return
+        # Не вызываем probe_api здесь: на Windows SSL-запрос может зависнуть
+        # и UI навсегда останется на «Обновляю… / Читаю…».
         self.read_only_public = True
-        self.read_notes.append(
-            f"{source_name}: календарь прочитан напрямую (обход SSL). "
-            "Запись в ячейки может не работать, пока не починится соединение с Google API."
+        note = (
+            f"{source_name}: календарь прочитан напрямую (CSV). "
+            "Запись попробуем через API при сохранении ячейки."
         )
+        if note not in self.read_notes:
+            self.read_notes.append(note)
 
     def fetch_all(self, sources: list[SheetRef]) -> tuple[list[Record], list[str]]:
         records: list[Record] = []
@@ -652,28 +773,41 @@ class SheetsClient:
             )
             self._call(lambda: worksheet.update_cell(record.row, col, cell_value))
 
+        errors: list[str] = []
         try:
             _do_update()
         except Exception as exc:
-            # Повтор с отключённой проверкой SSL — частый обход на Windows.
-            if _is_network_error(exc) and not getattr(self, "_api_insecure", False):
+            errors.append(str(exc))
+            # 1) gspread без проверки SSL
+            if not getattr(self, "_api_insecure", False):
                 try:
                     self._connect(insecure=True)
                     _do_update()
+                    errors.clear()
                 except Exception as exc2:
-                    raise SheetsError(
-                        "Не удалось записать в Google Таблицу.\n"
-                        "Чтение может работать через CSV, а запись идёт через API.\n"
-                        "Отключите VPN и проверку HTTPS в антивирусе, "
-                        f"проверьте доступ Редактора для {getattr(self, 'service_email', 'сервисного аккаунта')}.\n"
-                        f"Детали: {exc2}"
-                    ) from exc2
-            else:
-                raise SheetsError(
-                    "Не удалось записать в Google Таблицу.\n"
-                    f"Проверьте доступ Редактора для {getattr(self, 'service_email', 'сервисного аккаунта')}.\n"
-                    f"Детали: {exc}"
-                ) from exc
+                    errors.append(str(exc2))
+            # 2) curl -k + JWT — тот же обход, что и для чтения CSV на Windows
+            if errors:
+                try:
+                    _update_cell_via_curl(
+                        self._credentials_path,
+                        record.spreadsheet_id,
+                        record.sheet,
+                        record.row,
+                        col,
+                        cell_value,
+                    )
+                    errors.clear()
+                except Exception as exc3:
+                    errors.append(str(exc3))
+        if errors:
+            raise SheetsError(
+                "Не удалось записать в Google Таблицу.\n"
+                f"Сервисный аккаунт: {getattr(self, 'service_email', '')}\n"
+                "Выдайте ему роль «Редактор» на таблицу.\n"
+                "Если доступ уже есть — отключите VPN и проверку HTTPS в антивирусе.\n"
+                f"Детали: {errors[-1]}"
+            )
         record.values[field] = value
         if header != field:
             record.values[header] = value

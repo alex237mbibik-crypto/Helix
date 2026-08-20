@@ -563,29 +563,34 @@ class SheetsHubApp(ctk.CTk):
             self.tree.column(col, width=base + (1 if i < remainder else 0), stretch=True, minwidth=80)
 
     def _on_cal_x_host_configure(self, _event=None) -> None:
-        if self._cal_resizing or self._cal_scroll_lock:
-            return
-        self.cal_x_canvas.configure(scrollregion=self.cal_x_canvas.bbox("all"))
+        try:
+            self.cal_x_canvas.configure(scrollregion=self.cal_x_canvas.bbox("all"))
+        except tk.TclError:
+            pass
 
     def _on_cal_x_canvas_configure(self, event) -> None:
+        # Высоту всегда синхронизируем — иначе после отрисовки остаётся пустое окно.
+        try:
+            self.cal_x_canvas.itemconfigure(self._cal_x_window, height=max(1, event.height))
+        except tk.TclError:
+            return
         if self._cal_resizing or self._cal_scroll_lock:
             return
-        # Высота внутреннего блока = видимая высота горизонтального canvas.
-        self.cal_x_canvas.itemconfigure(self._cal_x_window, height=max(1, event.height))
-        # Тянем столбцы только при реальном изменении ширины окна (не на каждый скролл).
         self._schedule_calendar_stretch()
 
     def _on_cal_host_configure(self, _event=None) -> None:
-        if self._cal_resizing or self._cal_scroll_lock:
-            return
-        self.cal_canvas.configure(scrollregion=self.cal_canvas.bbox("all"))
+        try:
+            self.cal_canvas.configure(scrollregion=self.cal_canvas.bbox("all"))
+        except tk.TclError:
+            pass
 
     def _on_cal_canvas_configure(self, event) -> None:
-        if self._cal_resizing or self._cal_scroll_lock:
-            return
-        req_w = max(event.width, getattr(self, "_cal_total_w", 0), self.cal_host.winfo_reqwidth(), 1)
-        self.cal_canvas.itemconfigure(self._cal_window, width=req_w)
-        self.cal_canvas.configure(scrollregion=self.cal_canvas.bbox("all"))
+        try:
+            req_w = max(event.width, getattr(self, "_cal_total_w", 0), 1)
+            self.cal_canvas.itemconfigure(self._cal_window, width=req_w)
+            self.cal_canvas.configure(scrollregion=self.cal_canvas.bbox("all"))
+        except tk.TclError:
+            pass
 
     def _calendar_viewport_width(self) -> int:
         try:
@@ -727,14 +732,20 @@ class SheetsHubApp(ctk.CTk):
         return int(-event.delta / 120) if event.delta else 0
 
     def _refresh_cal_scroll(self) -> None:
-        self.cal_host.update_idletasks()
-        self.cal_header_host.update_idletasks()
-        self.cal_x_host.update_idletasks()
-        self.cal_canvas.yview_moveto(0)
-        self.cal_x_canvas.xview_moveto(0)
-        self._cal_viewport_w = 0
-        self._stretch_calendar_to_viewport()
-        self._fit_calendar_height()
+        try:
+            self.cal_host.update_idletasks()
+            self.cal_header_host.update_idletasks()
+            self.cal_x_host.update_idletasks()
+            # Принудительно задаём высоту внутренней области — иначе после draw бывает «пусто».
+            x_h = max(1, self.cal_x_canvas.winfo_height())
+            self.cal_x_canvas.itemconfigure(self._cal_x_window, height=x_h)
+            self.cal_canvas.yview_moveto(0)
+            self.cal_x_canvas.xview_moveto(0)
+            self._cal_viewport_w = 0
+            self._stretch_calendar_to_viewport()
+            self._fit_calendar_height()
+        except tk.TclError:
+            pass
 
     def _set_status(self, text: str) -> None:
         self.status.configure(text=text)
@@ -1170,9 +1181,16 @@ class SheetsHubApp(ctk.CTk):
                 return
             ((_, _, name), items) = next(iter(groups.items()))
             self._draw_one_calendar(name, items)
+            # Канвасы должны оставаться в сетке.
+            try:
+                self.cal_canvas.grid(row=1, column=0, sticky="nsew")
+                self.cal_x_canvas.grid(row=1, column=0, sticky="nsew")
+            except tk.TclError:
+                pass
         finally:
             self._cal_resizing = False
         self.after_idle(self._refresh_cal_scroll)
+        self.after(50, self._refresh_cal_scroll)
         self.after_idle(self._apply_calendar_search_styles)
 
     def _draw_one_calendar(self, name: str, items: list[Record]) -> None:
@@ -1553,15 +1571,6 @@ class SheetsHubApp(ctk.CTk):
             if not self.client:
                 messagebox.showerror("Нет подключения", "Сначала настройте ключ в «Таблицы».")
                 return
-            if getattr(self.client, "read_only_public", False):
-                go = messagebox.askokcancel(
-                    "Запись через API",
-                    "Таблица сейчас читается напрямую (CSV).\n"
-                    "Попробуем всё равно сохранить через Google API.\n"
-                    "Если не получится — отключите VPN и проверку HTTPS в антивирусе.",
-                )
-                if not go:
-                    return
 
             def work():
                 to_write = write_back_value(record, field, value)
