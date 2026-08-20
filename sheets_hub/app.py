@@ -38,10 +38,10 @@ SLOT_GREEN = "#7cb342"
 SLOT_BOOKED = "#558b2f"
 SLOT_BLOCKED = "#f1f3f4"
 SLOT_TIME = "#f1f3f4"
-SLOT_OUTLINE = "#000000"
+SLOT_OUTLINE = "#c5c8ce"
 CAL_TIME_W = 64
 CAL_DATE_W = 128
-CAL_ROW_H = 30
+CAL_ROW_H = 32
 INFO_TONES = {
     "warn": ("#f8d7c4", "#c5221f"),
     "ok": ("#7cb342", "#202124"),
@@ -1205,6 +1205,8 @@ class SheetsHubApp(ctk.CTk):
 
         header = self.cal_header_host
         body = self.cal_host
+        header.configure(bg=SLOT_OUTLINE)
+        body.configure(bg=SLOT_OUTLINE)
         time_w = self._cal_time_col_w
         # Сразу берём ширину окна, если уже известна — иначе минимум.
         date_w = self._compute_date_col_width() if self._calendar_viewport_width() > 40 else self._cal_date_w
@@ -1241,7 +1243,7 @@ class SheetsHubApp(ctk.CTk):
             )
 
         for row, time in enumerate(times):
-            body.grid_rowconfigure(row, weight=1, minsize=CAL_ROW_H)
+            body.grid_rowconfigure(row, weight=0, minsize=CAL_ROW_H)
             self._cal_body_cell(
                 body,
                 row,
@@ -1262,38 +1264,35 @@ class SheetsHubApp(ctk.CTk):
         self._cal_col_frames.setdefault(col, []).append(cell)
 
     def _cal_header_cell(self, parent: tk.Frame, row: int, col: int, width: int, **kwargs) -> tk.Label:
+        # Сетка = фон родителя; у ячейки без чёрной обводки (на Windows highlight даёт полосы).
         cell = tk.Frame(
             parent,
-            width=width,
+            width=max(8, width - 2),
             height=34,
             bg=kwargs.get("bg", GREEN),
-            highlightthickness=1,
-            highlightbackground=SLOT_OUTLINE,
-            highlightcolor=SLOT_OUTLINE,
+            highlightthickness=0,
             bd=0,
         )
-        cell.grid(row=row, column=col, sticky="nsew")
+        cell.grid(row=row, column=col, sticky="nw", padx=1, pady=1)
         cell.grid_propagate(False)
         self._register_cal_cell(col, cell)
-        label = tk.Label(cell, padx=4, pady=6, **kwargs)
+        label = tk.Label(cell, padx=4, pady=6, borderwidth=0, highlightthickness=0, **kwargs)
         label.pack(fill="both", expand=True)
         return label
 
     def _cal_body_cell(self, parent: tk.Frame, row: int, col: int, width: int, **kwargs) -> tk.Label:
         cell = tk.Frame(
             parent,
-            width=width,
+            width=max(8, width - 2),
             height=CAL_ROW_H,
             bg=kwargs.get("bg", CARD),
-            highlightthickness=1,
-            highlightbackground=SLOT_OUTLINE,
-            highlightcolor=SLOT_OUTLINE,
+            highlightthickness=0,
             bd=0,
         )
-        cell.grid(row=row, column=col, sticky="nsew")
+        cell.grid(row=row, column=col, sticky="nw", padx=1, pady=1)
         cell.grid_propagate(False)
         self._register_cal_cell(col, cell)
-        label = tk.Label(cell, padx=4, pady=2, **kwargs)
+        label = tk.Label(cell, padx=4, pady=2, borderwidth=0, highlightthickness=0, **kwargs)
         label.pack(fill="both", expand=True)
         return label
 

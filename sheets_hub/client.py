@@ -3,13 +3,16 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
 import time
+import tempfile
 from dataclasses import replace
 from pathlib import Path
+from typing import Callable
 from urllib.parse import quote
 
 import gspread
@@ -332,39 +335,55 @@ def _curl_json(
     cmd = [
         curl,
         "-k",
-        "-fsSL",
+        "-sS",
         "--max-time",
-        "20",
+        "25",
         "--connect-timeout",
-        "8",
+        "10",
         "-X",
         method.upper(),
         url,
     ]
     for key, value in (headers or {}).items():
         cmd.extend(["-H", f"{key}: {value}"])
-    if body is not None:
-        cmd.extend(["-H", "Content-Type: application/json; charset=utf-8"])
-        cmd.extend(["--data-binary", json.dumps(body, ensure_ascii=False)])
-    if form is not None:
-        for key, value in form.items():
-            cmd.extend(["--data-urlencode", f"{key}={value}"])
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        timeout=25,
-        creationflags=flags if sys.platform == "win32" else 0,
-    )
+    tmp_path: Path | None = None
+    try:
+        if body is not None:
+            cmd.extend(["-H", "Content-Type: application/json; charset=utf-8"])
+            # Через файл — надёжнее для кириллицы и длинных тел на Windows.
+            fd, name = tempfile.mkstemp(prefix="sheets_hub_", suffix=".json")
+            os.close(fd)
+            tmp_path = Path(name)
+            tmp_path.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+            cmd.extend(["--data-binary", f"@{tmp_path}"])
+        if form is not None:
+            for key, value in form.items():
+                cmd.extend(["--data-urlencode", f"{key}={value}"])
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=30,
+            creationflags=flags if sys.platform == "win32" else 0,
+        )
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+    text = (result.stdout or b"").decode("utf-8-sig", errors="replace").strip()
+    err = (result.stderr or b"").decode("utf-8", errors="replace").strip()
     if result.returncode != 0:
-        err = (result.stderr or result.stdout or b"").decode("utf-8", errors="replace").strip()
-        raise SheetsError(err or f"curl {method} завершился с кодом {result.returncode}")
-    text = result.stdout.decode("utf-8-sig", errors="replace").strip()
+        raise SheetsError(err or text or f"curl {method} код {result.returncode}")
     if not text:
         return {}
     try:
-        return json.loads(text)
+        data = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise SheetsError(f"Неожиданный ответ API: {text[:200]}") from exc
+        raise SheetsError(f"Неожиданный ответ API: {text[:300]}") from exc
+    if isinstance(data, dict) and data.get("error"):
+        raise SheetsError(str(data.get("error")))
+    return data if isinstance(data, dict) else {}
 
 
 def _access_token_via_curl(credentials_path: Path) -> str:
@@ -767,46 +786,54 @@ class SheetsClient:
         if record.layout == "calendar" and field == "Клиент":
             cell_value = value.strip() or "запись"
 
-        def _do_update() -> None:
+        def _do_gspread() -> None:
             worksheet = self._call(
                 lambda: self._gc.open_by_key(record.spreadsheet_id).worksheet(record.sheet)
             )
             self._call(lambda: worksheet.update_cell(record.row, col, cell_value))
 
+        def _do_curl() -> None:
+            _update_cell_via_curl(
+                self._credentials_path,
+                record.spreadsheet_id,
+                record.sheet,
+                record.row,
+                col,
+                cell_value,
+            )
+
         errors: list[str] = []
-        try:
-            _do_update()
-        except Exception as exc:
-            errors.append(str(exc))
-            # 1) gspread без проверки SSL
-            if not getattr(self, "_api_insecure", False):
-                try:
-                    self._connect(insecure=True)
-                    _do_update()
-                    errors.clear()
-                except Exception as exc2:
-                    errors.append(str(exc2))
-            # 2) curl -k + JWT — тот же обход, что и для чтения CSV на Windows
-            if errors:
-                try:
-                    _update_cell_via_curl(
-                        self._credentials_path,
-                        record.spreadsheet_id,
-                        record.sheet,
-                        record.row,
-                        col,
-                        cell_value,
-                    )
-                    errors.clear()
-                except Exception as exc3:
-                    errors.append(str(exc3))
-        if errors:
+        # На Windows Python-SSL к oauth2 часто мёртв — сразу curl -k.
+        attempts: list[tuple[str, Callable]] = []
+
+        def _do_insecure() -> None:
+            self._connect(insecure=True)
+            _do_gspread()
+
+        if sys.platform == "win32":
+            attempts.append(("curl", _do_curl))
+            attempts.append(("gspread insecure", _do_insecure))
+        else:
+            attempts.append(("gspread", _do_gspread))
+            attempts.append(("curl", _do_curl))
+            attempts.append(("gspread insecure", _do_insecure))
+
+        ok = False
+        for _label, action in attempts:
+            try:
+                action()
+                ok = True
+                break
+            except Exception as exc:
+                errors.append(str(exc))
+
+        if not ok:
             raise SheetsError(
                 "Не удалось записать в Google Таблицу.\n"
                 f"Сервисный аккаунт: {getattr(self, 'service_email', '')}\n"
-                "Выдайте ему роль «Редактор» на таблицу.\n"
-                "Если доступ уже есть — отключите VPN и проверку HTTPS в антивирусе.\n"
-                f"Детали: {errors[-1]}"
+                "1) Выдайте ему роль «Редактор» на эту таблицу.\n"
+                "2) Отключите VPN и проверку HTTPS в антивирусе.\n"
+                f"Детали: {errors[-1] if errors else 'нет деталей'}"
             )
         record.values[field] = value
         if header != field:
