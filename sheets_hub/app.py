@@ -38,10 +38,10 @@ SLOT_GREEN = "#7cb342"
 SLOT_BOOKED = "#558b2f"
 SLOT_BLOCKED = "#f1f3f4"
 SLOT_TIME = "#f1f3f4"
-SLOT_OUTLINE = "#c5c8ce"
+SLOT_OUTLINE = "#dadce0"
 CAL_TIME_W = 64
 CAL_DATE_W = 128
-CAL_ROW_H = 32
+CAL_ROW_H = 30
 INFO_TONES = {
     "warn": ("#f8d7c4", "#c5221f"),
     "ok": ("#7cb342", "#202124"),
@@ -63,19 +63,9 @@ SELECT = "#ceead6"
 
 
 def _enable_windows_dpi() -> None:
-    if sys.platform != "win32":
-        return
-    try:
-        from ctypes import windll
-
-        windll.shcore.SetProcessDpiAwareness(1)
-    except Exception:
-        try:
-            from ctypes import windll
-
-            windll.user32.SetProcessDPIAware()
-        except Exception:
-            pass
+    # Не трогаем DPI вручную: CustomTkinter сам масштабирует.
+    # SetProcessDpiAwareness + CTk на Windows даёт «разъехавшийся» интерфейс.
+    return
 
 
 def _ui_font(size: int = 13, bold: bool = False):
@@ -641,13 +631,14 @@ class SheetsHubApp(ctk.CTk):
                     host.grid_columnconfigure(col, minsize=date_w, weight=0)
             for col, frames in self._cal_col_frames.items():
                 width = time_w if col == 0 else date_w
+                cell_w = max(8, width - 2)
                 for frame in frames:
                     try:
                         # Только ширина — высоту ячеек не трогаем, иначе «прыгают» строки.
-                        frame.configure(width=width)
+                        frame.configure(width=cell_w)
                         for child in frame.winfo_children():
                             if isinstance(child, tk.Label):
-                                child.configure(wraplength=max(20, width - 10))
+                                child.configure(wraplength=max(20, cell_w - 10))
                     except tk.TclError:
                         pass
             self._sync_calendar_widths()
@@ -915,7 +906,7 @@ class SheetsHubApp(ctk.CTk):
             self._schedule_render(immediate=True)
             extra = f" · {len(errors)} ошибок" if errors else ""
             if getattr(self.client, "read_only_public", False):
-                extra += " · только чтение"
+                extra += " · чтение CSV"
             booked = sum(1 for item in self.records if item.layout == "calendar" and item.values.get("Статус") == "Занято")
             slots = sum(1 for item in self.records if item.layout == "calendar")
             info_note = f" · справка: {len(self.info_records)}" if self.info_records else ""
@@ -1205,6 +1196,7 @@ class SheetsHubApp(ctk.CTk):
 
         header = self.cal_header_host
         body = self.cal_host
+        # Фон-сетка между ячейками (padx/pady=1), без highlight — иначе на Windows полосы.
         header.configure(bg=SLOT_OUTLINE)
         body.configure(bg=SLOT_OUTLINE)
         time_w = self._cal_time_col_w
@@ -1264,7 +1256,6 @@ class SheetsHubApp(ctk.CTk):
         self._cal_col_frames.setdefault(col, []).append(cell)
 
     def _cal_header_cell(self, parent: tk.Frame, row: int, col: int, width: int, **kwargs) -> tk.Label:
-        # Сетка = фон родителя; у ячейки без чёрной обводки (на Windows highlight даёт полосы).
         cell = tk.Frame(
             parent,
             width=max(8, width - 2),
@@ -1273,7 +1264,8 @@ class SheetsHubApp(ctk.CTk):
             highlightthickness=0,
             bd=0,
         )
-        cell.grid(row=row, column=col, sticky="nw", padx=1, pady=1)
+        # sticky=nsew — ячейка заполняет колонку (иначе серые «дыры» при растягивании).
+        cell.grid(row=row, column=col, sticky="nsew", padx=1, pady=1)
         cell.grid_propagate(False)
         self._register_cal_cell(col, cell)
         label = tk.Label(cell, padx=4, pady=6, borderwidth=0, highlightthickness=0, **kwargs)
@@ -1289,7 +1281,7 @@ class SheetsHubApp(ctk.CTk):
             highlightthickness=0,
             bd=0,
         )
-        cell.grid(row=row, column=col, sticky="nw", padx=1, pady=1)
+        cell.grid(row=row, column=col, sticky="nsew", padx=1, pady=1)
         cell.grid_propagate(False)
         self._register_cal_cell(col, cell)
         label = tk.Label(cell, padx=4, pady=2, borderwidth=0, highlightthickness=0, **kwargs)
@@ -1897,5 +1889,12 @@ def main() -> None:
     _enable_windows_dpi()
     ctk.set_appearance_mode("light")
     ctk.set_default_color_theme("green")
+    # Не удваиваем масштаб поверх системного DPI Windows.
+    if sys.platform == "win32":
+        try:
+            ctk.set_widget_scaling(1.0)
+            ctk.set_window_scaling(1.0)
+        except Exception:
+            pass
     app = SheetsHubApp()
     app.mainloop()

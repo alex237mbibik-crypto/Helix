@@ -414,6 +414,115 @@ def _access_token_via_curl(credentials_path: Path) -> str:
     return token
 
 
+def _powershell_trust_preamble(class_name: str) -> str:
+    return (
+        "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; "
+        "try { "
+        f"if (-not ([System.Management.Automation.PSTypeName]'{class_name}').Type) {{ "
+        "Add-Type @'\n"
+        "using System.Net;\n"
+        "using System.Security.Cryptography.X509Certificates;\n"
+        f"public class {class_name} {{ public static bool Ok(object s,X509Certificate c,X509Chain ch,SslPolicyErrors e){{return true;}} }}\n"
+        "'@ }}; "
+        f"[Net.ServicePointManager]::ServerCertificateValidationCallback = [{class_name}]::Ok "
+        "} catch {} "
+        "try { "
+        "if (Get-Command Invoke-RestMethod -ErrorAction SilentlyContinue) { "
+        "$PSDefaultParameterValues['Invoke-RestMethod:SkipCertificateCheck'] = $true "
+        "} } catch {} "
+    )
+
+
+def _access_token_via_powershell(credentials_path: Path) -> str:
+    """Токен через PowerShell — если curl к oauth2 тоже режется."""
+    if sys.platform != "win32":
+        raise SheetsError("PowerShell доступен только в Windows")
+    creds = Credentials.from_service_account_file(str(credentials_path), scopes=SCOPES)
+    now = int(time.time())
+    payload = {
+        "iss": creds.service_account_email,
+        "sub": creds.service_account_email,
+        "aud": _TOKEN_URL,
+        "iat": now,
+        "exp": now + 3600,
+        "scope": " ".join(SCOPES),
+    }
+    assertion = google_jwt.encode(creds.signer, payload)
+    if isinstance(assertion, bytes):
+        assertion = assertion.decode("ascii")
+    safe_assertion = assertion.replace("'", "''")
+    command = (
+        _powershell_trust_preamble("SheetsHubTrust")
+        + "$body = @{ grant_type = 'urn:ietf:params:oauth:grant-type:jwt-bearer'; "
+        + f"assertion = '{safe_assertion}' }}; "
+        + f"$r = Invoke-RestMethod -Uri '{_TOKEN_URL}' -Method Post -Body $body; "
+        + "$r.access_token"
+    )
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Command", command],
+        capture_output=True,
+        timeout=35,
+        creationflags=flags,
+    )
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or b"").decode("utf-8", errors="replace").strip()
+        raise SheetsError(err or "PowerShell token failed")
+    token = (result.stdout or b"").decode("utf-8", errors="replace").strip()
+    if not token or " " in token or len(token) < 20:
+        raise SheetsError(f"Не получили access_token через PowerShell: {token[:120]}")
+    return token
+
+
+def _update_cell_via_powershell(
+    credentials_path: Path,
+    spreadsheet_id: str,
+    sheet: str,
+    row: int,
+    col: int,
+    value: str,
+) -> None:
+    token = _access_token_via_powershell(credentials_path)
+    cell_range = _a1_range(sheet, row, col)
+    url = (
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/"
+        f"{quote(cell_range, safe='')}?valueInputOption=USER_ENTERED"
+    )
+    payload = {"range": cell_range, "majorDimension": "ROWS", "values": [[value]]}
+    fd, name = tempfile.mkstemp(prefix="sheets_hub_ps_", suffix=".json")
+    os.close(fd)
+    tmp_path = Path(name)
+    try:
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        safe_url = url.replace("'", "''")
+        safe_token = token.replace("'", "''")
+        # Windows path → одинарные кавычки PowerShell.
+        safe_file = str(tmp_path).replace("'", "''")
+        command = (
+            _powershell_trust_preamble("SheetsHubTrust2")
+            + f"$headers = @{{ Authorization = 'Bearer {safe_token}' }}; "
+            + f"$raw = [System.IO.File]::ReadAllText('{safe_file}', [System.Text.Encoding]::UTF8); "
+            + f"Invoke-RestMethod -Uri '{safe_url}' -Method Put -Headers $headers "
+            + "-ContentType 'application/json; charset=utf-8' "
+            + "-Body ([Text.Encoding]::UTF8.GetBytes($raw)) | Out-Null"
+        )
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", command],
+            capture_output=True,
+            timeout=35,
+            creationflags=flags,
+        )
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout or b"").decode("utf-8", errors="replace").strip()
+            raise SheetsError(err or "PowerShell write failed")
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 def _update_cell_via_curl(
     credentials_path: Path,
     spreadsheet_id: str,
@@ -802,8 +911,18 @@ class SheetsClient:
                 cell_value,
             )
 
+        def _do_powershell() -> None:
+            _update_cell_via_powershell(
+                self._credentials_path,
+                record.spreadsheet_id,
+                record.sheet,
+                record.row,
+                col,
+                cell_value,
+            )
+
         errors: list[str] = []
-        # На Windows Python-SSL к oauth2 часто мёртв — сразу curl -k.
+        # На Windows Python-SSL к oauth2 часто мёртв — curl/PowerShell с обходом SSL.
         attempts: list[tuple[str, Callable]] = []
 
         def _do_insecure() -> None:
@@ -812,6 +931,7 @@ class SheetsClient:
 
         if sys.platform == "win32":
             attempts.append(("curl", _do_curl))
+            attempts.append(("powershell", _do_powershell))
             attempts.append(("gspread insecure", _do_insecure))
         else:
             attempts.append(("gspread", _do_gspread))
