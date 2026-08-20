@@ -174,6 +174,11 @@ class SheetsHubApp(ctk.CTk):
         self._last_error_message = ""
         self.source_filter_var = tk.StringVar(value="")
         self._suppress_source_trace = False
+        self._search_after_id: str | None = None
+        self._render_after_id: str | None = None
+        self._calendar_fp: tuple | None = None
+        self._slot_labels: dict[tuple[str, str], tk.Label] = {}
+        self._rendering = False
 
         self._build()
         self._sync_source_filter_from_config()
@@ -274,7 +279,7 @@ class SheetsHubApp(ctk.CTk):
         filter_area.grid_columnconfigure(1, weight=0)
 
         self.search_var = tk.StringVar()
-        self.search_var.trace_add("write", lambda *_: self._render_views())
+        self.search_var.trace_add("write", lambda *_: self._on_search_changed())
         _styled_entry(
             filter_area,
             "Поиск по имени, дате или телефону",
@@ -299,7 +304,7 @@ class SheetsHubApp(ctk.CTk):
             border_width=1,
             border_color=BORDER,
             fg_color=CARD,
-            button_color=LINE,
+            button_color=CARD,
             button_hover_color=HOVER,
             text_color=TEXT,
             dropdown_fg_color=CARD,
@@ -352,7 +357,7 @@ class SheetsHubApp(ctk.CTk):
         inner = tk.Frame(table_wrap, bg=CARD, highlightthickness=0)
         inner.grid(row=1, column=0, sticky="nsew", padx=1, pady=(0, 1))
         inner.grid_columnconfigure(0, weight=1)
-        inner.grid_rowconfigure(1, weight=1)
+        inner.grid_rowconfigure(0, weight=1)
         self._table_inner = inner
 
         self.tree = ttk.Treeview(inner, show="headings", selectmode="browse")
@@ -365,46 +370,64 @@ class SheetsHubApp(ctk.CTk):
         self.tree.bind("<Delete>", lambda *_: self._delete_row())
         self._style_treeview()
 
-        # Шапка календаря (даты) — не скроллится по вертикали.
-        self.cal_header = tk.Frame(inner, bg=CARD, highlightthickness=0)
+        # Календарь: горизонтальный скролл общий, вертикальный — только у слотов.
+        # Даты живут вне вертикального canvas → не моргают и не пропадают.
+        self.cal_shell = tk.Frame(inner, bg=CARD, highlightthickness=0)
+        self.cal_shell.grid_columnconfigure(0, weight=1)
+        self.cal_shell.grid_rowconfigure(1, weight=1)
+
         self.cal_header_title = tk.Label(
-            self.cal_header,
+            self.cal_shell,
             text="",
             bg=CARD,
             fg=TEXT,
             font=_ui_font(13, bold=True),
             anchor="w",
         )
-        self.cal_header_title.pack(fill="x", padx=4, pady=(0, 2))
-        self.cal_header_canvas = tk.Canvas(self.cal_header, bg=CARD, highlightthickness=0, bd=0, height=36)
-        self.cal_header_canvas.pack(fill="x", expand=False)
-        self.cal_header_host = tk.Frame(self.cal_header_canvas, bg=CARD)
-        self._cal_header_window = self.cal_header_canvas.create_window(
-            (0, 0), window=self.cal_header_host, anchor="nw"
-        )
-        self.cal_header_host.bind("<Configure>", self._on_cal_header_configure)
-        self.cal_header.bind("<MouseWheel>", self._on_cal_wheel)
-        self.cal_header_canvas.bind("<MouseWheel>", self._on_cal_wheel)
-        self.cal_header.bind("<Shift-MouseWheel>", self._on_cal_shift_wheel)
-        self.cal_header_canvas.bind("<Shift-MouseWheel>", self._on_cal_shift_wheel)
+        self.cal_header_title.grid(row=0, column=0, columnspan=2, sticky="ew", padx=4, pady=(0, 2))
 
-        self.cal_canvas = tk.Canvas(inner, bg=CARD, highlightthickness=0, bd=0)
-        self.cal_vsb = ttk.Scrollbar(inner, orient="vertical", command=self.cal_canvas.yview)
-        self.cal_hsb = ttk.Scrollbar(inner, orient="horizontal", command=self._on_cal_xscroll)
-        self.cal_canvas.configure(yscrollcommand=self.cal_vsb.set, xscrollcommand=self._on_cal_xscroll_set)
+        self.cal_x_canvas = tk.Canvas(self.cal_shell, bg=CARD, highlightthickness=0, bd=0)
+        self.cal_hsb = ttk.Scrollbar(self.cal_shell, orient="horizontal", command=self.cal_x_canvas.xview)
+        self.cal_x_canvas.configure(xscrollcommand=self.cal_hsb.set)
+        self.cal_x_canvas.grid(row=1, column=0, sticky="nsew")
+        self.cal_hsb.grid(row=2, column=0, sticky="ew")
+
+        self.cal_x_host = tk.Frame(self.cal_x_canvas, bg=CARD)
+        self._cal_x_window = self.cal_x_canvas.create_window((0, 0), window=self.cal_x_host, anchor="nw")
+        self.cal_x_host.grid_columnconfigure(0, weight=1)
+        self.cal_x_host.grid_rowconfigure(1, weight=1)
+
+        self.cal_header_host = tk.Frame(self.cal_x_host, bg=CARD, highlightthickness=0)
+        self.cal_header_host.grid(row=0, column=0, sticky="ew")
+
+        self.cal_canvas = tk.Canvas(self.cal_x_host, bg=CARD, highlightthickness=0, bd=0)
+        self.cal_canvas.grid(row=1, column=0, sticky="nsew")
         self.cal_host = tk.Frame(self.cal_canvas, bg=CARD)
         self._cal_window = self.cal_canvas.create_window((0, 0), window=self.cal_host, anchor="nw")
+
+        self.cal_vsb = ttk.Scrollbar(self.cal_shell, orient="vertical", command=self.cal_canvas.yview)
+        self.cal_vsb.grid(row=1, column=1, sticky="ns")
+        self.cal_canvas.configure(yscrollcommand=self.cal_vsb.set)
+
+        self.cal_x_host.bind("<Configure>", self._on_cal_x_host_configure)
+        self.cal_x_canvas.bind("<Configure>", self._on_cal_x_canvas_configure)
         self.cal_host.bind("<Configure>", self._on_cal_host_configure)
         self.cal_canvas.bind("<Configure>", self._on_cal_canvas_configure)
         self.cal_canvas.bind("<Enter>", lambda *_: self.cal_canvas.focus_set())
-        self.cal_canvas.bind("<MouseWheel>", self._on_cal_wheel)
-        self.cal_host.bind("<MouseWheel>", self._on_cal_wheel)
-        self.cal_canvas.bind("<Shift-MouseWheel>", self._on_cal_shift_wheel)
+        for widget in (
+            self.cal_shell,
+            self.cal_x_canvas,
+            self.cal_x_host,
+            self.cal_header_host,
+            self.cal_canvas,
+            self.cal_host,
+        ):
+            widget.bind("<MouseWheel>", self._on_cal_wheel)
+            widget.bind("<Shift-MouseWheel>", self._on_cal_shift_wheel)
         self.bind_all("<MouseWheel>", self._on_cal_wheel)
         self.bind_all("<Shift-MouseWheel>", self._on_cal_shift_wheel)
         self._cal_time_col_w = 64
         self._cal_date_cols = 0
-        self._cal_syncing_x = False
 
         self.empty_state = ctk.CTkFrame(inner, fg_color=CARD, corner_radius=10)
         self.empty_state.grid_columnconfigure(0, weight=1)
@@ -516,58 +539,60 @@ class SheetsHubApp(ctk.CTk):
         for i, col in enumerate(columns):
             self.tree.column(col, width=base + (1 if i < remainder else 0), stretch=True, minwidth=80)
 
-    def _on_cal_header_configure(self, _event=None) -> None:
-        self.cal_header_canvas.configure(scrollregion=self.cal_header_canvas.bbox("all"))
-        self.cal_header_canvas.itemconfigure(
-            self._cal_header_window,
-            width=max(self.cal_header_canvas.winfo_width(), self.cal_header_host.winfo_reqwidth()),
-        )
-        height = max(28, self.cal_header_host.winfo_reqheight())
-        self.cal_header_canvas.configure(height=height)
+    def _on_cal_x_host_configure(self, _event=None) -> None:
+        self.cal_x_canvas.configure(scrollregion=self.cal_x_canvas.bbox("all"))
 
-    def _on_cal_xscroll(self, *args) -> None:
-        self.cal_canvas.xview(*args)
-        self.cal_header_canvas.xview(*args)
-
-    def _on_cal_xscroll_set(self, first, last) -> None:
-        self.cal_hsb.set(first, last)
-        if self._cal_syncing_x:
-            return
-        self._cal_syncing_x = True
-        try:
-            self.cal_header_canvas.xview_moveto(first)
-        finally:
-            self._cal_syncing_x = False
-
-    def _on_cal_host_configure(self, _event=None) -> None:
-        self.cal_canvas.configure(scrollregion=self.cal_canvas.bbox("all"))
+    def _on_cal_x_canvas_configure(self, event) -> None:
+        # Высота внутреннего блока = видимая высота горизонтального canvas.
+        self.cal_x_canvas.itemconfigure(self._cal_x_window, height=max(1, event.height))
         self._fit_calendar_to_canvas()
 
+    def _on_cal_host_configure(self, _event=None) -> None:
+        # Только scrollregion по ширине/содержимому — без постоянной перестройки высоты.
+        self.cal_canvas.configure(scrollregion=self.cal_canvas.bbox("all"))
+        self._sync_calendar_widths()
+
     def _on_cal_canvas_configure(self, event) -> None:
-        self._fit_calendar_to_canvas(event.width, event.height)
-        self._on_cal_header_configure()
+        self.cal_canvas.itemconfigure(self._cal_window, width=max(event.width, self.cal_host.winfo_reqwidth()))
+        self.cal_canvas.configure(scrollregion=self.cal_canvas.bbox("all"))
+
+    def _sync_calendar_widths(self) -> None:
+        req_w = max(
+            self.cal_host.winfo_reqwidth(),
+            self.cal_header_host.winfo_reqwidth(),
+            self.cal_canvas.winfo_width(),
+            1,
+        )
+        self.cal_canvas.itemconfigure(self._cal_window, width=req_w)
+        self.cal_x_canvas.itemconfigure(
+            self._cal_x_window,
+            width=max(req_w, self.cal_x_canvas.winfo_width()),
+        )
+        self.cal_x_canvas.configure(scrollregion=self.cal_x_canvas.bbox("all"))
+        self.cal_canvas.configure(scrollregion=self.cal_canvas.bbox("all"))
 
     def _fit_calendar_to_canvas(self, width: int | None = None, height: int | None = None) -> None:
-        if width is None:
-            width = self.cal_canvas.winfo_width()
-        if height is None:
-            height = self.cal_canvas.winfo_height()
-        if width < 40 or height < 40:
-            return
-        req_w = max(width, self.cal_host.winfo_reqwidth(), self.cal_header_host.winfo_reqwidth())
-        req_h = max(height, self.cal_host.winfo_reqheight())
-        self.cal_canvas.itemconfigure(self._cal_window, width=req_w, height=req_h)
-        self.cal_host.configure(width=req_w, height=req_h)
-        self.cal_canvas.configure(scrollregion=(0, 0, req_w, req_h))
-        self.cal_header_canvas.itemconfigure(self._cal_header_window, width=req_w)
-        self.cal_header_host.configure(width=req_w)
-        self.cal_header_canvas.configure(scrollregion=(0, 0, req_w, self.cal_header_host.winfo_reqheight()))
+        self._sync_calendar_widths()
+        # Вертикально слоты заполняют область y-canvas, если контент короче окна.
+        body_h = self.cal_canvas.winfo_height()
+        req_h = max(body_h, self.cal_host.winfo_reqheight(), 1)
+        if body_h > self.cal_host.winfo_reqheight():
+            self.cal_canvas.itemconfigure(self._cal_window, height=body_h)
+            self.cal_host.configure(height=body_h)
+        else:
+            self.cal_canvas.itemconfigure(self._cal_window, height=req_h)
+        self.cal_canvas.configure(scrollregion=self.cal_canvas.bbox("all"))
 
     def _on_cal_wheel(self, event) -> None:
         if not self._pointer_over_calendar(event):
             return
         steps = self._wheel_steps(event)
-        if steps:
+        if not steps:
+            return "break"
+        # Shift или горизонтальный жест → двигаем даты+слоты вместе.
+        if getattr(event, "state", 0) & 0x0001:
+            self.cal_x_canvas.xview_scroll(steps, "units")
+        else:
             self.cal_canvas.yview_scroll(steps, "units")
         return "break"
 
@@ -576,26 +601,19 @@ class SheetsHubApp(ctk.CTk):
             return
         steps = self._wheel_steps(event)
         if steps:
-            self._on_cal_xscroll("scroll", steps, "units")
+            self.cal_x_canvas.xview_scroll(steps, "units")
         return "break"
 
     def _pointer_over_calendar(self, event) -> bool:
-        widgets = [
-            getattr(self, "cal_canvas", None),
-            getattr(self, "cal_header", None),
-            getattr(self, "cal_header_canvas", None),
-        ]
-        for widget in widgets:
-            if widget is None or not widget.winfo_ismapped():
-                continue
-            try:
-                x, y = widget.winfo_rootx(), widget.winfo_rooty()
-                w, h = widget.winfo_width(), widget.winfo_height()
-            except tk.TclError:
-                continue
-            if x <= event.x_root <= x + w and y <= event.y_root <= y + h:
-                return True
-        return False
+        widget = getattr(self, "cal_shell", None)
+        if widget is None or not widget.winfo_ismapped():
+            return False
+        try:
+            x, y = widget.winfo_rootx(), widget.winfo_rooty()
+            w, h = widget.winfo_width(), widget.winfo_height()
+        except tk.TclError:
+            return False
+        return x <= event.x_root <= x + w and y <= event.y_root <= y + h
 
     def _wheel_steps(self, event) -> int:
         if sys.platform == "darwin":
@@ -605,11 +623,11 @@ class SheetsHubApp(ctk.CTk):
     def _refresh_cal_scroll(self) -> None:
         self.cal_host.update_idletasks()
         self.cal_header_host.update_idletasks()
+        self.cal_x_host.update_idletasks()
         self.cal_canvas.yview_moveto(0)
-        self.cal_canvas.xview_moveto(0)
-        self.cal_header_canvas.xview_moveto(0)
+        self.cal_x_canvas.xview_moveto(0)
         self._fit_calendar_to_canvas()
-        self._on_cal_header_configure()
+        self._sync_calendar_widths()
 
     def _set_status(self, text: str) -> None:
         self.status.configure(text=text)
@@ -654,17 +672,16 @@ class SheetsHubApp(ctk.CTk):
             return
         selected = self.source_filter_var.get().strip()
         if not selected or selected == "Таблица":
-            self._render_views()
+            self._schedule_render(immediate=True)
             return
         # Уже показана эта таблица — просто перерисовать.
         if any(record.source_name == selected for record in self.records) or any(
             record.source_name == selected for record in self.info_records
         ):
-            self._render_views()
+            self._schedule_render(immediate=True)
             return
         if self.client:
             self.reload_all()
-
     def _try_connect(self, prompt_key: bool = True) -> None:
         if not self.config_data.credentials.exists():
             self.client = None
@@ -759,9 +776,7 @@ class SheetsHubApp(ctk.CTk):
             self._set_status("Нет таблиц. Откройте «Таблицы» и вставьте ссылку на Google Таблицу.")
             return
         selected_name = sources[0].name
-        self.records = []
-        self.info_records = []
-        self._render_views()
+        # Не очищаем экран до прихода данных — иначе белая вспышка.
         self._set_status(f"Читаю «{selected_name}»…")
 
         def work():
@@ -783,8 +798,8 @@ class SheetsHubApp(ctk.CTk):
                     self._suppress_source_trace = False
             raw_count = len(booking)
             self.records = explode_records(booking)
-            self._render_table()
-            self._render_info()
+            self._calendar_fp = None
+            self._schedule_render(immediate=True)
             extra = f" · {len(errors)} ошибок" if errors else ""
             if getattr(self.client, "read_only_public", False):
                 extra += " · только чтение"
@@ -811,18 +826,127 @@ class SheetsHubApp(ctk.CTk):
                 return value
         return ""
 
+    def _on_search_changed(self) -> None:
+        if self._search_after_id is not None:
+            try:
+                self.after_cancel(self._search_after_id)
+            except Exception:
+                pass
+        self._search_after_id = self.after(220, self._apply_search)
+
+    def _apply_search(self) -> None:
+        self._search_after_id = None
+        calendar_visible = bool(getattr(self, "cal_shell", None) and self.cal_shell.winfo_ismapped())
+        if calendar_visible and self._slot_labels:
+            self._apply_calendar_search_styles()
+            self._render_info()
+            return
+        self._schedule_render(immediate=True)
+
+    def _schedule_render(self, *, immediate: bool = False) -> None:
+        if self._render_after_id is not None:
+            try:
+                self.after_cancel(self._render_after_id)
+            except Exception:
+                pass
+            self._render_after_id = None
+        if immediate:
+            self._render_views()
+            return
+        self._render_after_id = self.after(50, self._render_views)
+
+    def _source_records(self) -> list[Record]:
+        source_name = self.source_filter_var.get().strip()
+        if not source_name:
+            return list(self.records)
+        return [record for record in self.records if record.source_name == source_name]
+
     def _filtered_records(self) -> list[Record]:
         query = self.search_var.get().strip().lower()
-        source_name = self.source_filter_var.get().strip()
         out = []
-        for record in self.records:
-            if source_name and record.source_name != source_name:
+        for record in self._source_records():
+            # Календарь оставляем целиком — поиск только подсвечивает ячейки.
+            if record.layout == "calendar":
+                out.append(record)
                 continue
             blob = " ".join([record.source_name, *record.values.values()]).lower()
             if query and query not in blob:
                 continue
             out.append(record)
         return out
+
+    def _calendar_fingerprint(self, records: list[Record]) -> tuple:
+        return (
+            tuple(sorted({(r.spreadsheet_id, r.sheet, r.source_name) for r in records})),
+            len(records),
+            tuple(
+                sorted(
+                    (
+                        r.values.get("Дата", ""),
+                        r.values.get("Время", ""),
+                        r.values.get("Клиент", ""),
+                        r.values.get("Статус", ""),
+                    )
+                    for r in records
+                )
+            ),
+        )
+
+    def _apply_calendar_search_styles(self) -> None:
+        query = self.search_var.get().strip().lower()
+        for (time, date), label in list(self._slot_labels.items()):
+            record = getattr(label, "_record", None)
+            if record is None:
+                continue
+            status = record.values.get("Статус", "")
+            blob = " ".join(
+                [
+                    record.values.get("Клиент", ""),
+                    record.values.get("Телефон", ""),
+                    date,
+                    time,
+                ]
+            ).lower()
+            if status == "Не записывать":
+                bg, fg = SLOT_BLOCKED, MUTED
+            elif status == "Занято":
+                if query and query in blob:
+                    bg, fg = "#9ccc65", TEXT
+                elif query:
+                    bg, fg = "#dce8d4", MUTED
+                else:
+                    bg, fg = SLOT_GREEN, TEXT
+            else:
+                bg, fg = (("#e8f0e0", MUTED) if query else (SLOT_GREEN, "#1b5e20"))
+            try:
+                label.configure(bg=bg, fg=fg)
+            except tk.TclError:
+                pass
+
+    def _refresh_slot_label(self, record: Record) -> bool:
+        key = (record.values.get("Время", ""), record.values.get("Дата", ""))
+        label = self._slot_labels.get(key)
+        if label is None:
+            return False
+        status = record.values.get("Статус", "")
+        if status == "Не записывать":
+            text = "не записывать"
+            bold = False
+        elif status == "Занято":
+            text = record.values.get("Клиент", "").strip() or "занято"
+            bold = True
+        else:
+            text = "запись"
+            bold = False
+        try:
+            label._record = record
+            label.configure(text=text, font=_ui_font(11, bold=bold))
+        except tk.TclError:
+            return False
+        calendar = [item for item in self._source_records() if item.layout == "calendar"]
+        self._calendar_fp = self._calendar_fingerprint(calendar)
+        self._apply_calendar_search_styles()
+        return True
 
     def _columns(self, records: list[Record]) -> list[str]:
         seen: list[str] = []
@@ -833,66 +957,76 @@ class SheetsHubApp(ctk.CTk):
         return ["Источник", *seen]
 
     def _render_table(self) -> None:
-        records = self._filtered_records()
-        if not records:
-            title = "Нет данных"
-            message = "Пока нечего показать. Проверьте ссылку на таблицу и имя листа в «Таблицы»."
-            can_retry = False
-            if self._last_error_message:
-                title = "Нет связи с Google"
-                share = ""
-                if self.client and getattr(self.client, "service_email", ""):
-                    share = (
-                        f"\n\nТаблицу откройте для доступа:\n{self.client.service_email}\n"
-                        "(роль «Редактор» в Google Таблице)."
+        if self._rendering:
+            return
+        self._rendering = True
+        try:
+            records = self._filtered_records()
+            if not records:
+                title = "Нет данных"
+                message = "Пока нечего показать. Проверьте ссылку на таблицу и имя листа в «Таблицы»."
+                can_retry = False
+                if self._last_error_message:
+                    title = "Нет связи с Google"
+                    share = ""
+                    if self.client and getattr(self.client, "service_email", ""):
+                        share = (
+                            f"\n\nТаблицу откройте для доступа:\n{self.client.service_email}\n"
+                            "(роль «Редактор» в Google Таблице)."
+                        )
+                    message = (
+                        "Таблица не загрузилась из Google.\n"
+                        "Отключите VPN, выключите проверку HTTPS в антивирусе и нажмите «Повторить»."
+                        f"{share}"
                     )
-                message = (
-                    "Таблица не загрузилась из Google.\n"
-                    "Отключите VPN, выключите проверку HTTPS в антивирусе и нажмите «Повторить»."
-                    f"{share}"
-                )
-                can_retry = True
-            self._show_empty_state(title, message, can_retry=can_retry)
-            self._visible = []
-            self.count_label.configure(text="0")
-            return
+                    can_retry = True
+                self._show_empty_state(title, message, can_retry=can_retry)
+                self._visible = []
+                self.count_label.configure(text="0")
+                return
 
-        self._hide_empty_state()
-        calendar = [item for item in records if item.layout == "calendar"]
-        if calendar:
-            self._show_calendar(True)
-            self._draw_calendars(calendar)
-            booked = sum(1 for item in calendar if item.values.get("Статус") == "Занято")
-            self._visible = calendar
-            self.count_label.configure(text=str(booked))
-            return
+            self._hide_empty_state()
+            calendar = [item for item in records if item.layout == "calendar"]
+            if calendar:
+                self._show_calendar(True)
+                fp = self._calendar_fingerprint(calendar)
+                if fp != self._calendar_fp:
+                    self._draw_calendars(calendar)
+                    self._calendar_fp = fp
+                else:
+                    self._apply_calendar_search_styles()
+                booked = sum(1 for item in calendar if item.values.get("Статус") == "Занято")
+                self._visible = calendar
+                self.count_label.configure(text=str(booked))
+                return
 
-        self._show_calendar(False)
-        columns = self._columns(records)
-        self.tree.configure(columns=columns)
-        self._last_tree_width = 0
-        for col in columns:
-            self.tree.heading(col, text=col, command=lambda c=col: self._sort_by(c))
-            self.tree.column(col, width=140, minwidth=80, stretch=True)
+            self._show_calendar(False)
+            self._calendar_fp = None
+            self._slot_labels = {}
+            columns = self._columns(records)
+            self.tree.configure(columns=columns)
+            self._last_tree_width = 0
+            for col in columns:
+                self.tree.heading(col, text=col, command=lambda c=col: self._sort_by(c))
+                self.tree.column(col, width=140, minwidth=80, stretch=True)
 
-        self.tree.delete(*self.tree.get_children())
-        for idx, record in enumerate(records):
-            display = record.display_values()
-            values = [display.get(col, "") for col in columns]
-            tag = _status_tag(self._status_value(record)) or ("evenrow" if idx % 2 else "oddrow")
-            self.tree.insert("", "end", iid=str(idx), values=values, tags=(tag,))
+            self.tree.delete(*self.tree.get_children())
+            for idx, record in enumerate(records):
+                display = record.display_values()
+                values = [display.get(col, "") for col in columns]
+                tag = _status_tag(self._status_value(record)) or ("evenrow" if idx % 2 else "oddrow")
+                self.tree.insert("", "end", iid=str(idx), values=values, tags=(tag,))
 
-        self._visible = records
-        self.count_label.configure(text=str(len(records)))
-        self.after_idle(self._fit_columns)
+            self._visible = records
+            self.count_label.configure(text=str(len(records)))
+            self.after_idle(self._fit_columns)
+        finally:
+            self._rendering = False
 
     def _show_empty_state(self, title: str, message: str, *, can_retry: bool) -> None:
         self.tree.grid_remove()
         self.vsb.grid_remove()
-        self.cal_header.grid_remove()
-        self.cal_canvas.grid_remove()
-        self.cal_vsb.grid_remove()
-        self.cal_hsb.grid_remove()
+        self.cal_shell.grid_remove()
         self.empty_title.configure(text=title)
         self.empty_text.configure(text=message)
         self.empty_retry.grid() if can_retry else self.empty_retry.grid_remove()
@@ -905,35 +1039,34 @@ class SheetsHubApp(ctk.CTk):
         if on:
             self.tree.grid_remove()
             self.vsb.grid_remove()
-            self.cal_header.grid(row=0, column=0, sticky="ew")
-            self.cal_canvas.grid(row=1, column=0, sticky="nsew")
-            self.cal_vsb.grid(row=1, column=1, sticky="ns")
-            self.cal_hsb.grid(row=2, column=0, sticky="ew")
+            self.cal_shell.grid(row=0, column=0, rowspan=3, sticky="nsew")
         else:
-            self.cal_header.grid_remove()
-            self.cal_canvas.grid_remove()
-            self.cal_vsb.grid_remove()
-            self.cal_hsb.grid_remove()
+            self.cal_shell.grid_remove()
             self.tree.grid(row=0, column=0, rowspan=3, sticky="nsew")
             self.vsb.grid(row=0, column=1, rowspan=3, sticky="ns")
 
     def _draw_calendars(self, records: list[Record]) -> None:
+        self._slot_labels = {}
+        try:
+            self.cal_canvas.grid_remove()
+        except Exception:
+            pass
         for child in self.cal_host.winfo_children():
             child.destroy()
         for child in self.cal_header_host.winfo_children():
             child.destroy()
-        self.cal_host.grid_columnconfigure(0, weight=1)
-        self.cal_host.grid_rowconfigure(0, weight=1)
         groups: dict[tuple[str, str, str], list[Record]] = {}
         for record in records:
             groups.setdefault((record.spreadsheet_id, record.sheet, record.source_name), []).append(record)
-        # Один календарь: даты в зафиксированной шапке, слоты — в скролле.
         if not groups:
             self.cal_header_title.configure(text="")
+            self.cal_canvas.grid(row=1, column=0, sticky="nsew")
             return
         ((_, _, name), items) = next(iter(groups.items()))
         self._draw_one_calendar(name, items)
+        self.cal_canvas.grid(row=1, column=0, sticky="nsew")
         self.after_idle(self._refresh_cal_scroll)
+        self.after_idle(self._apply_calendar_search_styles)
 
     def _draw_one_calendar(self, name: str, items: list[Record]) -> None:
         dates = list(dict.fromkeys(item.values.get("Дата", "") for item in items if item.values.get("Дата")))
@@ -948,12 +1081,13 @@ class SheetsHubApp(ctk.CTk):
         header = self.cal_header_host
         body = self.cal_host
         time_w = self._cal_time_col_w
+        date_w = 112
 
         header.grid_columnconfigure(0, weight=0, minsize=time_w)
         body.grid_columnconfigure(0, weight=0, minsize=time_w)
         for col, _date in enumerate(dates, start=1):
-            header.grid_columnconfigure(col, weight=1, minsize=96)
-            body.grid_columnconfigure(col, weight=1, minsize=96)
+            header.grid_columnconfigure(col, weight=0, minsize=date_w)
+            body.grid_columnconfigure(col, weight=0, minsize=date_w)
 
         tk.Label(
             header,
@@ -976,7 +1110,8 @@ class SheetsHubApp(ctk.CTk):
                 font=_ui_font(10, bold=True),
                 padx=4,
                 pady=6,
-                wraplength=120,
+                wraplength=date_w - 8,
+                width=12,
             ).grid(row=0, column=col, sticky="nsew", padx=1, pady=1)
 
         for row, time in enumerate(times):
@@ -1020,6 +1155,8 @@ class SheetsHubApp(ctk.CTk):
             anchor="w",
         )
         label.grid(row=row, column=col, sticky="nsew", padx=1, pady=1)
+        label._record = record
+        self._slot_labels[(record.values.get("Время", ""), record.values.get("Дата", ""))] = label
         label.bind("<Button-1>", lambda _event, item=record: self._edit_calendar_cell(item))
 
     def _edit_calendar_cell(self, record: Record) -> None:
@@ -1206,7 +1343,18 @@ class SheetsHubApp(ctk.CTk):
                         record.values["Статус"] = "Не записывать"
                     else:
                         record.values["Статус"] = "Занято"
-                self._render_table()
+                    if self._refresh_slot_label(record):
+                        booked = sum(
+                            1
+                            for item in self._visible
+                            if item.layout == "calendar" and item.values.get("Статус") == "Занято"
+                        )
+                        self.count_label.configure(text=str(booked))
+                    else:
+                        self._calendar_fp = None
+                        self._schedule_render(immediate=True)
+                else:
+                    self._schedule_render(immediate=True)
                 self._set_status(f"Сохранено в таблицу: {when or record.source_name}")
                 dialog.destroy()
 
