@@ -337,7 +337,7 @@ class SheetsHubApp(ctk.CTk):
             border_width=1,
             border_color="#e0e0e0",
         )
-        table_wrap.grid(row=3, column=0, sticky="nsew", padx=16, pady=(0, 8))
+        table_wrap.grid(row=3, column=0, sticky="nsew", padx=16, pady=(0, 4))
         table_wrap.grid_columnconfigure(0, weight=1)
         table_wrap.grid_rowconfigure(1, weight=1)
 
@@ -347,7 +347,7 @@ class SheetsHubApp(ctk.CTk):
             font=ctk.CTkFont(size=14, weight="bold"),
             text_color=TEXT,
             anchor="w",
-        ).grid(row=0, column=0, sticky="w", padx=12, pady=(8, 2))
+        ).grid(row=0, column=0, sticky="w", padx=12, pady=(6, 2))
 
         inner = tk.Frame(table_wrap, bg=CARD, highlightthickness=0)
         inner.grid(row=1, column=0, sticky="nsew", padx=1, pady=(0, 1))
@@ -408,11 +408,27 @@ class SheetsHubApp(ctk.CTk):
             corner_radius=10,
             border_width=1,
             border_color="#ceead6",
+            height=118,
         )
+        self.info_wrap.grid_propagate(False)
         self.info_wrap.grid_columnconfigure(0, weight=1)
+        self.info_wrap.grid_rowconfigure(1, weight=1)
 
-        self.info_body = ctk.CTkFrame(self.info_wrap, fg_color="transparent")
-        self.info_body.pack(fill="x", padx=8, pady=8)
+        ctk.CTkLabel(
+            self.info_wrap,
+            text="Общая информация",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=MUTED,
+            anchor="w",
+        ).grid(row=0, column=0, sticky="ew", padx=8, pady=(4, 0))
+
+        self.info_body = ctk.CTkScrollableFrame(
+            self.info_wrap,
+            fg_color="transparent",
+            height=88,
+            corner_radius=0,
+        )
+        self.info_body.grid(row=1, column=0, sticky="nsew", padx=4, pady=(2, 4))
         self.info_body.grid_columnconfigure(0, weight=1)
         self.info_wrap.grid_remove()
 
@@ -888,15 +904,15 @@ class SheetsHubApp(ctk.CTk):
         ).grid(row=1, column=0, sticky="nsew", padx=1, pady=1)
 
         for row, time in enumerate(times, start=2):
-            block.grid_rowconfigure(row, minsize=26)
+            block.grid_rowconfigure(row, minsize=30)
             tk.Label(
                 block,
                 text=_short_time(time),
                 bg=SLOT_TIME,
                 fg=TEXT,
-                font=_ui_font(11, bold=True),
+                font=_ui_font(12, bold=True),
                 padx=6,
-                pady=2,
+                pady=3,
             ).grid(row=row, column=0, sticky="nsew", padx=1, pady=1)
             for col, date in enumerate(dates, start=1):
                 record = cell_map.get((time, date))
@@ -919,11 +935,11 @@ class SheetsHubApp(ctk.CTk):
             text=text,
             bg=bg,
             fg=fg,
-            font=_ui_font(10, bold=status == "Занято"),
+            font=_ui_font(11, bold=status == "Занято"),
             wraplength=0,
             justify="left",
             padx=4,
-            pady=1,
+            pady=2,
             anchor="w",
         )
         label.grid(row=row, column=col, sticky="nsew", padx=1, pady=1)
@@ -937,12 +953,25 @@ class SheetsHubApp(ctk.CTk):
         self._render_table()
         self._render_info()
 
+    def _active_sheet_key(self) -> tuple[str, str] | None:
+        for record in self.records:
+            if record.layout == "calendar":
+                return record.spreadsheet_id, record.sheet
+        if self.records:
+            item = self.records[0]
+            return item.spreadsheet_id, item.sheet
+        return None
+
     def _filtered_info(self) -> list[Record]:
         query = self.search_var.get().strip().lower()
         source_name = self.source_filter_var.get().strip()
+        sheet_key = self._active_sheet_key()
         out: list[Record] = []
         for record in self.info_records:
             if source_name and record.source_name != source_name:
+                continue
+            # Справка только от того же листа, что и текущий календарь.
+            if sheet_key and (record.spreadsheet_id, record.sheet) != sheet_key:
                 continue
             blob = " ".join([record.source_name, *record.values.values()]).lower()
             if query and query not in blob:
@@ -958,7 +987,7 @@ class SheetsHubApp(ctk.CTk):
         if not records:
             self.info_wrap.grid_remove()
             return
-        self.info_wrap.grid(row=4, column=0, sticky="ew", padx=20, pady=(0, 8))
+        self.info_wrap.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 8))
 
         for idx, record in enumerate(records):
             text = str(record.values.get("Текст") or "").strip()
@@ -977,14 +1006,14 @@ class SheetsHubApp(ctk.CTk):
                 text=text,
                 bg=bg,
                 fg=fg,
-                font=_ui_font(13, bold=tone in {"warn", "ok"}),
-                wraplength=980,
+                font=_ui_font(10, bold=tone in {"warn", "ok"}),
+                wraplength=920,
                 justify="left",
                 anchor="w",
-                padx=14,
-                pady=10,
+                padx=8,
+                pady=3,
             )
-            card.grid(row=idx, column=0, sticky="ew", padx=4, pady=4)
+            card.grid(row=idx, column=0, sticky="ew", padx=2, pady=1)
         self.info_body.grid_columnconfigure(0, weight=1)
 
     def _sort_by(self, column: str) -> None:

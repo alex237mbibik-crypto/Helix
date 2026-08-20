@@ -133,9 +133,25 @@ class SheetRef:
 
 _ALL_SHEETS = {"", "*", "все", "all", "все листы"}
 
+_MONTH_MARKERS = (
+    "январ",
+    "феврал",
+    "март",
+    "апрел",
+    "мая",
+    "май",
+    "июн",
+    "июл",
+    "август",
+    "сентябр",
+    "октябр",
+    "ноябр",
+    "декабр",
+)
+
 
 def requested_sheet_titles(text: str) -> list[str] | None:
-    """None — взять все вкладки файла. Иначе список имён листов."""
+    """None — в конфиге стоит «все» (раньше означало все вкладки). Иначе список имён."""
     raw = (text or "").strip()
     if raw.lower() in _ALL_SHEETS:
         return None
@@ -143,13 +159,64 @@ def requested_sheet_titles(text: str) -> list[str] | None:
     return parts or None
 
 
+def prefer_sheet_title(available: list[str], wanted: str = "") -> str:
+    """Выбрать один лист: точное имя, иначе текущий месяц, иначе первый."""
+    titles = [title for title in available if (title or "").strip()]
+    if not titles:
+        return (wanted or "").strip()
+    raw = (wanted or "").strip()
+    if raw and raw.lower() not in _ALL_SHEETS:
+        for title in titles:
+            if title.lower() == raw.lower():
+                return title
+        for title in titles:
+            if raw.lower() in title.lower() or title.lower() in raw.lower():
+                return title
+    # Текущий месяц по-русски, например «август 2026»
+    from datetime import datetime
+
+    months = (
+        "январ",
+        "феврал",
+        "март",
+        "апрел",
+        "ма",
+        "июн",
+        "июл",
+        "август",
+        "сентябр",
+        "октябр",
+        "ноябр",
+        "декабр",
+    )
+    now = datetime.now()
+    month_key = months[now.month - 1]
+    year = str(now.year)
+    for title in titles:
+        low = title.lower()
+        if month_key in low and year in low:
+            return title
+    for title in titles:
+        if month_key in title.lower():
+            return title
+    # Не брать вкладки-справки, если есть календарные
+    calendarish = [
+        title
+        for title in titles
+        if any(marker in title.lower() for marker in _MONTH_MARKERS)
+        or any(ch.isdigit() for ch in title)
+    ]
+    if calendarish:
+        return calendarish[0]
+    return titles[0]
+
+
 def expand_ref_locally(ref: SheetRef) -> list[SheetRef]:
+    """Всегда один лист: не раздуваем одну таблицу в несколько источников."""
     titles = requested_sheet_titles(ref.sheet)
-    if not titles or len(titles) == 1:
-        if titles:
-            return [replace(ref, sheet=titles[0])]
-        return [ref]
-    return [replace(ref, name=f"{ref.name} / {title}", sheet=title) for title in titles]
+    if titles:
+        return [replace(ref, sheet=titles[0])]
+    return [ref]
 
 
 Source = SheetRef

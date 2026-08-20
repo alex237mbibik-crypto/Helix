@@ -25,6 +25,7 @@ from sheets_hub.config import (
     expand_ref_locally,
     is_info_ref,
     parse_spreadsheet_id,
+    prefer_sheet_title,
     requested_sheet_titles,
 )
 from sheets_hub.models import Record
@@ -362,53 +363,32 @@ class SheetsClient:
         spreadsheet_id = source.normalized_id()
         sheet = (source.sheet or "").strip()
         titles = requested_sheet_titles(source.sheet)
-        if titles and len(titles) == 1:
+        if titles:
             sheet = titles[0]
+        elif sheet.lower() in {"", "*", "все", "all", "все листы"}:
+            # Без имени листа Google отдаёт первую вкладку — этого достаточно.
+            sheet = ""
         rows = _fetch_public_csv(spreadsheet_id, sheet)
         part = replace(source, sheet=sheet or source.sheet or "лист 1")
         return self._records_from_rows(part, rows)
 
     def fetch_source(self, source: SheetRef) -> list[Record]:
-        spreadsheet_id = source.normalized_id()
         worksheet = self._open_worksheet(source)
         rows = self._sheet_values(worksheet)
         return self._records_from_rows(source, rows)
 
     def expand_source(self, source: SheetRef) -> list[SheetRef]:
         requested = requested_sheet_titles(source.sheet)
-        # Если имя листа уже указано — не ходим в API за списком вкладок
-        # (на Windows это часто зависает на SSL).
+        # Всегда один лист на таблицу: «все» больше не тянет все вкладки сразу.
         if requested is not None:
-            many = len(requested) > 1
-            return [
-                SheetRef(
-                    name=f"{source.name} / {title}" if many else source.name,
-                    spreadsheet_id=source.spreadsheet_id,
-                    sheet=title,
-                    map=source.map,
-                    service=source.service,
-                    address=source.address,
-                    kind=source.kind,
-                )
-                for title in requested
-            ]
+            title = requested[0]
+            return [replace(source, sheet=title)]
 
         available = self.list_sheets(source.spreadsheet_id)
         if not available:
             raise SheetsError(f"В «{source.name}» нет листов")
-        many = len(available) > 1
-        return [
-            SheetRef(
-                name=f"{source.name} / {title}" if many else source.name,
-                spreadsheet_id=source.spreadsheet_id,
-                sheet=title,
-                map=source.map,
-                service=source.service,
-                address=source.address,
-                kind=source.kind,
-            )
-            for title in available
-        ]
+        title = prefer_sheet_title(available, source.sheet)
+        return [replace(source, sheet=title)]
 
     def _should_try_public_read(self, exc: BaseException) -> bool:
         if isinstance(exc, SheetsError):
@@ -443,10 +423,8 @@ class SheetsClient:
             if source.is_placeholder():
                 continue
 
-            # С известным именем листа сначала пробуем прямой CSV —
-            # так Windows не зависает на Google API / SSL.
-            titles = requested_sheet_titles(source.sheet)
-            if titles and _can_try_public_read(source):
+            # Всегда сначала один лист через CSV — быстрее и без SSL-зависаний.
+            if _can_try_public_read(source):
                 try:
                     records.extend(self._load_source_public(source))
                     self._mark_public_read(source.name)
