@@ -628,13 +628,13 @@ class SheetsHubApp(ctk.CTk):
             for host in (self.cal_header_host, self.cal_host):
                 host.grid_columnconfigure(0, minsize=time_w, weight=0)
                 for col in range(1, self._cal_date_cols + 1):
-                    host.grid_columnconfigure(col, minsize=date_w, weight=0)
+                    # weight=1 — ширина колонок от окна программы, не от листа.
+                    host.grid_columnconfigure(col, minsize=max(CAL_DATE_W, date_w), weight=1)
             for col, frames in self._cal_col_frames.items():
                 width = time_w if col == 0 else date_w
                 cell_w = max(8, width - 2)
                 for frame in frames:
                     try:
-                        # Только ширина — высоту ячеек не трогаем, иначе «прыгают» строки.
                         frame.configure(width=cell_w)
                         for child in frame.winfo_children():
                             if isinstance(child, tk.Label):
@@ -1019,7 +1019,7 @@ class SheetsHubApp(ctk.CTk):
                 elif query:
                     bg, fg = "#dce8d4", MUTED
                 else:
-                    bg, fg = SLOT_GREEN, TEXT
+                    bg, fg = SLOT_BOOKED, TEXT
             else:
                 bg, fg = (("#e8f0e0", MUTED) if query else (SLOT_GREEN, "#1b5e20"))
             try:
@@ -1042,7 +1042,7 @@ class SheetsHubApp(ctk.CTk):
         elif status == "Занято":
             text = record.values.get("Клиент", "").strip() or "занято"
             bold = True
-            bg, fg = SLOT_GREEN, TEXT
+            bg, fg = SLOT_BOOKED, TEXT
         else:
             text = "запись"
             bold = False
@@ -1185,6 +1185,7 @@ class SheetsHubApp(ctk.CTk):
         self.after_idle(self._apply_calendar_search_styles)
 
     def _draw_one_calendar(self, name: str, items: list[Record]) -> None:
+        # Сетка и цвета — только UI приложения. Из таблицы берём дату/время/текст слота.
         dates = list(dict.fromkeys(item.values.get("Дата", "") for item in items if item.values.get("Дата")))
         times = list(dict.fromkeys(item.values.get("Время", "") for item in items if item.values.get("Время")))
         times.sort(key=_time_sort_key)
@@ -1196,11 +1197,9 @@ class SheetsHubApp(ctk.CTk):
 
         header = self.cal_header_host
         body = self.cal_host
-        # Фон-сетка между ячейками (padx/pady=1), без highlight — иначе на Windows полосы.
         header.configure(bg=SLOT_OUTLINE)
         body.configure(bg=SLOT_OUTLINE)
         time_w = self._cal_time_col_w
-        # Сразу берём ширину окна, если уже известна — иначе минимум.
         date_w = self._compute_date_col_width() if self._calendar_viewport_width() > 40 else self._cal_date_w
         self._cal_date_w = date_w
         self._cal_total_w = time_w + date_w * max(len(dates), 1)
@@ -1208,7 +1207,7 @@ class SheetsHubApp(ctk.CTk):
         for host in (header, body):
             host.grid_columnconfigure(0, minsize=time_w, weight=0)
             for col in range(1, len(dates) + 1):
-                host.grid_columnconfigure(col, minsize=date_w, weight=0)
+                host.grid_columnconfigure(col, minsize=max(CAL_DATE_W, date_w), weight=1)
 
         self._cal_header_cell(
             header,
@@ -1231,7 +1230,7 @@ class SheetsHubApp(ctk.CTk):
                 bg=GREEN,
                 fg="#fce8e6" if weekend else "#ffffff",
                 font=_ui_font(10, bold=True),
-                wraplength=date_w - 10,
+                wraplength=max(20, date_w - 10),
             )
 
         for row, time in enumerate(times):
@@ -1289,15 +1288,16 @@ class SheetsHubApp(ctk.CTk):
         return label
 
     def _draw_slot(self, parent: tk.Frame, record: Record | None, row: int, col: int, width: int) -> None:
+        # Внешний вид слота всегда из палитры приложения; лист даёт только текст/статус.
         if record is None:
-            self._cal_body_cell(parent, row, col, width, text="", bg="#eeeeee")
+            self._cal_body_cell(parent, row, col, width, text="", bg=SLOT_BLOCKED, fg=MUTED)
             return
         status = record.values.get("Статус", "")
         if status == "Не записывать":
             bg, fg, text = SLOT_BLOCKED, MUTED, "не записывать"
         elif status == "Занято":
             text = record.values.get("Клиент", "").strip() or "занято"
-            bg, fg = SLOT_GREEN, TEXT
+            bg, fg = SLOT_BOOKED, TEXT
         else:
             bg, fg, text = SLOT_GREEN, "#1b5e20", "запись"
         label = self._cal_body_cell(
@@ -1309,7 +1309,7 @@ class SheetsHubApp(ctk.CTk):
             bg=bg,
             fg=fg,
             font=_ui_font(11, bold=status == "Занято"),
-            wraplength=width - 10,
+            wraplength=max(20, width - 10),
             justify="left",
             anchor="w",
         )
