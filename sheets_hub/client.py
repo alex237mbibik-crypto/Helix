@@ -310,19 +310,28 @@ class SheetsClient:
         self._credentials_path = credentials_path
         self.read_only_public = False
         self.read_notes: list[str] = []
+        self._api_insecure = False
         self._connect()
 
-    def _connect(self) -> None:
+    def _connect(self, *, insecure: bool = False) -> None:
         configure_tls()
         creds = Credentials.from_service_account_file(str(self._credentials_path), scopes=SCOPES)
-        session = self._build_session(creds)
+        session = self._build_session(creds, verify=False if insecure else None)
         self._gc = gspread.authorize(None, session=session)
         self._gc.set_timeout(_HTTP_TIMEOUT)
         self.service_email = creds.service_account_email
+        self._api_insecure = insecure
 
-    def _build_session(self, creds: Credentials) -> AuthorizedSession:
+    def _build_session(self, creds: Credentials, *, verify: bool | str | None = None) -> AuthorizedSession:
         session = AuthorizedSession(creds)
-        session.verify = session_verify_target()
+        session.verify = session_verify_target() if verify is None else verify
+        if verify is False:
+            try:
+                import urllib3
+
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            except Exception:
+                pass
         retry = Retry(
             total=1,
             connect=1,
@@ -339,6 +348,30 @@ class SheetsClient:
         session.headers["Connection"] = "close"
         return session
 
+    def probe_api(self, spreadsheet_id: str = "") -> bool:
+        """Проверка, что Sheets API доступен (нужен для записи)."""
+        if not spreadsheet_id:
+            return False
+        cached = getattr(self, "_api_ok", None)
+        if cached is True:
+            return True
+        try:
+            self._call(lambda: self._gc.open_by_key(spreadsheet_id).id)
+            self._api_ok = True
+            return True
+        except Exception:
+            if not getattr(self, "_api_insecure", False):
+                try:
+                    self._connect(insecure=True)
+                    self._call(lambda: self._gc.open_by_key(spreadsheet_id).id)
+                    self._api_ok = True
+                    return True
+                except Exception:
+                    self._api_ok = False
+                    return False
+            self._api_ok = False
+            return False
+
     def _call(self, work):
         last: BaseException | None = None
         rebuilt = False
@@ -354,7 +387,7 @@ class SheetsClient:
                 if not _is_network_error(exc) or attempt == _RETRY_ATTEMPTS - 1:
                     raise
                 if not rebuilt:
-                    self._connect()
+                    self._connect(insecure=getattr(self, "_api_insecure", False))
                     rebuilt = True
                 time.sleep(1.2 * (attempt + 1))
         raise last  # pragma: no cover
@@ -558,7 +591,11 @@ class SheetsClient:
             raise errors[0]
         raise SheetsError(f"Не удалось прочитать «{source.name}»")
 
-    def _mark_public_read(self, source_name: str) -> None:
+    def _mark_public_read(self, source_name: str, spreadsheet_id: str = "") -> None:
+        # CSV-чтение не запрещает запись: если API жив — пишем как обычно.
+        if spreadsheet_id and self.probe_api(spreadsheet_id):
+            self.read_only_public = False
+            return
         self.read_only_public = True
         self.read_notes.append(
             f"{source_name}: календарь прочитан напрямую (обход SSL). "
@@ -578,7 +615,7 @@ class SheetsClient:
             if _can_try_public_read(source):
                 try:
                     records.extend(self._load_source_public(source))
-                    self._mark_public_read(source.name)
+                    self._mark_public_read(source.name, source.normalized_id())
                     continue
                 except Exception:
                     pass
@@ -590,7 +627,7 @@ class SheetsClient:
                 if _can_try_public_read(source) and self._should_try_public_read(exc):
                     try:
                         records.extend(self._load_source_public(source))
-                        self._mark_public_read(source.name)
+                        self._mark_public_read(source.name, source.normalized_id())
                     except Exception as pub_exc:
                         msg = str(pub_exc) if isinstance(pub_exc, SheetsError) else str(_friendly_error(pub_exc))
                         errors.append(f"{source.name}: {msg}")
@@ -605,14 +642,42 @@ class SheetsClient:
         except KeyError as exc:
             raise SheetsError(f"В листе нет колонки «{field}»") from exc
         col = record.col_index[header]
-        worksheet = self._call(lambda: self._gc.open_by_key(record.spreadsheet_id).worksheet(record.sheet))
         cell_value = value
         if record.layout == "calendar" and field == "Клиент":
             cell_value = value.strip() or "запись"
-        self._call(lambda: worksheet.update_cell(record.row, col, cell_value))
+
+        def _do_update() -> None:
+            worksheet = self._call(
+                lambda: self._gc.open_by_key(record.spreadsheet_id).worksheet(record.sheet)
+            )
+            self._call(lambda: worksheet.update_cell(record.row, col, cell_value))
+
+        try:
+            _do_update()
+        except Exception as exc:
+            # Повтор с отключённой проверкой SSL — частый обход на Windows.
+            if _is_network_error(exc) and not getattr(self, "_api_insecure", False):
+                try:
+                    self._connect(insecure=True)
+                    _do_update()
+                except Exception as exc2:
+                    raise SheetsError(
+                        "Не удалось записать в Google Таблицу.\n"
+                        "Чтение может работать через CSV, а запись идёт через API.\n"
+                        "Отключите VPN и проверку HTTPS в антивирусе, "
+                        f"проверьте доступ Редактора для {getattr(self, 'service_email', 'сервисного аккаунта')}.\n"
+                        f"Детали: {exc2}"
+                    ) from exc2
+            else:
+                raise SheetsError(
+                    "Не удалось записать в Google Таблицу.\n"
+                    f"Проверьте доступ Редактора для {getattr(self, 'service_email', 'сервисного аккаунта')}.\n"
+                    f"Детали: {exc}"
+                ) from exc
         record.values[field] = value
         if header != field:
             record.values[header] = value
+        self.read_only_public = False
 
     def append_row(self, dest: SheetRef, values: dict[str, str]) -> None:
         worksheet = self._open_worksheet(dest)
