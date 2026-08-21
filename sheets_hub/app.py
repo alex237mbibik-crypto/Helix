@@ -439,6 +439,9 @@ class SheetsHubApp(ctk.CTk):
         self._cal_viewport_w = 0
         self._cal_stretch_after_id: str | None = None
         self._cal_scroll_lock = False
+        self._root_size: tuple[int, int] | None = None
+        # Пересчёт колонок только после отрисовки и после паузы ресайза окна.
+        self.bind("<Configure>", self._on_root_configure)
 
         self.empty_state = ctk.CTkFrame(inner, fg_color=CARD, corner_radius=10)
         self.empty_state.grid_columnconfigure(0, weight=1)
@@ -554,20 +557,21 @@ class SheetsHubApp(ctk.CTk):
             self.tree.column(col, width=base + (1 if i < remainder else 0), stretch=True, minwidth=80)
 
     def _on_cal_x_host_configure(self, _event=None) -> None:
+        if self._cal_resizing or self._cal_scroll_lock:
+            return
         try:
             self.cal_x_canvas.configure(scrollregion=self.cal_x_canvas.bbox("all"))
         except tk.TclError:
             pass
 
     def _on_cal_x_canvas_configure(self, event) -> None:
+        # Только высота viewport — ширину колонок здесь НЕ трогаем.
         if self._cal_resizing or self._cal_scroll_lock or getattr(self, "_cal_frozen", False):
             return
         try:
-            # Высота окна = высота viewport; контент слотов не растягиваем здесь.
             self.cal_x_canvas.itemconfigure(self._cal_x_window, height=max(1, event.height))
         except tk.TclError:
-            return
-        self._schedule_calendar_stretch()
+            pass
 
     def _on_cal_host_configure(self, _event=None) -> None:
         if self._cal_resizing or self._cal_scroll_lock:
@@ -578,14 +582,27 @@ class SheetsHubApp(ctk.CTk):
             pass
 
     def _on_cal_canvas_configure(self, event) -> None:
+        # Поддерживаем ширину уже посчитанного контента; колонки не пересчитываем.
         if self._cal_resizing or self._cal_scroll_lock or getattr(self, "_cal_frozen", False):
             return
         try:
-            req_w = max(event.width, getattr(self, "_cal_total_w", 0), 1)
+            req_w = max(getattr(self, "_cal_total_w", 0), event.width, 1)
             self.cal_canvas.itemconfigure(self._cal_window, width=req_w)
             self.cal_canvas.configure(scrollregion=self.cal_canvas.bbox("all"))
         except tk.TclError:
             pass
+
+    def _on_root_configure(self, event) -> None:
+        # Ресайз главного окна → debounce, потом один пересчёт колонок.
+        if event.widget is not self:
+            return
+        size = (int(event.width), int(event.height))
+        if self._root_size == size:
+            return
+        self._root_size = size
+        if getattr(self, "_cal_frozen", False) or self._cal_date_cols <= 0:
+            return
+        self._schedule_calendar_relayout(delay_ms=350)
 
     def _calendar_viewport_width(self) -> int:
         try:
@@ -600,7 +617,8 @@ class SheetsHubApp(ctk.CTk):
             return CAL_DATE_W
         return max(CAL_DATE_W, avail // cols)
 
-    def _schedule_calendar_stretch(self) -> None:
+    def _schedule_calendar_relayout(self, *, delay_ms: int = 350) -> None:
+        """Отложенный пересчёт колонок (после паузы ресайза)."""
         if getattr(self, "_cal_frozen", False):
             return
         if self._cal_stretch_after_id is not None:
@@ -608,25 +626,25 @@ class SheetsHubApp(ctk.CTk):
                 self.after_cancel(self._cal_stretch_after_id)
             except Exception:
                 pass
-        self._cal_stretch_after_id = self.after(120, self._stretch_calendar_to_viewport)
+        self._cal_stretch_after_id = self.after(delay_ms, self._layout_calendar_columns)
 
-    def _stretch_calendar_to_viewport(self) -> None:
+    def _layout_calendar_columns(self) -> None:
+        """Единственная точка пересчёта ширины колонок."""
         self._cal_stretch_after_id = None
         if getattr(self, "_cal_frozen", False):
             return
         if self._cal_date_cols <= 0 or not self._cal_col_frames:
             self._sync_calendar_widths()
+            self._fit_calendar_height()
             return
         view_w = self._calendar_viewport_width()
-        if abs(view_w - self._cal_viewport_w) < 4 and self._cal_total_w >= view_w:
-            self._sync_calendar_widths()
-            return
-        self._cal_viewport_w = view_w
         date_w = self._compute_date_col_width()
+        self._cal_viewport_w = view_w
         if abs(date_w - self._cal_date_w) >= 2 or self._cal_total_w < view_w:
             self._apply_calendar_column_widths(date_w)
         else:
             self._sync_calendar_widths()
+        self._fit_calendar_height()
 
     def _apply_calendar_column_widths(self, date_w: int) -> None:
         self._cal_resizing = True
@@ -637,7 +655,6 @@ class SheetsHubApp(ctk.CTk):
             for host in (self.cal_header_host, self.cal_host):
                 host.grid_columnconfigure(0, minsize=time_w, weight=0)
                 for col in range(1, self._cal_date_cols + 1):
-                    # Равные колонки по ширине окна; weight=0 — без «расползания» при Обновить.
                     host.grid_columnconfigure(col, minsize=date_w, weight=0)
             for col, frames in self._cal_col_frames.items():
                 width = time_w if col == 0 else date_w
@@ -692,7 +709,7 @@ class SheetsHubApp(ctk.CTk):
             pass
 
     def _fit_calendar_height(self) -> None:
-        # Только высота контента — не растягивать слоты на весь canvas (серая «дыра» и двойной скролл).
+        # Только высота контента — не растягивать слоты на весь canvas.
         try:
             req_h = max(self.cal_host.winfo_reqheight(), 1)
             self.cal_canvas.itemconfigure(self._cal_window, height=req_h)
@@ -702,8 +719,7 @@ class SheetsHubApp(ctk.CTk):
             pass
 
     def _fit_calendar_to_canvas(self, width: int | None = None, height: int | None = None) -> None:
-        self._stretch_calendar_to_viewport()
-        self._fit_calendar_height()
+        self._layout_calendar_columns()
     def _on_cal_wheel(self, event) -> None:
         if not self._pointer_over_calendar(event):
             return
@@ -763,9 +779,8 @@ class SheetsHubApp(ctk.CTk):
             self.cal_canvas.yview_moveto(0)
             self.cal_x_canvas.xview_moveto(0)
             self._cal_viewport_w = 0
-            self._stretch_calendar_to_viewport()
-            self._fit_calendar_height()
-            self._sync_calendar_scrollbars()
+            # Один пересчёт сразу после отрисовки данных — не через Configure.
+            self._layout_calendar_columns()
         except tk.TclError:
             pass
 
