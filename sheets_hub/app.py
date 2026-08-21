@@ -41,8 +41,8 @@ SLOT_TIME = "#f1f3f4"
 SLOT_OUTLINE = "#dadce0"
 CAL_TIME_W = 72
 CAL_DATE_W = 176
-CAL_ROW_H = 72
-CAL_HEADER_H = 60
+CAL_ROW_H = 144
+CAL_HEADER_H = 120
 CAL_GAP = 1
 INFO_TONES = {
     "warn": ("#f8d7c4", "#c5221f"),
@@ -1098,9 +1098,9 @@ class SheetsHubApp(ctk.CTk):
                 elif query:
                     bg, fg = "#dce8d4", MUTED
                 else:
-                    bg, fg = SLOT_BOOKED, TEXT
+                    bg, fg = SLOT_BOOKED, "#ffffff"
             else:
-                bg, fg = (("#e8f0e0", MUTED) if query else (SLOT_GREEN, "#1b5e20"))
+                bg, fg = (("#e8f0e0", MUTED) if query else (SLOT_GREEN, "#102910"))
             try:
                 label.configure(bg=bg, fg=fg)
                 cell = getattr(label, "_cell", None) or label.master
@@ -1121,11 +1121,11 @@ class SheetsHubApp(ctk.CTk):
         elif status == "Занято":
             text = record.values.get("Клиент", "").strip() or "занято"
             bold = True
-            bg, fg = SLOT_BOOKED, TEXT
+            bg, fg = SLOT_BOOKED, "#ffffff"
         else:
             text = "запись"
             bold = False
-            bg, fg = SLOT_GREEN, "#1b5e20"
+            bg, fg = SLOT_GREEN, "#102910"
         try:
             label._record = record
             label.configure(text=text, font=_ui_font(11, bold=bold), bg=bg, fg=fg)
@@ -1374,7 +1374,7 @@ class SheetsHubApp(ctk.CTk):
             height=max(8, CAL_ROW_H - 2 * gap),
         )
         self._register_cal_cell(col, cell, row=row, row_h=CAL_ROW_H, header=False)
-        label = tk.Label(cell, padx=4, pady=2, borderwidth=0, highlightthickness=0, **kwargs)
+        label = tk.Label(cell, padx=6, pady=4, borderwidth=0, highlightthickness=0, **kwargs)
         label.pack(fill="both", expand=True)
         return label
 
@@ -1388,9 +1388,10 @@ class SheetsHubApp(ctk.CTk):
             bg, fg, text = SLOT_BLOCKED, MUTED, "не записывать"
         elif status == "Занято":
             text = record.values.get("Клиент", "").strip() or "занято"
-            bg, fg = SLOT_BOOKED, TEXT
+            bg, fg = SLOT_BOOKED, "#ffffff"
         else:
-            bg, fg, text = SLOT_GREEN, "#1b5e20", "запись"
+            # Тёмный текст на зелёном — иначе «запись» почти не читается.
+            bg, fg, text = SLOT_GREEN, "#102910", "запись"
         label = self._cal_body_cell(
             parent,
             row,
@@ -1400,7 +1401,7 @@ class SheetsHubApp(ctk.CTk):
             bg=bg,
             fg=fg,
             font=_ui_font(11, bold=status == "Занято"),
-            wraplength=max(40, width - 12),
+            wraplength=max(40, width - 14),
             justify="left",
             anchor="nw",
         )
