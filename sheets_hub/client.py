@@ -45,6 +45,8 @@ _HTTP_TIMEOUT = (3, 8)
 _PROBE_TIMEOUT = (2, 5)
 _TOKEN_URL = "https://oauth2.googleapis.com/token"
 _SHEETS_VALUES_URL = "https://sheets.googleapis.com/v4/spreadsheets/{sid}/values/{range}"
+# Больше 38 строк календаря на практике не нужно — быстрее загрузка и легче UI.
+MAX_SHEET_ROWS = 38
 
 
 class SheetsError(Exception):
@@ -96,7 +98,8 @@ def _public_csv_url(spreadsheet_id: str, sheet: str = "", gid: str = "") -> str:
 
 def _parse_csv_text(text: str) -> list[list[str]]:
     rows = list(csv.reader(io.StringIO(text)))
-    return [[(cell or "").replace("\u202f", " ").strip() for cell in row] for row in rows]
+    rows = [[(cell or "").replace("\u202f", " ").strip() for cell in row] for row in rows]
+    return rows[:MAX_SHEET_ROWS]
 
 
 def _fetch_url_curl(url: str, *, insecure: bool = False) -> str:
@@ -692,9 +695,22 @@ class SheetsClient:
         return spreadsheet.worksheet(match)
 
     def _sheet_values(self, worksheet) -> list[list[str]]:
-        return self._call(
-            lambda: worksheet.get_all_values(value_render_option="FORMATTED_VALUE")
-        )
+        # Читаем только первые MAX_SHEET_ROWS строк — меньше трафика и быстрее UI.
+        def _read() -> list[list[str]]:
+            try:
+                values = worksheet.get(
+                    f"A1:ZZ{MAX_SHEET_ROWS}",
+                    value_render_option="FORMATTED_VALUE",
+                )
+            except TypeError:
+                values = worksheet.get(f"A1:ZZ{MAX_SHEET_ROWS}")
+            if not values:
+                return []
+            return [[(cell or "").strip() if isinstance(cell, str) else str(cell or "") for cell in row] for row in values][
+                :MAX_SHEET_ROWS
+            ]
+
+        return self._call(_read)
 
     def get_headers(self, ref: SheetRef) -> list[str]:
         worksheet = self._open_worksheet(ref)
@@ -709,6 +725,7 @@ class SheetsClient:
         spreadsheet_id = source.normalized_id()
         if not rows:
             return []
+        rows = rows[:MAX_SHEET_ROWS]
 
         parsed = parse_sheet_rows(rows, source, spreadsheet_id)
         if parsed is not None:

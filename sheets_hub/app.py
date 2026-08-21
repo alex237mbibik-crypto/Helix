@@ -39,10 +39,10 @@ SLOT_BOOKED = "#558b2f"
 SLOT_BLOCKED = "#f1f3f4"
 SLOT_TIME = "#f1f3f4"
 SLOT_OUTLINE = "#dadce0"
-CAL_TIME_W = 64
-CAL_DATE_W = 128
-CAL_ROW_H = 30
-CAL_HEADER_H = 34
+CAL_TIME_W = 72
+CAL_DATE_W = 176
+CAL_ROW_H = 48
+CAL_HEADER_H = 40
 CAL_GAP = 1
 INFO_TONES = {
     "warn": ("#f8d7c4", "#c5221f"),
@@ -614,11 +614,16 @@ class SheetsHubApp(ctk.CTk):
             return 1
 
     def _compute_date_col_width(self) -> int:
+        """Ширина колонки даты: не меньше CAL_DATE_W (читаемый текст), лишнее — горизонтальный скролл."""
         cols = max(self._cal_date_cols, 1)
         avail = self._calendar_viewport_width() - self._cal_time_col_w
         if avail < CAL_DATE_W:
             return CAL_DATE_W
-        return max(CAL_DATE_W, avail // cols)
+        # Растягиваем только если колонок мало и места хватает; иначе фиксированный минимум + скролл.
+        fitted = avail // cols
+        if fitted >= CAL_DATE_W:
+            return min(fitted, 220)
+        return CAL_DATE_W
 
     def _schedule_calendar_relayout(self, *, delay_ms: int = 350) -> None:
         """Отложенный пересчёт колонок (после паузы ресайза)."""
@@ -687,7 +692,7 @@ class SheetsHubApp(ctk.CTk):
                     )
                     for child in item["frame"].winfo_children():
                         if isinstance(child, tk.Label):
-                            child.configure(wraplength=max(20, col_w - 10))
+                            child.configure(wraplength=max(40, col_w - 12))
                 except tk.TclError:
                     pass
             self._sync_calendar_widths()
@@ -1123,7 +1128,7 @@ class SheetsHubApp(ctk.CTk):
             bg, fg = SLOT_GREEN, "#1b5e20"
         try:
             label._record = record
-            label.configure(text=text, font=_ui_font(11, bold=bold), bg=bg, fg=fg)
+            label.configure(text=text, font=_ui_font(12, bold=bold), bg=bg, fg=fg)
             cell = getattr(label, "_cell", None) or label.master
             cell.configure(bg=bg)
         except tk.TclError:
@@ -1296,7 +1301,7 @@ class SheetsHubApp(ctk.CTk):
             text="Время",
             bg=GREEN,
             fg="#ffffff",
-            font=_ui_font(10, bold=True),
+            font=_ui_font(11, bold=True),
         )
         for col, date in enumerate(dates, start=1):
             weekend = any(part in date.lower() for part in ("сб", "вс"))
@@ -1308,8 +1313,8 @@ class SheetsHubApp(ctk.CTk):
                 text=date,
                 bg=GREEN,
                 fg="#fce8e6" if weekend else "#ffffff",
-                font=_ui_font(10, bold=True),
-                wraplength=max(20, date_w - 10),
+                font=_ui_font(11, bold=True),
+                wraplength=max(40, date_w - 12),
             )
 
         for row, time in enumerate(times):
@@ -1394,10 +1399,10 @@ class SheetsHubApp(ctk.CTk):
             text=text,
             bg=bg,
             fg=fg,
-            font=_ui_font(11, bold=status == "Занято"),
-            wraplength=max(20, width - 10),
+            font=_ui_font(12, bold=status == "Занято"),
+            wraplength=max(40, width - 12),
             justify="left",
-            anchor="w",
+            anchor="nw",
         )
         label._record = record
         label._cell = label.master
