@@ -42,6 +42,8 @@ SLOT_OUTLINE = "#dadce0"
 CAL_TIME_W = 64
 CAL_DATE_W = 128
 CAL_ROW_H = 30
+CAL_HEADER_H = 34
+CAL_GAP = 1
 INFO_TONES = {
     "warn": ("#f8d7c4", "#c5221f"),
     "ok": ("#7cb342", "#202124"),
@@ -435,6 +437,7 @@ class SheetsHubApp(ctk.CTk):
         self._cal_date_cols = 0
         self._cal_total_w = 0
         self._cal_col_frames: dict[int, list[tk.Frame]] = {}
+        self._cal_placed_cells: list[dict] = []
         self._cal_resizing = False
         self._cal_viewport_w = 0
         self._cal_stretch_after_id: str | None = None
@@ -633,7 +636,7 @@ class SheetsHubApp(ctk.CTk):
         self._cal_stretch_after_id = None
         if getattr(self, "_cal_frozen", False):
             return
-        if self._cal_date_cols <= 0 or not self._cal_col_frames:
+        if self._cal_date_cols <= 0 or not self._cal_placed_cells:
             self._sync_calendar_widths()
             self._fit_calendar_height()
             return
@@ -646,27 +649,47 @@ class SheetsHubApp(ctk.CTk):
             self._sync_calendar_widths()
         self._fit_calendar_height()
 
+    def _cal_col_x(self, col: int) -> int:
+        if col <= 0:
+            return 0
+        return self._cal_time_col_w + (col - 1) * self._cal_date_w
+
+    def _cal_col_width(self, col: int) -> int:
+        return self._cal_time_col_w if col == 0 else self._cal_date_w
+
     def _apply_calendar_column_widths(self, date_w: int) -> None:
         self._cal_resizing = True
         try:
             time_w = self._cal_time_col_w
             self._cal_date_w = date_w
-            self._cal_total_w = time_w + date_w * max(self._cal_date_cols, 1)
-            for host in (self.cal_header_host, self.cal_host):
-                host.grid_columnconfigure(0, minsize=time_w, weight=0)
-                for col in range(1, self._cal_date_cols + 1):
-                    host.grid_columnconfigure(col, minsize=date_w, weight=0)
-            for col, frames in self._cal_col_frames.items():
-                width = time_w if col == 0 else date_w
-                cell_w = max(8, width - 2)
-                for frame in frames:
-                    try:
-                        frame.configure(width=cell_w)
-                        for child in frame.winfo_children():
-                            if isinstance(child, tk.Label):
-                                child.configure(wraplength=max(20, cell_w - 10))
-                    except tk.TclError:
-                        pass
+            cols = max(self._cal_date_cols, 1)
+            self._cal_total_w = time_w + date_w * cols
+            rows = max((item["row"] for item in self._cal_placed_cells if not item["header"]), default=-1) + 1
+            try:
+                self.cal_header_host.configure(width=self._cal_total_w, height=CAL_HEADER_H)
+                self.cal_header_host.grid_propagate(False)
+                self.cal_host.configure(
+                    width=self._cal_total_w,
+                    height=max(CAL_ROW_H, rows * CAL_ROW_H),
+                )
+            except tk.TclError:
+                pass
+            gap = CAL_GAP
+            for item in self._cal_placed_cells:
+                col_w = self._cal_col_width(item["col"])
+                row_h = item["row_h"]
+                try:
+                    item["frame"].place(
+                        x=self._cal_col_x(item["col"]) + gap,
+                        y=item["row"] * row_h + gap,
+                        width=max(8, col_w - 2 * gap),
+                        height=max(8, row_h - 2 * gap),
+                    )
+                    for child in item["frame"].winfo_children():
+                        if isinstance(child, tk.Label):
+                            child.configure(wraplength=max(20, col_w - 10))
+                except tk.TclError:
+                    pass
             self._sync_calendar_widths()
         finally:
             self._cal_resizing = False
@@ -1209,6 +1232,7 @@ class SheetsHubApp(ctk.CTk):
     def _draw_calendars(self, records: list[Record]) -> None:
         self._slot_labels = {}
         self._cal_col_frames = {}
+        self._cal_placed_cells = []
         self._cal_resizing = True
         try:
             for child in self.cal_host.winfo_children():
@@ -1229,7 +1253,6 @@ class SheetsHubApp(ctk.CTk):
             except tk.TclError:
                 pass
         finally:
-            # Снимаем флаг только после укладки размеров — иначе Configure ломает сетку.
             self.after_idle(self._finish_calendar_draw)
 
     def _finish_calendar_draw(self) -> None:
@@ -1257,10 +1280,13 @@ class SheetsHubApp(ctk.CTk):
         self._cal_date_w = date_w
         self._cal_total_w = time_w + date_w * max(len(dates), 1)
 
-        for host in (header, body):
-            host.grid_columnconfigure(0, minsize=time_w, weight=0)
-            for col in range(1, len(dates) + 1):
-                host.grid_columnconfigure(col, minsize=date_w, weight=0)
+        # place() с общими X — шапка и тело всегда совпадают (grid разъезжался при скролле).
+        try:
+            header.configure(width=self._cal_total_w, height=CAL_HEADER_H)
+            header.grid_propagate(False)
+            body.configure(width=self._cal_total_w, height=max(CAL_ROW_H, len(times) * CAL_ROW_H))
+        except tk.TclError:
+            pass
 
         self._cal_header_cell(
             header,
@@ -1287,7 +1313,6 @@ class SheetsHubApp(ctk.CTk):
             )
 
         for row, time in enumerate(times):
-            body.grid_rowconfigure(row, weight=0, minsize=CAL_ROW_H)
             self._cal_body_cell(
                 body,
                 row,
@@ -1304,38 +1329,46 @@ class SheetsHubApp(ctk.CTk):
                 record = cell_map.get((time, date))
                 self._draw_slot(body, record, row, col, date_w)
 
-    def _register_cal_cell(self, col: int, cell: tk.Frame) -> None:
+    def _register_cal_cell(self, col: int, cell: tk.Frame, *, row: int, row_h: int, header: bool) -> None:
         self._cal_col_frames.setdefault(col, []).append(cell)
+        self._cal_placed_cells.append(
+            {"frame": cell, "row": row, "col": col, "row_h": row_h, "header": header}
+        )
 
     def _cal_header_cell(self, parent: tk.Frame, row: int, col: int, width: int, **kwargs) -> tk.Label:
+        gap = CAL_GAP
         cell = tk.Frame(
             parent,
-            width=max(8, width - 2),
-            height=34,
             bg=kwargs.get("bg", GREEN),
             highlightthickness=0,
             bd=0,
         )
-        # sticky=nsew — ячейка заполняет колонку (иначе серые «дыры» при растягивании).
-        cell.grid(row=row, column=col, sticky="nsew", padx=1, pady=1)
-        cell.grid_propagate(False)
-        self._register_cal_cell(col, cell)
+        cell.place(
+            x=self._cal_col_x(col) + gap,
+            y=row * CAL_HEADER_H + gap,
+            width=max(8, width - 2 * gap),
+            height=max(8, CAL_HEADER_H - 2 * gap),
+        )
+        self._register_cal_cell(col, cell, row=row, row_h=CAL_HEADER_H, header=True)
         label = tk.Label(cell, padx=4, pady=6, borderwidth=0, highlightthickness=0, **kwargs)
         label.pack(fill="both", expand=True)
         return label
 
     def _cal_body_cell(self, parent: tk.Frame, row: int, col: int, width: int, **kwargs) -> tk.Label:
+        gap = CAL_GAP
         cell = tk.Frame(
             parent,
-            width=max(8, width - 2),
-            height=CAL_ROW_H,
             bg=kwargs.get("bg", CARD),
             highlightthickness=0,
             bd=0,
         )
-        cell.grid(row=row, column=col, sticky="nsew", padx=1, pady=1)
-        cell.grid_propagate(False)
-        self._register_cal_cell(col, cell)
+        cell.place(
+            x=self._cal_col_x(col) + gap,
+            y=row * CAL_ROW_H + gap,
+            width=max(8, width - 2 * gap),
+            height=max(8, CAL_ROW_H - 2 * gap),
+        )
+        self._register_cal_cell(col, cell, row=row, row_h=CAL_ROW_H, header=False)
         label = tk.Label(cell, padx=4, pady=2, borderwidth=0, highlightthickness=0, **kwargs)
         label.pack(fill="both", expand=True)
         return label
