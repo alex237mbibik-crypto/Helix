@@ -41,8 +41,8 @@ SLOT_TIME = "#f1f3f4"
 SLOT_OUTLINE = "#dadce0"
 CAL_TIME_W = 72
 CAL_DATE_W = 176
-CAL_ROW_H = 48
-CAL_HEADER_H = 40
+CAL_ROW_H = 72
+CAL_HEADER_H = 60
 CAL_GAP = 1
 INFO_TONES = {
     "warn": ("#f8d7c4", "#c5221f"),
@@ -1128,7 +1128,7 @@ class SheetsHubApp(ctk.CTk):
             bg, fg = SLOT_GREEN, "#1b5e20"
         try:
             label._record = record
-            label.configure(text=text, font=_ui_font(12, bold=bold), bg=bg, fg=fg)
+            label.configure(text=text, font=_ui_font(11, bold=bold), bg=bg, fg=fg)
             cell = getattr(label, "_cell", None) or label.master
             cell.configure(bg=bg)
         except tk.TclError:
@@ -1301,7 +1301,7 @@ class SheetsHubApp(ctk.CTk):
             text="Время",
             bg=GREEN,
             fg="#ffffff",
-            font=_ui_font(11, bold=True),
+            font=_ui_font(10, bold=True),
         )
         for col, date in enumerate(dates, start=1):
             weekend = any(part in date.lower() for part in ("сб", "вс"))
@@ -1313,7 +1313,7 @@ class SheetsHubApp(ctk.CTk):
                 text=date,
                 bg=GREEN,
                 fg="#fce8e6" if weekend else "#ffffff",
-                font=_ui_font(11, bold=True),
+                font=_ui_font(10, bold=True),
                 wraplength=max(40, date_w - 12),
             )
 
@@ -1399,7 +1399,7 @@ class SheetsHubApp(ctk.CTk):
             text=text,
             bg=bg,
             fg=fg,
-            font=_ui_font(12, bold=status == "Занято"),
+            font=_ui_font(11, bold=status == "Занято"),
             wraplength=max(40, width - 12),
             justify="left",
             anchor="nw",
