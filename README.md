@@ -106,7 +106,7 @@ destinations:
 build_exe.bat
 ```
 
-Готовый файл: `dist\SheetsHub\SheetsHub.exe`. Рядом с ним положите `config.yaml`, `credentials.json` и после входа — `token.json`.
+Готовый файл: `dist\SheetsHub\SheetsHub.exe`. Нужна **вся папка** `SheetsHub` вместе с `_internal` (один `.exe` без неё не запустится). Рядом положите `config.yaml`, `credentials.json` и после входа — `token.json`.
 
 ## Важно
 

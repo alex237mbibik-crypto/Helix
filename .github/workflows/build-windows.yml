@@ -28,10 +28,15 @@ jobs:
       - name: Build SheetsHub.exe
         shell: cmd
         run: |
-          python -m PyInstaller --noconfirm --clean --windowed --name SheetsHub --collect-all customtkinter --collect-all certifi --collect-all gspread --collect-all truststore --collect-all google_auth_oauthlib --hidden-import=certifi --hidden-import=truststore --hidden-import=google_auth_oauthlib --hidden-import=google_auth_oauthlib.flow --add-data "config.example.yaml;." launcher.py
-          if not exist dist\SheetsHub mkdir dist\SheetsHub
+          python -m PyInstaller --noconfirm --clean --windowed --onedir --name SheetsHub --noupx --collect-all customtkinter --collect-all certifi --collect-all gspread --collect-all truststore --collect-all google_auth_oauthlib --hidden-import=certifi --hidden-import=truststore --hidden-import=google_auth_oauthlib --hidden-import=google_auth_oauthlib.flow --add-data "config.example.yaml;." launcher.py
+          if not exist dist\SheetsHub\_internal (
+            echo Missing _internal folder after build
+            exit /b 1
+          )
           copy /Y config.example.yaml dist\SheetsHub\
           if exist credentials.example.json copy /Y credentials.example.json dist\SheetsHub\
+          if exist packaging\HOW_TO_RUN.txt copy /Y packaging\HOW_TO_RUN.txt dist\SheetsHub\
+          if exist packaging\start_SheetsHub.bat copy /Y packaging\start_SheetsHub.bat dist\SheetsHub\
           for /f "delims=" %%i in ('python -c "import certifi; print(certifi.where())"') do copy /Y "%%i" dist\SheetsHub\cacert.pem
 
       - name: Upload Windows build
@@ -40,3 +45,4 @@ jobs:
           name: SheetsHub-Windows
           path: dist/SheetsHub/
           if-no-files-found: error
+          compression-level: 0

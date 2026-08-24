@@ -1,0 +1,16 @@
+SheetsHub — как запустить
+========================
+
+1. Распакуйте весь архив SheetsHub-Windows целиком в одну папку.
+2. В папке должны быть рядом:
+   - SheetsHub.exe
+   - папка _internal   ← без неё программа НЕ запустится
+   - config.example.yaml
+3. Положите рядом credentials.json (OAuth Desktop JSON).
+4. Запускайте SheetsHub.exe (или start_SheetsHub.bat).
+
+Если ошибка «Could not load PyInstaller's embedded PKG archive»:
+- скачайте архив заново из GitHub Actions;
+- не копируйте один только .exe — копируйте всю папку;
+- добавьте папку в исключения антивируса (часто портит .exe);
+- не запускайте из архива напрямую — сначала распакуйте.
