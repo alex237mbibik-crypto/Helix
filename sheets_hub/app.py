@@ -41,8 +41,8 @@ SLOT_TIME = "#f1f3f4"
 SLOT_OUTLINE = "#dadce0"
 CAL_TIME_W = 72
 CAL_DATE_W = 176
-CAL_ROW_H = 144
-CAL_HEADER_H = 120
+CAL_ROW_H = 72
+CAL_HEADER_H = 60
 CAL_GAP = 1
 INFO_TONES = {
     "warn": ("#f8d7c4", "#c5221f"),
