@@ -12,10 +12,12 @@ import tkinter as tk
 
 from sheets_hub.auth import (
     AuthError,
+    build_authorization_url,
     clear_user_login,
     credential_kind,
+    finish_oauth_with_response_url,
+    listen_for_oauth_redirect,
     load_last_email,
-    run_oauth_login,
     save_last_email,
     token_path_near,
 )
@@ -934,7 +936,7 @@ class SheetsHubApp(ctk.CTk):
             return
 
         host = parent or self
-        dialog = self._dialog("Вход оператора", "460x240")
+        dialog = self._dialog("Вход оператора", "520x280")
         dialog.transient(host)
         dialog.grab_set()
 
@@ -949,10 +951,11 @@ class SheetsHubApp(ctk.CTk):
         ).pack(anchor="w", padx=14, pady=(12, 4))
         ctk.CTkLabel(
             box,
-            text="Один раз подтвердите вход в браузере — дальше программа запомнит вас на этом ПК.",
+            text="Дальше откроется окно с ссылкой Google. Если страница белая — "
+            "откройте ссылку в Edge или Firefox.",
             text_color=MUTED,
             font=ctk.CTkFont(size=12),
-            wraplength=400,
+            wraplength=460,
             justify="left",
         ).pack(anchor="w", padx=14, pady=(0, 8))
 
@@ -1037,16 +1040,147 @@ class SheetsHubApp(ctk.CTk):
             if hint and current and current.lower() == hint.lower():
                 return True
             clear_user_login(path)
+        return self._oauth_guided_login(path, hint, parent=parent)
+
+    def _oauth_guided_login(self, path: Path, hint: str, parent=None) -> bool:
+        import queue
+        import webbrowser
+
         try:
-            self._set_status("Откройте браузер и подтвердите вход…")
-            run_oauth_login(path, login_hint=hint)
+            flow, auth_url = build_authorization_url(path, login_hint=hint)
         except AuthError as exc:
-            messagebox.showerror("Вход не выполнен", str(exc), parent=parent or self)
+            messagebox.showerror("Вход", str(exc), parent=parent or self)
             return False
-        except Exception as exc:
-            messagebox.showerror("Вход не выполнен", str(exc), parent=parent or self)
-            return False
-        return True
+
+        host = parent or self
+        dialog = self._dialog("Подтверждение Google", "640x460")
+        dialog.transient(host)
+        dialog.grab_set()
+        done = {"ok": False}
+        events: queue.Queue = queue.Queue()
+
+        box = ctk.CTkFrame(dialog, fg_color=BG, corner_radius=10, border_width=1, border_color=LINE)
+        box.pack(fill="both", expand=True, padx=16, pady=16)
+
+        ctk.CTkLabel(
+            box,
+            text="Войдите в Google",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=TEXT,
+        ).pack(anchor="w", padx=14, pady=(12, 4))
+        ctk.CTkLabel(
+            box,
+            text=(
+                "1) Нажмите «Открыть браузер» (или скопируйте ссылку в Edge/Firefox).\n"
+                "2) Если экран белый — отключите VPN и проверку HTTPS в антивирусе, "
+                "откройте ссылку в другом браузере.\n"
+                "3) Войдите почтой и нажмите «Разрешить».\n"
+                "4) Если браузер сам не вернул в программу — вставьте сюда адрес "
+                "из строки (начинается с http://127.0.0.1:8765/?code=)."
+            ),
+            text_color=MUTED,
+            font=ctk.CTkFont(size=12),
+            wraplength=580,
+            justify="left",
+        ).pack(anchor="w", padx=14, pady=(0, 8))
+
+        status_var = tk.StringVar(value="Ожидаю вход…")
+        ctk.CTkLabel(box, textvariable=status_var, text_color=GREEN, anchor="w").pack(
+            anchor="w", padx=14, pady=(0, 6)
+        )
+
+        paste_var = tk.StringVar()
+        paste = _styled_entry(
+            box,
+            "http://127.0.0.1:8765/?code=…",
+            textvariable=paste_var,
+            height=34,
+        )
+        paste.pack(fill="x", padx=14, pady=(0, 8))
+
+        btns = ctk.CTkFrame(box, fg_color="transparent")
+        btns.pack(fill="x", padx=14, pady=(0, 12))
+
+        def open_browser() -> None:
+            webbrowser.open(auth_url, new=1, autoraise=True)
+            status_var.set("Браузер открыт. Войдите и разрешите доступ…")
+
+        def copy_link() -> None:
+            try:
+                dialog.clipboard_clear()
+                dialog.clipboard_append(auth_url)
+                status_var.set("Ссылка скопирована — вставьте в Edge или Firefox.")
+            except Exception:
+                status_var.set("Не удалось скопировать — откройте браузер кнопкой ниже.")
+
+        def finish_with_url(response_url: str) -> None:
+            try:
+                finish_oauth_with_response_url(
+                    flow,
+                    response_url,
+                    client_secrets_path=path,
+                    login_hint=hint,
+                )
+            except Exception as exc:
+                messagebox.showerror("Вход не выполнен", str(exc), parent=dialog)
+                status_var.set("Не вышло — проверьте адрес или попробуйте снова.")
+                return
+            done["ok"] = True
+            dialog.destroy()
+
+        def submit_paste() -> None:
+            text = paste_var.get().strip()
+            if not text:
+                messagebox.showwarning("Адрес", "Вставьте адрес из строки браузера.", parent=dialog)
+                return
+            finish_with_url(text)
+
+        def show_admin_help() -> None:
+            messagebox.showinfo(
+                "Если страница Google белая",
+                "Проверьте в Google Cloud Console (проект helix):\n\n"
+                "1) APIs & Services → Enable APIs → Google Sheets API включён.\n"
+                "2) OAuth consent screen создан (External).\n"
+                "3) Статус Testing → в Test users добавлена ваша почта.\n"
+                "4) Credentials → OAuth client типа Desktop.\n\n"
+                "Потом откройте ссылку входа в Edge или Firefox без VPN.",
+                parent=dialog,
+            )
+
+        self._primary_button(btns, "Открыть браузер", open_browser, 150).pack(side="left", padx=(0, 8))
+        self._outline_button(btns, "Скопировать ссылку", copy_link, 160).pack(side="left", padx=(0, 8))
+        self._outline_button(btns, "Что проверить", show_admin_help, 130).pack(side="left")
+        self._primary_button(box, "Готово — я вставил адрес", submit_paste, 220).pack(
+            anchor="e", padx=14, pady=(0, 12)
+        )
+
+        def listener() -> None:
+            try:
+                response_url = listen_for_oauth_redirect(timeout=300)
+                events.put(("ok", response_url))
+            except Exception as exc:
+                events.put(("err", str(exc)))
+
+        threading.Thread(target=listener, daemon=True).start()
+        dialog.after(300, open_browser)
+
+        def poll() -> None:
+            if done["ok"] or not dialog.winfo_exists():
+                return
+            try:
+                while True:
+                    kind, payload = events.get_nowait()
+                    if kind == "ok":
+                        finish_with_url(payload)
+                        return
+                    status_var.set(payload)
+            except queue.Empty:
+                pass
+            dialog.after(400, poll)
+
+        poll()
+        dialog.wait_window()
+        return bool(done["ok"])
 
     def _run_bg(self, work: Callable, done: Callable, *, alert: bool = True) -> None:
         self._jobs += 1

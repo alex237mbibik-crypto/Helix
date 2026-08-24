@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import requests
@@ -14,10 +16,16 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 
 from sheets_hub.config import ROOT
 
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+SCOPES = [
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/spreadsheets",
+]
 TOKEN_NAME = "token.json"
 LAST_EMAIL_NAME = "last_email.txt"
 _TOKEN_URL = "https://oauth2.googleapis.com/token"
+_AUTH_URI = "https://accounts.google.com/o/oauth2/v2/auth"
+_OAUTH_PORT = 8765
 
 
 class AuthError(Exception):
@@ -174,6 +182,121 @@ def _fetch_account_email(access_token: str) -> str:
     return ""
 
 
+def _make_flow(client_secrets_path: Path) -> InstalledAppFlow:
+    flow = InstalledAppFlow.from_client_secrets_file(str(client_secrets_path), SCOPES)
+    # Старый auth_uri из скачанного JSON иногда даёт пустую страницу.
+    try:
+        flow.client_config["auth_uri"] = _AUTH_URI
+        flow.client_config["token_uri"] = _TOKEN_URL
+    except Exception:
+        pass
+    return flow
+
+
+def build_authorization_url(
+    client_secrets_path: Path,
+    *,
+    login_hint: str = "",
+    port: int = _OAUTH_PORT,
+) -> tuple[InstalledAppFlow, str]:
+    """Готовит flow и ссылку входа (для браузера / копирования)."""
+    if credential_kind(client_secrets_path) != "oauth_client":
+        raise AuthError("Для входа нужен OAuth Desktop JSON, не service account.")
+    # localhost по HTTP — иначе oauthlib может ругаться при обмене кода.
+    os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+    flow = _make_flow(client_secrets_path)
+    flow.redirect_uri = f"http://127.0.0.1:{port}/"
+    kwargs: dict = {
+        "access_type": "offline",
+        "prompt": "consent",
+    }
+    hint = (login_hint or "").strip()
+    if hint:
+        kwargs["login_hint"] = hint
+    auth_url, _state = flow.authorization_url(**kwargs)
+    return flow, auth_url
+
+
+def listen_for_oauth_redirect(*, port: int = _OAUTH_PORT, timeout: float = 300.0) -> str:
+    """Ждёт один редирект на 127.0.0.1:port и возвращает полный URL с code=."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    holder: dict[str, str] = {}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            holder["path"] = self.path
+            body = (
+                "<html><body style='font-family:sans-serif;padding:2rem'>"
+                "<h2>Вход выполнен</h2><p>Можно закрыть вкладку и вернуться в Sheets Hub.</p>"
+                "</body></html>"
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format, *args):  # noqa: A003
+            return
+
+    try:
+        server = HTTPServer(("127.0.0.1", port), Handler)
+    except OSError as exc:
+        raise AuthError(
+            f"Порт {port} занят. Закройте другие окна входа или перезапустите программу.\n{exc}"
+        ) from exc
+    server.timeout = 1.0
+    deadline = time.time() + max(5.0, float(timeout))
+    try:
+        while time.time() < deadline:
+            server.handle_request()
+            if "path" in holder:
+                break
+        else:
+            raise AuthError("Время ожидания входа истекло. Попробуйте ещё раз.")
+    finally:
+        try:
+            server.server_close()
+        except Exception:
+            pass
+    path = holder.get("path") or "/"
+    return f"http://127.0.0.1:{port}{path}"
+
+
+def finish_oauth_with_response_url(
+    flow: InstalledAppFlow,
+    response_url: str,
+    *,
+    client_secrets_path: Path,
+    token_path: Path | None = None,
+    login_hint: str = "",
+) -> UserCredentials:
+    """Завершает вход по адресу вида http://127.0.0.1:8765/?code=..."""
+    text = (response_url or "").strip().strip('"').strip("'")
+    if not text:
+        raise AuthError("Пустой адрес из браузера.")
+    if "code=" not in text and not text.startswith("4/"):
+        raise AuthError(
+            "В адресе нет code=…\n"
+            "После входа в Google скопируйте весь адрес из строки браузера "
+            "(начинается с http://127.0.0.1:8765/?code=…)."
+        )
+    os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+    if text.startswith("4/") or (text.startswith("4%2F") and "://" not in text):
+        flow.fetch_token(code=text)
+    else:
+        flow.fetch_token(authorization_response=text)
+    creds = flow.credentials
+    dest = token_path or token_path_near(client_secrets_path)
+    hint = (login_hint or "").strip()
+    email = _fetch_account_email(creds.token or "") or hint
+    _save_token(creds, dest, account_email=email)
+    if email:
+        save_last_email(email, client_secrets_path)
+    return creds
+
+
 def run_oauth_login(
     client_secrets_path: Path,
     token_path: Path | None = None,
@@ -185,17 +308,28 @@ def run_oauth_login(
         raise AuthError("Для входа нужен OAuth Desktop JSON, не service account.")
     dest = token_path or token_path_near(client_secrets_path)
     hint = (login_hint or "").strip()
-    flow = InstalledAppFlow.from_client_secrets_file(str(client_secrets_path), SCOPES)
+    os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+    flow = _make_flow(client_secrets_path)
     kwargs: dict = {
-        "port": 0,
-        "prompt": "select_account",
-        "authorization_prompt_message": "",
+        "bind_addr": "127.0.0.1",
+        "port": _OAUTH_PORT,
+        "open_browser": True,
+        "prompt": "consent",
         "access_type": "offline",
-        "include_granted_scopes": "true",
+        "authorization_prompt_message": (
+            "Если в браузере белый экран — нажмите «Скопировать ссылку» в программе "
+            "и откройте её в Edge/Firefox, либо отключите VPN/проверку HTTPS в антивирусе.\n"
+        ),
+        "success_message": "Вход выполнен. Можно закрыть вкладку и вернуться в Sheets Hub.",
     }
     if hint:
         kwargs["login_hint"] = hint
-    creds = flow.run_local_server(**kwargs)
+    try:
+        creds = flow.run_local_server(**kwargs)
+    except OSError:
+        # Порт занят — любой свободный.
+        kwargs["port"] = 0
+        creds = flow.run_local_server(**kwargs)
     email = _fetch_account_email(creds.token or "") or hint
     _save_token(creds, dest, account_email=email)
     if email:
