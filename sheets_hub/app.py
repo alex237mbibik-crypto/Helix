@@ -22,7 +22,7 @@ from sheets_hub.auth import (
     save_last_email,
     token_path_near,
 )
-from sheets_hub.calendar_sheet import info_tone
+from sheets_hub.calendar_sheet import extract_phone, info_tone
 from sheets_hub.client import SheetsClient, SheetsError
 from sheets_hub.config import (
     KIND_INFO,
@@ -1474,7 +1474,9 @@ class SheetsHubApp(ctk.CTk):
             bold = False
             bg, fg = SLOT_BLOCKED, MUTED
         elif status == "Занято":
-            text = record.values.get("Клиент", "").strip() or "занято"
+            name = record.values.get("Клиент", "").strip() or "занято"
+            phone = record.values.get("Телефон", "").strip()
+            text = f"{name}\n{phone}" if phone and phone not in name else name
             bold = True
             bg, fg = SLOT_BOOKED, "#ffffff"
         else:
@@ -1808,7 +1810,9 @@ class SheetsHubApp(ctk.CTk):
         if status == "Не записывать":
             bg, fg, text = SLOT_BLOCKED, MUTED, "не записывать"
         elif status == "Занято":
-            text = record.values.get("Клиент", "").strip() or "занято"
+            name = record.values.get("Клиент", "").strip() or "занято"
+            phone = record.values.get("Телефон", "").strip()
+            text = f"{name}\n{phone}" if phone and phone not in name else name
             bg, fg = SLOT_BOOKED, "#ffffff"
         else:
             # Тёмный текст на зелёном — иначе «запись» почти не читается.
@@ -2085,9 +2089,19 @@ class SheetsHubApp(ctk.CTk):
         ).pack(padx=16, pady=(16, 4), anchor="w")
         box = _input_box(dialog, "Имя клиента" if calendar else field, "сохранится в ту же ячейку таблицы")
         box.pack(fill="x", padx=16, pady=8)
-        entry = _styled_entry(box, "Иванова А.")
+        entry = _styled_entry(box, "Иванова А. +79001234567" if calendar else "Иванова А.")
         entry.pack(fill="x", padx=10, pady=(4, 10))
-        entry.insert(0, record.values.get(field, ""))
+        initial = record.values.get(field, "")
+        if calendar:
+            phone = str(record.values.get("Телефон") or "").strip()
+            name = str(record.values.get("Клиент") or "").strip()
+            if record.values.get("Статус") == "Свободно":
+                initial = ""
+            elif phone and phone not in name:
+                initial = f"{name} {phone}".strip()
+            else:
+                initial = name
+        entry.insert(0, initial)
         if calendar and record.values.get("Статус") == "Свободно":
             entry.delete(0, "end")
         entry.focus()
@@ -2186,6 +2200,9 @@ class SheetsHubApp(ctk.CTk):
                         record.values["Статус"] = "Не записывать"
                     else:
                         record.values["Статус"] = "Занято"
+                        name, phone = extract_phone(typed)
+                        record.values["Клиент"] = name or typed
+                        record.values["Телефон"] = phone
                     if self._refresh_slot_label(record):
                         booked = sum(
                             1

@@ -10,7 +10,7 @@ _TIME_RE = re.compile(
     r"^\s*(?:\d{4}-\d{2}-\d{2}\s+)?(\d{1,2})[:.\-](\d{2})(?:[:.\-]\d{2})?\s*(?:am|pm)?\s*$",
     re.IGNORECASE,
 )
-_PHONE_RE = re.compile(r"(\+?\d[\d\s\-()]{6,}\d)")
+_PHONE_RE = re.compile(r"(\+?\d[\d\s\-()]{5,}\d)")
 _DATE_MARKERS = (
     "январ",
     "феврал",

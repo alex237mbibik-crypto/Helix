@@ -324,6 +324,14 @@ def _a1_range(sheet: str, row: int, col: int) -> str:
     return f"'{safe}'!{cell}"
 
 
+def _value_input_option(value: str) -> str:
+    """«+7900…» как USER_ENTERED Sheets читает формулой → ошибка в ячейке и номер пропадает."""
+    text = str(value or "")
+    if text.startswith(("=", "+", "@")):
+        return "RAW"
+    return "USER_ENTERED"
+
+
 def _curl_json(
     method: str,
     url: str,
@@ -549,9 +557,10 @@ def _update_cell_via_powershell(
 ) -> None:
     token = _access_token(credentials_path)
     cell_range = _a1_range(sheet, row, col)
+    option = _value_input_option(value)
     url = (
         f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/"
-        f"{quote(cell_range, safe='')}?valueInputOption=USER_ENTERED"
+        f"{quote(cell_range, safe='')}?valueInputOption={option}"
     )
     payload = {"range": cell_range, "majorDimension": "ROWS", "values": [[value]]}
     fd, name = tempfile.mkstemp(prefix="sheets_hub_ps_", suffix=".json")
@@ -598,9 +607,10 @@ def _update_cell_via_curl(
 ) -> None:
     token = _access_token(credentials_path)
     cell_range = _a1_range(sheet, row, col)
+    option = _value_input_option(value)
     url = (
         f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/"
-        f"{quote(cell_range, safe='')}?valueInputOption=USER_ENTERED"
+        f"{quote(cell_range, safe='')}?valueInputOption={option}"
     )
     _curl_json(
         "PUT",
@@ -644,9 +654,10 @@ def _update_cell_via_requests_insecure(
 ) -> None:
     token = _access_token(credentials_path)
     cell_range = _a1_range(sheet, row, col)
+    option = _value_input_option(value)
     url = (
         f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/"
-        f"{quote(cell_range, safe='')}?valueInputOption=USER_ENTERED"
+        f"{quote(cell_range, safe='')}?valueInputOption={option}"
     )
     response = requests.put(
         url,
@@ -1053,12 +1064,22 @@ class SheetsClient:
         cell_value = value
         if record.layout == "calendar" and field == "Клиент":
             cell_value = value.strip() or "запись"
+        input_option = _value_input_option(cell_value)
 
         def _do_gspread() -> None:
             worksheet = self._call(
                 lambda: self._gc.open_by_key(record.spreadsheet_id).worksheet(record.sheet)
             )
-            self._call(lambda: worksheet.update_cell(record.row, col, cell_value))
+            a1 = f"{_col_to_a1(col)}{record.row}"
+
+            def _write():
+                worksheet.update(
+                    a1,
+                    [[cell_value]],
+                    value_input_option=input_option,
+                )
+
+            self._call(_write)
 
         def _do_curl() -> None:
             _update_cell_via_curl(
