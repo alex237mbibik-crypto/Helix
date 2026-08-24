@@ -2074,7 +2074,10 @@ class SheetsHubApp(ctk.CTk):
     def _edit_cell(self, record: Record, field: str) -> None:
         calendar = record.layout == "calendar" and field == "Клиент"
         when = f"{record.values.get('Дата', '')} · {record.values.get('Время', '')}".strip(" ·")
-        dialog = self._dialog("Запись" if calendar else "Изменить ячейку", "480x240")
+        dialog = self._dialog(
+            "Запись" if calendar else "Изменить ячейку",
+            "520x420" if calendar else "480x240",
+        )
         ctk.CTkLabel(
             dialog,
             text=when or f"{record.source_name} · строка {record.row}",
@@ -2089,11 +2092,79 @@ class SheetsHubApp(ctk.CTk):
             entry.delete(0, "end")
         entry.focus()
 
-        def save() -> None:
+        pregnant_var = tk.StringVar(value="")
+        warn_label = None
+        if calendar:
+            preg_box = ctk.CTkFrame(dialog, fg_color=BG, corner_radius=10, border_width=1, border_color=LINE)
+            preg_box.pack(fill="x", padx=16, pady=(0, 8))
+            ctk.CTkLabel(
+                preg_box,
+                text="Беременность",
+                font=ctk.CTkFont(size=13, weight="bold"),
+                text_color=TEXT,
+            ).pack(anchor="w", padx=12, pady=(10, 4))
+            existing = str(record.values.get("Клиент") or "").lower()
+            if "береме" in existing:
+                pregnant_var.set("yes")
+            radios = ctk.CTkFrame(preg_box, fg_color="transparent")
+            radios.pack(fill="x", padx=8, pady=(0, 8))
+            ctk.CTkRadioButton(
+                radios,
+                text="Не беременна",
+                variable=pregnant_var,
+                value="no",
+                text_color=TEXT,
+                fg_color=GREEN,
+                hover_color=GREEN_HOVER,
+            ).pack(side="left", padx=8, pady=4)
+            ctk.CTkRadioButton(
+                radios,
+                text="Беременна",
+                variable=pregnant_var,
+                value="yes",
+                text_color=TEXT,
+                fg_color=GREEN,
+                hover_color=GREEN_HOVER,
+            ).pack(side="left", padx=8, pady=4)
+
+            warn_label = ctk.CTkLabel(
+                preg_box,
+                text="7425, 74040, 74042 и 40-534 коды НЕЛЬЗЯ БЕРЕМЕННЫМ",
+                text_color=DANGER,
+                font=ctk.CTkFont(size=13, weight="bold"),
+                wraplength=460,
+                justify="left",
+                anchor="w",
+            )
+
+            def sync_warn(*_args) -> None:
+                if pregnant_var.get() == "yes":
+                    if not warn_label.winfo_ismapped():
+                        warn_label.pack(fill="x", padx=12, pady=(0, 12))
+                else:
+                    try:
+                        warn_label.pack_forget()
+                    except Exception:
+                        pass
+
+            pregnant_var.trace_add("write", sync_warn)
+            sync_warn()
+
+        def save(*, freeing: bool = False) -> None:
             value = entry.get()
             if not self.client:
                 messagebox.showerror("Нет подключения", "Сначала войдите через Google в «Таблицы».")
                 return
+            if calendar and not freeing:
+                typed = value.strip()
+                booking = typed and typed.lower() != "запись" and "не запис" not in typed.lower()
+                if booking and pregnant_var.get() not in {"yes", "no"}:
+                    messagebox.showwarning(
+                        "Беременность",
+                        "Выберите: беременна или не беременна.",
+                        parent=dialog,
+                    )
+                    return
 
             def work():
                 to_write = write_back_value(record, field, value)
@@ -2135,11 +2206,11 @@ class SheetsHubApp(ctk.CTk):
 
         def free_slot() -> None:
             entry.delete(0, "end")
-            save()
+            save(freeing=True)
 
         buttons = ctk.CTkFrame(dialog, fg_color="transparent")
         buttons.pack(fill="x", padx=16, pady=(0, 16))
-        self._primary_button(buttons, "Сохранить", save, 140).pack(side="left")
+        self._primary_button(buttons, "Сохранить", lambda: save(freeing=False), 140).pack(side="left")
         if calendar and record.values.get("Статус") == "Занято":
             ctk.CTkButton(
                 buttons,
@@ -2152,7 +2223,7 @@ class SheetsHubApp(ctk.CTk):
                 hover_color=DANGER_HOVER,
                 font=ctk.CTkFont(size=13, weight="bold"),
             ).pack(side="left", padx=(8, 0))
-        dialog.bind("<Return>", lambda *_: save())
+        dialog.bind("<Return>", lambda *_: save(freeing=False))
 
     def _delete_row(self) -> None:
         record = self._selected_record()
