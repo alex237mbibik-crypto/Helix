@@ -6,7 +6,8 @@ SheetsHub — как запустить
    - SheetsHub.exe
    - папка _internal   ← без неё программа НЕ запустится
    - config.example.yaml
-3. Положите рядом credentials.json (OAuth Desktop JSON).
+3. credentials.json уже лежит в архиве сборки рядом с exe.
+   Оператору остаётся один раз войти своей Google-почтой (появится token.json).
 4. Запускайте SheetsHub.exe (или start_SheetsHub.bat).
 
 Если ошибка «Could not load PyInstaller's embedded PKG archive»:

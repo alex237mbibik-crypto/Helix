@@ -14,3 +14,5 @@ token.json
 last_email.txt
 config.yaml
 .env
+# локальная копия для ручной сборки; в CI берётся из GitHub Secret
+packaging/bundled_credentials.json

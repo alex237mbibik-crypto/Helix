@@ -30,6 +30,39 @@ ROOT = app_root()
 CONFIG_PATH = ROOT / "config.yaml"
 EXAMPLE_CONFIG_PATH = _example_config_path()
 
+
+def find_credentials_file(configured: Path | str | None = None) -> Path | None:
+    """Ищет credentials рядом с программой, даже если в config.yaml старый путь."""
+    candidates: list[Path] = []
+    if configured:
+        raw = Path(configured)
+        candidates.append(raw)
+        if not raw.is_absolute():
+            candidates.append(ROOT / raw)
+    candidates.append(ROOT / "credentials.json")
+    try:
+        candidates.extend(sorted(ROOT.glob("client_secret*.json")))
+        candidates.extend(sorted(ROOT.glob("*credentials*.json")))
+    except Exception:
+        pass
+
+    seen: set[str] = set()
+    for path in candidates:
+        try:
+            key = str(path.resolve()).lower()
+        except Exception:
+            key = str(path).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if path.is_file():
+                return path.resolve()
+        except Exception:
+            continue
+    return None
+
+
 _ID_FROM_URL = re.compile(r"/spreadsheets/d/([a-zA-Z0-9-_]+)")
 
 
@@ -311,9 +344,9 @@ def load_config(path: Path | None = None) -> AppConfig:
             raise FileNotFoundError("Нет config.yaml и config.example.yaml")
 
     raw: dict[str, Any] = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    creds = Path(raw.get("credentials") or "credentials.json")
-    if not creds.is_absolute():
-        creds = ROOT / creds
+    configured = Path(raw.get("credentials") or "credentials.json")
+    found = find_credentials_file(configured)
+    creds = found or (configured if configured.is_absolute() else ROOT / configured)
 
     destinations = _load_refs(raw.get("destinations") or raw.get("targets"))
     sources = _load_refs(raw.get("sources"))

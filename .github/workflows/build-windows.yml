@@ -25,6 +25,19 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      - name: Write OAuth credentials for bundle
+        env:
+          SHEETS_HUB_OAUTH_JSON: ${{ secrets.SHEETS_HUB_OAUTH_JSON }}
+        shell: bash
+        run: |
+          if [ -z "$SHEETS_HUB_OAUTH_JSON" ]; then
+            echo "::error::Добавьте GitHub Secret SHEETS_HUB_OAUTH_JSON (содержимое credentials.json)"
+            exit 1
+          fi
+          mkdir -p packaging
+          printf '%s\n' "$SHEETS_HUB_OAUTH_JSON" > packaging/bundled_credentials.json
+          python -c "import json; json.load(open('packaging/bundled_credentials.json', encoding='utf-8')); print('OAuth JSON OK')"
+
       - name: Build SheetsHub.exe
         shell: cmd
         run: |
@@ -35,9 +48,15 @@ jobs:
           )
           copy /Y config.example.yaml dist\SheetsHub\
           if exist credentials.example.json copy /Y credentials.example.json dist\SheetsHub\
+          if exist packaging\bundled_credentials.json copy /Y packaging\bundled_credentials.json dist\SheetsHub\credentials.json
           if exist packaging\HOW_TO_RUN.txt copy /Y packaging\HOW_TO_RUN.txt dist\SheetsHub\
           if exist packaging\start_SheetsHub.bat copy /Y packaging\start_SheetsHub.bat dist\SheetsHub\
           for /f "delims=" %%i in ('python -c "import certifi; print(certifi.where())"') do copy /Y "%%i" dist\SheetsHub\cacert.pem
+          if not exist dist\SheetsHub\credentials.json (
+            echo credentials.json was not bundled
+            exit /b 1
+          )
+          echo Bundled credentials.json OK
 
       - name: Upload Windows build
         uses: actions/upload-artifact@v4

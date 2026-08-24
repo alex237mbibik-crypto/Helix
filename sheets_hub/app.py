@@ -27,9 +27,11 @@ from sheets_hub.client import SheetsClient, SheetsError
 from sheets_hub.config import (
     KIND_INFO,
     KIND_RECORDS,
+    ROOT,
     AppConfig,
     SheetRef,
     credentials_email,
+    find_credentials_file,
     install_credentials,
     is_info_title,
     load_config,
@@ -894,19 +896,47 @@ class SheetsHubApp(ctk.CTk):
         else:
             self.account_label.configure(text=f"Оператор: {text}", text_color=GREEN)
 
+    def _resolve_credentials_path(self) -> Path | None:
+        found = find_credentials_file(self.config_data.credentials)
+        if found is not None:
+            if found != self.config_data.credentials:
+                self.config_data.credentials = found
+                try:
+                    save_config(self.config_data)
+                except Exception:
+                    pass
+            return found
+        return None
+
     def _try_connect(self, prompt_key: bool = True) -> None:
-        path = self.config_data.credentials
-        if not path.exists():
+        path = self._resolve_credentials_path()
+        if path is None:
+            expected = ROOT / "credentials.json"
             self.client = None
             self._set_account_label("")
-            self._set_status("Администратор ещё не положил credentials.json рядом с программой.")
+            self._set_status(f"Нет credentials.json. Нужен файл: {expected}")
             if prompt_key:
                 self.after(200, self._ask_for_credentials)
             return
-        if credential_kind(path) == "oauth_client" and not has_saved_login(path):
+        kind = credential_kind(path)
+        if kind == "unknown":
             self.client = None
             self._set_account_label("")
-            self._set_status("Один раз войдите почтой Google — дальше запомним на этом ПК.")
+            self._set_status("credentials.json есть, но это не OAuth Desktop JSON.")
+            if prompt_key:
+                messagebox.showwarning(
+                    "Неверный credentials.json",
+                    f"Файл найден:\n{path}\n\n"
+                    "Нужен JSON OAuth-клиента Desktop из Google Cloud "
+                    "(внутри должен быть блок \"installed\"), "
+                    "а не обычный текст и не только example.",
+                )
+                self.after(200, self._ask_for_credentials)
+            return
+        if kind == "oauth_client" and not has_saved_login(path):
+            self.client = None
+            self._set_account_label("")
+            self._set_status("Файл найден. Один раз войдите почтой Google.")
             if prompt_key:
                 self.after(200, self._show_operator_login)
             return
@@ -965,8 +995,8 @@ class SheetsHubApp(ctk.CTk):
         threading.Thread(target=runner, daemon=True).start()
 
     def _show_operator_login(self, parent=None) -> None:
-        path = self.config_data.credentials
-        if not path.exists() or credential_kind(path) != "oauth_client":
+        path = self._resolve_credentials_path()
+        if path is None or credential_kind(path) != "oauth_client":
             self._ask_for_credentials()
             return
 
@@ -1017,7 +1047,7 @@ class SheetsHubApp(ctk.CTk):
         self._primary_button(box, "Продолжить", submit, 160).pack(anchor="e", padx=14, pady=(0, 14))
 
     def _change_operator(self) -> None:
-        path = self.config_data.credentials
+        path = self._resolve_credentials_path() or self.config_data.credentials
         if path.exists() and credential_kind(path) == "oauth_client":
             clear_user_login(path)
         self.client = None
@@ -1026,11 +1056,14 @@ class SheetsHubApp(ctk.CTk):
         self._show_operator_login()
 
     def _ask_for_credentials(self) -> None:
+        expected = ROOT / "credentials.json"
         go = messagebox.askokcancel(
             "Нужен файл приложения",
-            "Рядом с программой нет credentials.json.\n\n"
-            "Его один раз кладёт администратор (OAuth Desktop JSON из Google Cloud).\n"
-            "Операторам потом достаточно ввести свою почту.",
+            "Не найден рабочий OAuth Desktop JSON.\n\n"
+            f"Положите его сюда:\n{expected}\n\n"
+            "Имя файла лучше: credentials.json\n"
+            "(скачанный client_secret….json тоже подхватится).\n\n"
+            "Сейчас можно выбрать файл вручную.",
         )
         if not go:
             return
@@ -1058,11 +1091,11 @@ class SheetsHubApp(ctk.CTk):
         return True
 
     def _google_login(self, parent=None, login_hint: str = "") -> bool:
-        path = self.config_data.credentials
-        if not path.exists() or credential_kind(path) != "oauth_client":
+        path = self._resolve_credentials_path()
+        if path is None or credential_kind(path) != "oauth_client":
             messagebox.showinfo(
                 "Нужен credentials.json",
-                "Администратор должен положить OAuth Desktop JSON рядом с программой.",
+                f"Положите OAuth Desktop JSON сюда:\n{ROOT / 'credentials.json'}",
                 parent=parent or self,
             )
             if not self._pick_credentials_file(parent=parent):

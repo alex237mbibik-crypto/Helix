@@ -106,7 +106,10 @@ destinations:
 build_exe.bat
 ```
 
-Готовый файл: `dist\SheetsHub\SheetsHub.exe`. Нужна **вся папка** `SheetsHub` вместе с `_internal` (один `.exe` без неё не запустится). Рядом положите `config.yaml`, `credentials.json` и после входа — `token.json`.
+Готовый файл: `dist\SheetsHub\SheetsHub.exe`. Нужна **вся папка** `SheetsHub` вместе с `_internal` (один `.exe` без неё не запустится).
+
+В CI `credentials.json` кладётся в архив из GitHub Secret `SHEETS_HUB_OAUTH_JSON` (Settings → Secrets → Actions). Локально: скопируйте свой OAuth JSON в `packaging/bundled_credentials.json` перед `build_exe.bat`.
+
 
 ## Важно
 
