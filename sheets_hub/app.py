@@ -1708,6 +1708,7 @@ class SheetsHubApp(ctk.CTk):
                     self._schedule_render(immediate=True)
                 self._set_status(f"Сохранено в таблицу: {when or record.source_name}")
                 dialog.destroy()
+                self.reload_all()
 
             self._run_bg(work, done)
 

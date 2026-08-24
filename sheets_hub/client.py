@@ -417,6 +417,38 @@ def _access_token_via_curl(credentials_path: Path) -> str:
     return token
 
 
+def _access_token_via_requests_insecure(credentials_path: Path) -> str:
+    """Запрос токена через requests verify=False, если curl/PowerShell недоступны."""
+    creds = Credentials.from_service_account_file(str(credentials_path), scopes=SCOPES)
+    now = int(time.time())
+    payload = {
+        "iss": creds.service_account_email,
+        "sub": creds.service_account_email,
+        "aud": _TOKEN_URL,
+        "iat": now,
+        "exp": now + 3600,
+        "scope": " ".join(SCOPES),
+    }
+    assertion = google_jwt.encode(creds.signer, payload)
+    if isinstance(assertion, bytes):
+        assertion = assertion.decode("ascii")
+    response = requests.post(
+        _TOKEN_URL,
+        data={
+            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+            "assertion": assertion,
+        },
+        timeout=20,
+        verify=False,
+    )
+    response.raise_for_status()
+    data = response.json()
+    token = str(data.get("access_token") or "").strip()
+    if not token:
+        raise SheetsError(f"Не получили access_token: {data}")
+    return token
+
+
 def _powershell_trust_preamble(class_name: str) -> str:
     return (
         "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; "
@@ -546,6 +578,81 @@ def _update_cell_via_curl(
         headers={"Authorization": f"Bearer {token}"},
         body={"range": cell_range, "majorDimension": "ROWS", "values": [[value]]},
     )
+
+
+def _read_cell_via_curl(
+    credentials_path: Path,
+    spreadsheet_id: str,
+    sheet: str,
+    row: int,
+    col: int,
+) -> str:
+    token = _access_token_via_curl(credentials_path)
+    cell_range = _a1_range(sheet, row, col)
+    url = (
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/"
+        f"{quote(cell_range, safe='')}"
+    )
+    data = _curl_json(
+        "GET",
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    values = data.get("values") or []
+    if not values or not values[0]:
+        return ""
+    return str(values[0][0] or "").strip()
+
+
+def _update_cell_via_requests_insecure(
+    credentials_path: Path,
+    spreadsheet_id: str,
+    sheet: str,
+    row: int,
+    col: int,
+    value: str,
+) -> None:
+    token = _access_token_via_requests_insecure(credentials_path)
+    cell_range = _a1_range(sheet, row, col)
+    url = (
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/"
+        f"{quote(cell_range, safe='')}?valueInputOption=USER_ENTERED"
+    )
+    response = requests.put(
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+        json={"range": cell_range, "majorDimension": "ROWS", "values": [[value]]},
+        timeout=20,
+        verify=False,
+    )
+    response.raise_for_status()
+
+
+def _read_cell_via_requests_insecure(
+    credentials_path: Path,
+    spreadsheet_id: str,
+    sheet: str,
+    row: int,
+    col: int,
+) -> str:
+    token = _access_token_via_requests_insecure(credentials_path)
+    cell_range = _a1_range(sheet, row, col)
+    url = (
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/"
+        f"{quote(cell_range, safe='')}"
+    )
+    response = requests.get(
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=20,
+        verify=False,
+    )
+    response.raise_for_status()
+    data = response.json()
+    values = data.get("values") or []
+    if not values or not values[0]:
+        return ""
+    return str(values[0][0] or "").strip()
 
 
 def _can_try_public_read(source: SheetRef) -> bool:
@@ -938,6 +1045,16 @@ class SheetsClient:
                 cell_value,
             )
 
+        def _do_requests_insecure() -> None:
+            _update_cell_via_requests_insecure(
+                self._credentials_path,
+                record.spreadsheet_id,
+                record.sheet,
+                record.row,
+                col,
+                cell_value,
+            )
+
         errors: list[str] = []
         # На Windows Python-SSL к oauth2 часто мёртв — curl/PowerShell с обходом SSL.
         attempts: list[tuple[str, Callable]] = []
@@ -946,13 +1063,34 @@ class SheetsClient:
             self._connect(insecure=True)
             _do_gspread()
 
+        def _read_gspread() -> str:
+            worksheet = self._call(
+                lambda: self._gc.open_by_key(record.spreadsheet_id).worksheet(record.sheet)
+            )
+            return str(self._call(lambda: worksheet.cell(record.row, col).value) or "").strip()
+
+        def _read_insecure() -> str:
+            self._connect(insecure=True)
+            return _read_gspread()
+
+        def _read_requests_insecure() -> str:
+            return _read_cell_via_requests_insecure(
+                self._credentials_path,
+                record.spreadsheet_id,
+                record.sheet,
+                record.row,
+                col,
+            )
+
         if sys.platform == "win32":
             attempts.append(("curl", _do_curl))
             attempts.append(("powershell", _do_powershell))
+            attempts.append(("requests insecure", _do_requests_insecure))
             attempts.append(("gspread insecure", _do_insecure))
         else:
             attempts.append(("gspread", _do_gspread))
             attempts.append(("curl", _do_curl))
+            attempts.append(("requests insecure", _do_requests_insecure))
             attempts.append(("gspread insecure", _do_insecure))
 
         ok = False
@@ -962,7 +1100,7 @@ class SheetsClient:
                 ok = True
                 break
             except Exception as exc:
-                errors.append(str(exc))
+                errors.append(f"{_label}: {exc}")
 
         if not ok:
             raise SheetsError(
@@ -970,7 +1108,37 @@ class SheetsClient:
                 f"Сервисный аккаунт: {getattr(self, 'service_email', '')}\n"
                 "1) Выдайте ему роль «Редактор» на эту таблицу.\n"
                 "2) Отключите VPN и проверку HTTPS в антивирусе.\n"
-                f"Детали: {errors[-1] if errors else 'нет деталей'}"
+                f"Детали:\n- " + "\n- ".join(errors[:6] or ["нет деталей"])
+            )
+
+        expected = str(cell_value or "").strip()
+        read_attempts: list[Callable[[], str]] = []
+        if sys.platform == "win32":
+            read_attempts.append(lambda: _read_cell_via_curl(self._credentials_path, record.spreadsheet_id, record.sheet, record.row, col))
+            read_attempts.append(_read_requests_insecure)
+            read_attempts.append(_read_insecure)
+        else:
+            read_attempts.append(_read_gspread)
+            read_attempts.append(lambda: _read_cell_via_curl(self._credentials_path, record.spreadsheet_id, record.sheet, record.row, col))
+            read_attempts.append(_read_requests_insecure)
+            read_attempts.append(_read_insecure)
+
+        last_read_error = ""
+        confirmed = False
+        for read_back in read_attempts:
+            try:
+                actual = str(read_back() or "").strip()
+                confirmed = actual == expected
+                if confirmed:
+                    break
+                last_read_error = f"после записи в ячейке осталось «{actual}»"
+            except Exception as exc:
+                last_read_error = str(exc)
+        if not confirmed:
+            raise SheetsError(
+                "Google не подтвердил сохранение в ячейке.\n"
+                f"Ожидали: «{expected or '(пусто)'}».\n"
+                f"Детали: {last_read_error or 'значение не подтвердилось'}"
             )
         record.values[field] = value
         if header != field:
