@@ -16,6 +16,7 @@ from sheets_hub.config import ROOT
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 TOKEN_NAME = "token.json"
+LAST_EMAIL_NAME = "last_email.txt"
 _TOKEN_URL = "https://oauth2.googleapis.com/token"
 
 
@@ -25,6 +26,41 @@ class AuthError(Exception):
 
 def token_path_near(credentials_path: Path) -> Path:
     return credentials_path.parent / TOKEN_NAME
+
+
+def last_email_path(credentials_path: Path | None = None) -> Path:
+    base = (credentials_path or (ROOT / "credentials.json")).parent
+    return base / LAST_EMAIL_NAME
+
+
+def load_last_email(credentials_path: Path | None = None) -> str:
+    path = last_email_path(credentials_path)
+    if not path.exists():
+        # Если уже входили — возьмём email из token.json
+        creds = credentials_path or (ROOT / "credentials.json")
+        email = credentials_email(creds) if creds.exists() else ""
+        if email and "@" in email and "OAuth" not in email:
+            return email
+        return ""
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
+def save_last_email(email: str, credentials_path: Path | None = None) -> None:
+    text = (email or "").strip()
+    if not text:
+        return
+    last_email_path(credentials_path).write_text(text + "\n", encoding="utf-8")
+
+
+def clear_user_login(credentials_path: Path) -> None:
+    token = token_path_near(credentials_path)
+    try:
+        token.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def credential_kind(path: Path) -> str:
@@ -123,27 +159,47 @@ def _load_token(token_path: Path) -> UserCredentials | None:
     )
 
 
-def run_oauth_login(client_secrets_path: Path, token_path: Path | None = None) -> UserCredentials:
-    """Открывает браузер для входа в Google и сохраняет token.json."""
-    if credential_kind(client_secrets_path) != "oauth_client":
-        raise AuthError("Для входа нужен OAuth Desktop JSON, не service account.")
-    dest = token_path or token_path_near(client_secrets_path)
-    flow = InstalledAppFlow.from_client_secrets_file(str(client_secrets_path), SCOPES)
-    creds = flow.run_local_server(port=0, prompt="consent", authorization_prompt_message="")
-    email = ""
+def _fetch_account_email(access_token: str) -> str:
     try:
-        # Необязательно: узнаём email через userinfo, если получится.
         info = requests.get(
             "https://www.googleapis.com/oauth2/v2/userinfo",
-            headers={"Authorization": f"Bearer {creds.token}"},
+            headers={"Authorization": f"Bearer {access_token}"},
             timeout=10,
             verify=False,
         )
         if info.ok:
-            email = str(info.json().get("email") or "").strip()
+            return str(info.json().get("email") or "").strip()
     except Exception:
         pass
+    return ""
+
+
+def run_oauth_login(
+    client_secrets_path: Path,
+    token_path: Path | None = None,
+    *,
+    login_hint: str = "",
+) -> UserCredentials:
+    """Открывает браузер для входа в Google и сохраняет token.json."""
+    if credential_kind(client_secrets_path) != "oauth_client":
+        raise AuthError("Для входа нужен OAuth Desktop JSON, не service account.")
+    dest = token_path or token_path_near(client_secrets_path)
+    hint = (login_hint or "").strip()
+    flow = InstalledAppFlow.from_client_secrets_file(str(client_secrets_path), SCOPES)
+    kwargs: dict = {
+        "port": 0,
+        "prompt": "select_account",
+        "authorization_prompt_message": "",
+        "access_type": "offline",
+        "include_granted_scopes": "true",
+    }
+    if hint:
+        kwargs["login_hint"] = hint
+    creds = flow.run_local_server(**kwargs)
+    email = _fetch_account_email(creds.token or "") or hint
     _save_token(creds, dest, account_email=email)
+    if email:
+        save_last_email(email, client_secrets_path)
     return creds
 
 

@@ -11,5 +11,6 @@ build/
 # секреты и локальный конфиг
 credentials.json
 token.json
+last_email.txt
 config.yaml
 .env
