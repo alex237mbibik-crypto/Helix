@@ -45,15 +45,20 @@ python -m sheets_hub
 
 ## Доступ к Google Таблицам
 
+Рекомендуемый способ — **вход вашим Google-аккаунтом** (OAuth Desktop). Тогда запись идёт от вашего email, без расшаривания на service account.
+
 1. Откройте [Google Cloud Console](https://console.cloud.google.com/).
 2. Создайте проект → **APIs & Services → Enable APIs** → включите **Google Sheets API**.
-3. **IAM & Admin → Service Accounts → Create**.
-4. У аккаунта откройте ключ **JSON**.
-5. В программе нажмите **Таблицы → Выбрать JSON-ключ…** и укажите этот файл. Ключ сохранится рядом с программой как `credentials.json`.
-6. В JSON есть поле `client_email` — вида `sheets-hub@....iam.gserviceaccount.com`. Его же показывает окно **Таблицы**.
-7. Каждую нужную таблицу откройте в Google → **Настройки доступа** → добавьте этот email как **Редактор**.
+3. **APIs & Services → OAuth consent screen** — тип External (или Internal), добавьте себя в **Test users**, если приложение в режиме Testing.
+4. **Credentials → Create credentials → OAuth client ID** → тип **Desktop app** → скачайте JSON.
+5. В программе: **Таблицы → Выбрать JSON…** → этот файл → **Войти через Google** (откроется браузер).
+6. Войдите тем аккаунтом, у которого уже есть доступ к таблицам (например Editor).
 
-Без шага 6 API таблицу не увидит.
+Рядом с программой появятся `credentials.json` (клиент) и `token.json` (ваш вход). Их не коммитьте.
+
+### Старый способ (service account)
+
+По-прежнему можно указать JSON сервисного аккаунта. Тогда каждую таблицу нужно открыть для email вида `…@….iam.gserviceaccount.com` с ролью **Редактор**.
 
 ## Конфиг
 
@@ -99,11 +104,11 @@ destinations:
 build_exe.bat
 ```
 
-Готовый файл: `dist\SheetsHub\SheetsHub.exe`. Рядом с ним положите `config.yaml` и `credentials.json`.
+Готовый файл: `dist\SheetsHub\SheetsHub.exe`. Рядом с ним положите `config.yaml`, `credentials.json` и после входа — `token.json`.
 
 ## Важно
 
-- Сервисный ключ — это полный доступ к расшаренным таблицам. Не отправляйте `credentials.json` в чат и не коммитьте его.
+- `credentials.json` и `token.json` — секреты. Не отправляйте их в чат и не коммитьте.
 - Если таблиц много, Google может ненадолго ограничить частоту запросов. Тогда подождите минуту и нажмите «Обновить всё».
 - Двойной клик пишет в **исходную** таблицу и строку. Кнопки «Добавить» и «Внести в назначение» пишут в таблицу из списка **destinations**.
 - В таблице-назначении в первой строке должны быть заголовки колонок.

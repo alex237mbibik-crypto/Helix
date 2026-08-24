@@ -19,10 +19,12 @@ import gspread
 import requests
 from google.auth import jwt as google_jwt
 from google.auth.transport.requests import AuthorizedSession
+from google.auth.credentials import Credentials as GoogleCredentials
 from google.oauth2.service_account import Credentials
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from sheets_hub.auth import AuthError, account_label, credential_kind, load_gspread_credentials
 from sheets_hub.calendar_sheet import is_calendar_matrix, parse_sheet_rows
 from sheets_hub.config import (
     KIND_INFO,
@@ -450,6 +452,7 @@ def _access_token_via_requests_insecure(credentials_path: Path) -> str:
 
 
 def _powershell_trust_preamble(class_name: str) -> str:
+    # catch должен иметь тело — иначе MissingCatchOrFinally в Windows PowerShell.
     return (
         "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; "
         "try { "
@@ -458,14 +461,41 @@ def _powershell_trust_preamble(class_name: str) -> str:
         "using System.Net;\n"
         "using System.Security.Cryptography.X509Certificates;\n"
         f"public class {class_name} {{ public static bool Ok(object s,X509Certificate c,X509Chain ch,SslPolicyErrors e){{return true;}} }}\n"
-        "'@ }}; "
+        "'@ "
+        "}} "
         f"[Net.ServicePointManager]::ServerCertificateValidationCallback = [{class_name}]::Ok "
-        "} catch {} "
+        "} catch { $null } "
         "try { "
         "if (Get-Command Invoke-RestMethod -ErrorAction SilentlyContinue) { "
         "$PSDefaultParameterValues['Invoke-RestMethod:SkipCertificateCheck'] = $true "
-        "} } catch {} "
+        "} } catch { $null } "
     )
+
+
+def _access_token(credentials_path: Path) -> str:
+    """Bearer-токен: OAuth пользователя или JWT service account."""
+    kind = credential_kind(credentials_path)
+    if kind == "oauth_client":
+        try:
+            from sheets_hub.auth import access_token_for_path
+
+            return access_token_for_path(credentials_path)
+        except AuthError as exc:
+            raise SheetsError(str(exc)) from exc
+
+    errors: list[str] = []
+    for label, action in (
+        ("curl", lambda: _access_token_via_curl(credentials_path)),
+        ("powershell", lambda: _access_token_via_powershell(credentials_path)),
+        ("requests", lambda: _access_token_via_requests_insecure(credentials_path)),
+    ):
+        try:
+            return action()
+        except Exception as exc:
+            if label == "powershell" and sys.platform != "win32":
+                continue
+            errors.append(f"{label}: {exc}")
+    raise SheetsError("Не получили access_token.\n" + "\n".join(errors[:4]))
 
 
 def _access_token_via_powershell(credentials_path: Path) -> str:
@@ -517,7 +547,7 @@ def _update_cell_via_powershell(
     col: int,
     value: str,
 ) -> None:
-    token = _access_token_via_powershell(credentials_path)
+    token = _access_token(credentials_path)
     cell_range = _a1_range(sheet, row, col)
     url = (
         f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/"
@@ -566,7 +596,7 @@ def _update_cell_via_curl(
     col: int,
     value: str,
 ) -> None:
-    token = _access_token_via_curl(credentials_path)
+    token = _access_token(credentials_path)
     cell_range = _a1_range(sheet, row, col)
     url = (
         f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/"
@@ -587,7 +617,7 @@ def _read_cell_via_curl(
     row: int,
     col: int,
 ) -> str:
-    token = _access_token_via_curl(credentials_path)
+    token = _access_token(credentials_path)
     cell_range = _a1_range(sheet, row, col)
     url = (
         f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/"
@@ -612,7 +642,7 @@ def _update_cell_via_requests_insecure(
     col: int,
     value: str,
 ) -> None:
-    token = _access_token_via_requests_insecure(credentials_path)
+    token = _access_token(credentials_path)
     cell_range = _a1_range(sheet, row, col)
     url = (
         f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/"
@@ -635,7 +665,7 @@ def _read_cell_via_requests_insecure(
     row: int,
     col: int,
 ) -> str:
-    token = _access_token_via_requests_insecure(credentials_path)
+    token = _access_token(credentials_path)
     cell_range = _a1_range(sheet, row, col)
     url = (
         f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/"
@@ -661,30 +691,35 @@ def _can_try_public_read(source: SheetRef) -> bool:
 
 
 class SheetsClient:
-    def __init__(self, credentials_path: Path) -> None:
+    def __init__(self, credentials_path: Path, *, interactive: bool = False) -> None:
         configure_tls()
         if not credentials_path.exists():
             raise SheetsError(
-                "Нет ключа аккаунта Google.\n"
-                "Ссылка на таблицу — это не вход. Нажмите «Таблицы» → «Выбрать JSON-ключ…» "
-                "и укажите файл ключа сервисного аккаунта из Google Cloud."
+                "Нет файла входа Google.\n"
+                "Нажмите «Таблицы» → «Выбрать JSON…» и укажите OAuth Desktop JSON "
+                "из Google Cloud (или старый service account JSON)."
             )
         self._credentials_path = credentials_path
         self.read_only_public = False
         self.read_notes: list[str] = []
         self._api_insecure = False
-        self._connect()
+        self.auth_kind = credential_kind(credentials_path)
+        self._connect(interactive=interactive)
 
-    def _connect(self, *, insecure: bool = False) -> None:
+    def _connect(self, *, insecure: bool = False, interactive: bool = False) -> None:
         configure_tls()
-        creds = Credentials.from_service_account_file(str(self._credentials_path), scopes=SCOPES)
+        try:
+            creds = load_gspread_credentials(self._credentials_path, interactive=interactive)
+        except AuthError as exc:
+            raise SheetsError(str(exc)) from exc
         session = self._build_session(creds, verify=False if insecure else None)
         self._gc = gspread.authorize(None, session=session)
         self._gc.set_timeout(_HTTP_TIMEOUT)
-        self.service_email = creds.service_account_email
+        self.auth_kind = credential_kind(self._credentials_path)
+        self.service_email = account_label(self._credentials_path, creds)
         self._api_insecure = insecure
 
-    def _build_session(self, creds: Credentials, *, verify: bool | str | None = None) -> AuthorizedSession:
+    def _build_session(self, creds: GoogleCredentials, *, verify: bool | str | None = None) -> AuthorizedSession:
         session = AuthorizedSession(creds)
         session.verify = session_verify_target() if verify is None else verify
         if verify is False:
@@ -1103,11 +1138,24 @@ class SheetsClient:
                 errors.append(f"{_label}: {exc}")
 
         if not ok:
+            account = getattr(self, "service_email", "") or ""
+            kind = getattr(self, "auth_kind", "") or credential_kind(self._credentials_path)
+            if kind == "oauth_client":
+                tip = (
+                    f"Аккаунт входа: {account}\n"
+                    "1) Войдите тем Google, у которого есть права на таблицу.\n"
+                    "2) Отключите VPN и проверку HTTPS в антивирусе.\n"
+                    "3) При необходимости снова нажмите «Войти через Google»."
+                )
+            else:
+                tip = (
+                    f"Сервисный аккаунт: {account}\n"
+                    "1) Выдайте ему роль «Редактор» на эту таблицу.\n"
+                    "2) Отключите VPN и проверку HTTPS в антивирусе."
+                )
             raise SheetsError(
                 "Не удалось записать в Google Таблицу.\n"
-                f"Сервисный аккаунт: {getattr(self, 'service_email', '')}\n"
-                "1) Выдайте ему роль «Редактор» на эту таблицу.\n"
-                "2) Отключите VPN и проверку HTTPS в антивирусе.\n"
+                f"{tip}\n"
                 f"Детали:\n- " + "\n- ".join(errors[:6] or ["нет деталей"])
             )
 

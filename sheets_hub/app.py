@@ -10,6 +10,12 @@ from typing import Callable
 import customtkinter as ctk
 import tkinter as tk
 
+from sheets_hub.auth import (
+    AuthError,
+    credential_kind,
+    run_oauth_login,
+    token_path_near,
+)
 from sheets_hub.calendar_sheet import info_tone
 from sheets_hub.client import SheetsClient, SheetsError
 from sheets_hub.config import (
@@ -861,14 +867,27 @@ class SheetsHubApp(ctk.CTk):
         if self.client:
             self.reload_all()
     def _try_connect(self, prompt_key: bool = True) -> None:
-        if not self.config_data.credentials.exists():
+        path = self.config_data.credentials
+        if not path.exists():
             self.client = None
-            self._set_status("Нет ключа аккаунта. Ссылка на таблицу сама по себе доступ не даёт.")
+            self._set_status("Нет входа Google. Ссылка на таблицу сама по себе доступ не даёт.")
             if prompt_key:
                 self.after(200, self._ask_for_credentials)
             return
+        if credential_kind(path) == "oauth_client" and not token_path_near(path).exists():
+            self.client = None
+            self._set_status("Нужен вход через Google.")
+            if prompt_key:
+                go = messagebox.askokcancel(
+                    "Вход Google",
+                    "Откроется браузер — войдите тем аккаунтом, "
+                    "у которого есть доступ к таблицам (например alexandrlichik@gmail.com).",
+                )
+                if go and self._google_login():
+                    self._try_connect(prompt_key=False)
+            return
         try:
-            self.client = SheetsClient(self.config_data.credentials)
+            self.client = SheetsClient(path)
             self._set_status(f"Вход: {self.client.service_email}")
             if self._valid_sources():
                 self.reload_all()
@@ -886,19 +905,24 @@ class SheetsHubApp(ctk.CTk):
             "Нужен аккаунт Google",
             "Ссылка на таблицу уже сохранена, но программа ещё не знает, "
             "через какой аккаунт к ней ходить.\n\n"
-            "Сейчас откроется выбор файла. Укажите JSON-ключ сервисного аккаунта "
-            "из Google Cloud (не саму таблицу).",
+            "Сейчас откроется выбор файла. Укажите OAuth Desktop JSON "
+            "из Google Cloud (APIs & Services → Credentials → OAuth client → Desktop).\n"
+            "После этого нажмите «Войти через Google».",
         )
         if not go:
             return
         if self._pick_credentials_file():
             save_config(self.config_data)
-            self._try_connect(prompt_key=False)
+            if credential_kind(self.config_data.credentials) == "oauth_client":
+                if self._google_login():
+                    self._try_connect(prompt_key=False)
+            else:
+                self._try_connect(prompt_key=False)
 
     def _pick_credentials_file(self, parent=None) -> bool:
         chosen = filedialog.askopenfilename(
             parent=parent or self,
-            title="JSON-ключ сервисного аккаунта Google",
+            title="OAuth Desktop JSON или service account JSON",
             filetypes=[("JSON", "*.json"), ("Все файлы", "*.*")],
         )
         if not chosen:
@@ -909,6 +933,30 @@ class SheetsHubApp(ctk.CTk):
             messagebox.showerror("Неверный ключ", str(exc), parent=parent or self)
             return False
         self.config_data.credentials = installed
+        return True
+
+    def _google_login(self, parent=None) -> bool:
+        path = self.config_data.credentials
+        if not path.exists() or credential_kind(path) != "oauth_client":
+            messagebox.showinfo(
+                "Сначала JSON-клиент",
+                "Выберите OAuth Desktop JSON из Google Cloud "
+                "(не service account и не саму таблицу).",
+                parent=parent or self,
+            )
+            if not self._pick_credentials_file(parent=parent):
+                return False
+            path = self.config_data.credentials
+            save_config(self.config_data)
+        try:
+            self._set_status("Открываю браузер для входа Google…")
+            run_oauth_login(path)
+        except AuthError as exc:
+            messagebox.showerror("Вход не выполнен", str(exc), parent=parent or self)
+            return False
+        except Exception as exc:
+            messagebox.showerror("Вход не выполнен", str(exc), parent=parent or self)
+            return False
         return True
 
     def _run_bg(self, work: Callable, done: Callable, *, alert: bool = True) -> None:
@@ -1159,10 +1207,18 @@ class SheetsHubApp(ctk.CTk):
                     title = "Нет связи с Google"
                     share = ""
                     if self.client and getattr(self.client, "service_email", ""):
-                        share = (
-                            f"\n\nТаблицу откройте для доступа:\n{self.client.service_email}\n"
-                            "(роль «Редактор» в Google Таблице)."
-                        )
+                        kind = getattr(self.client, "auth_kind", "")
+                        if kind == "oauth_client":
+                            share = (
+                                f"\n\nСейчас вход: {self.client.service_email}\n"
+                                "Войдите аккаунтом с доступом к таблице "
+                                "или откройте таблицу для этого аккаунта."
+                            )
+                        else:
+                            share = (
+                                f"\n\nТаблицу откройте для доступа:\n{self.client.service_email}\n"
+                                "(роль «Редактор» в Google Таблице)."
+                            )
                     message = (
                         "Таблица не загрузилась из Google.\n"
                         "Отключите VPN, выключите проверку HTTPS в антивирусе и нажмите «Повторить»."
@@ -1671,7 +1727,7 @@ class SheetsHubApp(ctk.CTk):
         def save() -> None:
             value = entry.get()
             if not self.client:
-                messagebox.showerror("Нет подключения", "Сначала настройте ключ в «Таблицы».")
+                messagebox.showerror("Нет подключения", "Сначала войдите через Google в «Таблицы».")
                 return
 
             def work():
@@ -1779,8 +1835,8 @@ class SheetsHubApp(ctk.CTk):
         self._run_bg(work, done)
 
     def _open_tables_dialog(self) -> None:
-        dialog = self._dialog("Таблицы", "820x420")
-        dialog.minsize(640, 320)
+        dialog = self._dialog("Таблицы", "920x440")
+        dialog.minsize(720, 340)
         dialog.grid_columnconfigure(0, weight=1)
         dialog.grid_rowconfigure(1, weight=1)
 
@@ -1799,7 +1855,7 @@ class SheetsHubApp(ctk.CTk):
 
         ctk.CTkLabel(
             account,
-            text="Ключ Google",
+            text="Вход Google",
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=TEXT,
         ).grid(row=0, column=0, sticky="w", padx=12, pady=10)
@@ -1812,10 +1868,23 @@ class SheetsHubApp(ctk.CTk):
                 installed = self.config_data.credentials
                 path_var.set(str(installed))
                 email_var.set(credentials_email(installed) or installed.name)
+                save_config(self.config_data)
 
-        self._outline_button(account, "Выбрать JSON…", pick_key, 140).grid(row=0, column=2, padx=8, pady=10)
+        def do_login() -> None:
+            if self._google_login(parent=dialog):
+                email_var.set(credentials_email(self.config_data.credentials) or "вход выполнен")
+                messagebox.showinfo(
+                    "Готово",
+                    "Вход сохранён. Можно сохранить таблицы — запись пойдёт от вашего аккаунта.",
+                    parent=dialog,
+                )
+
+        self._outline_button(account, "Выбрать JSON…", pick_key, 130).grid(row=0, column=2, padx=(8, 4), pady=10)
+        self._primary_button(account, "Войти через Google", do_login, 160).grid(
+            row=0, column=3, padx=(4, 12), pady=10
+        )
         ctk.CTkLabel(account, textvariable=email_var, text_color=GREEN, anchor="w").grid(
-            row=1, column=0, columnspan=3, sticky="w", padx=12, pady=(0, 8)
+            row=1, column=0, columnspan=4, sticky="w", padx=12, pady=(0, 8)
         )
 
         tables = self._tables()

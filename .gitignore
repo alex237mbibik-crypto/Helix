@@ -10,5 +10,6 @@ build/
 
 # секреты и локальный конфиг
 credentials.json
+token.json
 config.yaml
 .env
