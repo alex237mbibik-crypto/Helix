@@ -342,9 +342,9 @@ def _curl_json(
         "-k",
         "-sS",
         "--max-time",
-        "25",
+        "12",
         "--connect-timeout",
-        "10",
+        "5",
         "-X",
         method.upper(),
         url,
@@ -367,7 +367,7 @@ def _curl_json(
         result = subprocess.run(
             cmd,
             capture_output=True,
-            timeout=30,
+            timeout=15,
             creationflags=flags if sys.platform == "win32" else 0,
         )
     finally:
@@ -527,7 +527,7 @@ def _access_token_via_powershell(credentials_path: Path) -> str:
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-Command", command],
         capture_output=True,
-        timeout=35,
+        timeout=18,
         creationflags=flags,
     )
     if result.returncode != 0:
@@ -575,7 +575,7 @@ def _update_cell_via_powershell(
         result = subprocess.run(
             ["powershell.exe", "-NoProfile", "-Command", command],
             capture_output=True,
-            timeout=35,
+            timeout=18,
             creationflags=flags,
         )
         if result.returncode != 0:
@@ -1136,6 +1136,10 @@ class SheetsClient:
                 break
             except Exception as exc:
                 errors.append(f"{_label}: {exc}")
+                msg = str(exc).lower()
+                # Права / 403 — остальные каналы тот же токен, не жечь минуты.
+                if "403" in msg or "permission" in msg or "access_denied" in msg:
+                    break
 
         if not ok:
             account = getattr(self, "service_email", "") or ""

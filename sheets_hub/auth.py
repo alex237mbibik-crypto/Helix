@@ -5,8 +5,10 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 import requests
 from google.auth.transport.requests import Request
@@ -138,16 +140,33 @@ def install_google_credentials(source: Path, dest: Path | None = None) -> Path:
 
 
 def _save_token(creds: UserCredentials, token_path: Path, account_email: str = "") -> None:
+    prev: dict = {}
+    if token_path.exists():
+        try:
+            prev = json.loads(token_path.read_text(encoding="utf-8"))
+        except Exception:
+            prev = {}
+    refresh = creds.refresh_token or prev.get("refresh_token") or ""
+    email = (account_email or "").strip() or str(prev.get("account_email") or "").strip()
     payload = {
         "token": creds.token,
-        "refresh_token": creds.refresh_token,
-        "token_uri": creds.token_uri,
-        "client_id": creds.client_id,
-        "client_secret": creds.client_secret,
-        "scopes": list(creds.scopes or SCOPES),
-        "expiry": creds.expiry.isoformat() if creds.expiry else None,
-        "account_email": account_email,
+        "refresh_token": refresh,
+        "token_uri": creds.token_uri or prev.get("token_uri") or _TOKEN_URL,
+        "client_id": creds.client_id or prev.get("client_id"),
+        "client_secret": creds.client_secret or prev.get("client_secret"),
+        "scopes": list(creds.scopes or prev.get("scopes") or SCOPES),
+        "expiry": creds.expiry.isoformat() if creds.expiry else prev.get("expiry"),
+        "account_email": email,
     }
+    if not payload["refresh_token"]:
+        raise AuthError(
+            "Google не выдал refresh_token — повторный вход снова попросит «Разрешить».\n"
+            "В аккаунте Google: https://myaccount.google.com/permissions — удалите доступ "
+            "приложения и войдите ещё раз (один раз с «Разрешить»)."
+        )
+    # Чтобы creds.refresh не терял refresh_token.
+    if not creds.refresh_token and refresh:
+        creds.refresh_token = refresh
     token_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -165,6 +184,23 @@ def _load_token(token_path: Path) -> UserCredentials | None:
         client_secret=data.get("client_secret"),
         scopes=data.get("scopes") or SCOPES,
     )
+
+
+def has_saved_login(credentials_path: Path) -> bool:
+    """Есть сохранённый вход с refresh_token — браузер больше не нужен."""
+    token = token_path_near(credentials_path)
+    if not token.exists():
+        return False
+    try:
+        data = json.loads(token.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return bool(data.get("refresh_token"))
+
+
+def needs_consent_prompt(credentials_path: Path) -> bool:
+    """consent только если ещё ни разу не получили refresh_token."""
+    return not has_saved_login(credentials_path)
 
 
 def _fetch_account_email(access_token: str) -> str:
@@ -198,6 +234,7 @@ def build_authorization_url(
     *,
     login_hint: str = "",
     port: int = _OAUTH_PORT,
+    force_consent: bool | None = None,
 ) -> tuple[InstalledAppFlow, str]:
     """Готовит flow и ссылку входа (для браузера / копирования)."""
     if credential_kind(client_secrets_path) != "oauth_client":
@@ -206,10 +243,16 @@ def build_authorization_url(
     os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
     flow = _make_flow(client_secrets_path)
     flow.redirect_uri = f"http://127.0.0.1:{port}/"
+    # prompt=consent только при первом входе — иначе Google каждый раз снова просит «Разрешить».
+    consent = needs_consent_prompt(client_secrets_path) if force_consent is None else force_consent
     kwargs: dict = {
         "access_type": "offline",
-        "prompt": "consent",
+        "include_granted_scopes": "true",
     }
+    if consent:
+        kwargs["prompt"] = "consent"
+    else:
+        kwargs["prompt"] = "select_account"
     hint = (login_hint or "").strip()
     if hint:
         kwargs["login_hint"] = hint
@@ -217,7 +260,12 @@ def build_authorization_url(
     return flow, auth_url
 
 
-def listen_for_oauth_redirect(*, port: int = _OAUTH_PORT, timeout: float = 300.0) -> str:
+def listen_for_oauth_redirect(
+    *,
+    port: int = _OAUTH_PORT,
+    timeout: float = 300.0,
+    ready: threading.Event | None = None,
+) -> str:
     """Ждёт один редирект на 127.0.0.1:port и возвращает полный URL с code=."""
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -247,6 +295,8 @@ def listen_for_oauth_redirect(*, port: int = _OAUTH_PORT, timeout: float = 300.0
             f"Порт {port} занят. Закройте другие окна входа или перезапустите программу.\n{exc}"
         ) from exc
     server.timeout = 1.0
+    if ready is not None:
+        ready.set()
     deadline = time.time() + max(5.0, float(timeout))
     try:
         while time.time() < deadline:
@@ -310,12 +360,13 @@ def run_oauth_login(
     hint = (login_hint or "").strip()
     os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
     flow = _make_flow(client_secrets_path)
+    consent = needs_consent_prompt(client_secrets_path)
     kwargs: dict = {
         "bind_addr": "127.0.0.1",
         "port": _OAUTH_PORT,
         "open_browser": True,
-        "prompt": "consent",
         "access_type": "offline",
+        "prompt": "consent" if consent else "select_account",
         "authorization_prompt_message": (
             "Если в браузере белый экран — нажмите «Скопировать ссылку» в программе "
             "и откройте её в Edge/Firefox, либо отключите VPN/проверку HTTPS в антивирусе.\n"
@@ -347,7 +398,7 @@ def _refresh_via_curl(client_id: str, client_secret: str, refresh_token: str) ->
         "-k",
         "-sS",
         "--max-time",
-        "25",
+        "10",
         "-X",
         "POST",
         _TOKEN_URL,
@@ -363,7 +414,7 @@ def _refresh_via_curl(client_id: str, client_secret: str, refresh_token: str) ->
     result = subprocess.run(
         cmd,
         capture_output=True,
-        timeout=30,
+        timeout=12,
         creationflags=flags if sys.platform == "win32" else 0,
     )
     text = (result.stdout or b"").decode("utf-8-sig", errors="replace").strip()
@@ -388,7 +439,7 @@ def _refresh_via_requests(client_id: str, client_secret: str, refresh_token: str
             "refresh_token": refresh_token,
             "grant_type": "refresh_token",
         },
-        timeout=20,
+        timeout=8,
         verify=False,
     )
     response.raise_for_status()
@@ -423,21 +474,6 @@ def ensure_user_credentials(
             raise AuthError("Токен устарел. Нажмите «Войти через Google» снова.")
         return run_oauth_login(client_secrets_path, dest)
 
-    # Сначала Python refresh, потом обходы SSL.
-    errors: list[str] = []
-    try:
-        creds.refresh(Request())
-        email = ""
-        try:
-            raw = json.loads(dest.read_text(encoding="utf-8"))
-            email = str(raw.get("account_email") or "")
-        except Exception:
-            pass
-        _save_token(creds, dest, account_email=email)
-        return creds
-    except Exception as exc:
-        errors.append(f"python: {exc}")
-
     client_id = creds.client_id or ""
     client_secret = creds.client_secret or ""
     refresh = creds.refresh_token or ""
@@ -446,22 +482,47 @@ def ensure_user_credentials(
         client_id = client_id or str(section.get("client_id") or "")
         client_secret = client_secret or str(section.get("client_secret") or "")
 
-    for label, action in (
-        ("curl", lambda: _refresh_via_curl(client_id, client_secret, refresh)),
-        ("requests", lambda: _refresh_via_requests(client_id, client_secret, refresh)),
-    ):
+    errors: list[str] = []
+
+    def _apply_token(token: str) -> UserCredentials:
+        creds.token = token
+        creds.expiry = None
+        email = ""
+        try:
+            raw = json.loads(dest.read_text(encoding="utf-8"))
+            email = str(raw.get("account_email") or "")
+        except Exception:
+            pass
+        _save_token(creds, dest, account_email=email)
+        return creds
+
+    # На Windows Python-SSL к oauth2 часто висит минутами — сначала быстрый curl.
+    refresh_steps: list[tuple[str, Callable]] = []
+    if sys.platform == "win32":
+        refresh_steps.extend(
+            (
+                ("curl", lambda: _refresh_via_curl(client_id, client_secret, refresh)),
+                ("requests", lambda: _refresh_via_requests(client_id, client_secret, refresh)),
+                ("python", lambda: (creds.refresh(Request()) or creds.token)),
+            )
+        )
+    else:
+        refresh_steps.extend(
+            (
+                ("python", lambda: (creds.refresh(Request()) or creds.token)),
+                ("curl", lambda: _refresh_via_curl(client_id, client_secret, refresh)),
+                ("requests", lambda: _refresh_via_requests(client_id, client_secret, refresh)),
+            )
+        )
+
+    for label, action in refresh_steps:
         try:
             token = action()
-            creds.token = token
-            creds.expiry = None
-            email = ""
-            try:
-                raw = json.loads(dest.read_text(encoding="utf-8"))
-                email = str(raw.get("account_email") or "")
-            except Exception:
-                pass
-            _save_token(creds, dest, account_email=email)
-            return creds
+            if label == "python":
+                token = creds.token
+            if not token:
+                raise AuthError("пустой token")
+            return _apply_token(str(token))
         except Exception as exc:
             errors.append(f"{label}: {exc}")
 

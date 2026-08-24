@@ -16,6 +16,7 @@ from sheets_hub.auth import (
     clear_user_login,
     credential_kind,
     finish_oauth_with_response_url,
+    has_saved_login,
     listen_for_oauth_redirect,
     load_last_email,
     save_last_email,
@@ -188,6 +189,9 @@ class SheetsHubApp(ctk.CTk):
         self._calendar_fp: tuple | None = None
         self._slot_labels: dict[tuple[str, str], tk.Label] = {}
         self._rendering = False
+        self._connecting = False
+        self._cal_draw_after_id: str | None = None
+        self._cal_draw_gen = 0
 
         self._build()
         self._sync_source_filter_from_config()
@@ -899,35 +903,66 @@ class SheetsHubApp(ctk.CTk):
             if prompt_key:
                 self.after(200, self._ask_for_credentials)
             return
-        if credential_kind(path) == "oauth_client" and not token_path_near(path).exists():
+        if credential_kind(path) == "oauth_client" and not has_saved_login(path):
             self.client = None
             self._set_account_label("")
-            self._set_status("Введите свою почту Google, чтобы начать.")
+            self._set_status("Один раз войдите почтой Google — дальше запомним на этом ПК.")
             if prompt_key:
                 self.after(200, self._show_operator_login)
             return
-        try:
-            self.client = SheetsClient(path)
-            email = self.client.service_email
+        if self._connecting:
+            return
+        self._connecting = True
+        self._set_status("Подключаюсь…")
+
+        def work():
+            return SheetsClient(path)
+
+        def done(client) -> None:
+            self.client = client
+            email = client.service_email
             self._set_account_label(email)
             self._set_status(f"Вход: {email}")
             if self._valid_sources():
                 self.reload_all()
             else:
                 self._set_status("Укажите таблицы в «Таблицы» — ссылку, с которой читать и куда писать.")
-        except SheetsError as exc:
-            self.client = None
-            self._set_account_label("")
-            self._set_status(str(exc).split("\n")[0])
-            msg = str(exc)
-            if "Нет сохранённого входа" in msg or "Токен устарел" in msg:
-                if prompt_key:
-                    self.after(200, self._show_operator_login)
+
+        def finish(client=None, error: BaseException | None = None) -> None:
+            self._connecting = False
+            self._jobs = max(0, self._jobs - 1)
+            if self._jobs == 0:
+                self.refresh_btn.configure(text="Обновить", state="normal")
+                self._cal_frozen = False
+            if error is not None:
+                self.client = None
+                self._set_account_label("")
+                self._set_status(str(error).split("\n")[0])
+                msg = str(error)
+                if "Нет сохранённого входа" in msg or "Токен устарел" in msg:
+                    if prompt_key:
+                        self.after(200, self._show_operator_login)
+                    return
+                if isinstance(error, SheetsError):
+                    messagebox.showwarning("Нет доступа к Google", str(error))
+                else:
+                    messagebox.showerror("Ошибка", str(error))
                 return
-            messagebox.showwarning("Нет доступа к Google", str(exc))
-        except Exception as exc:
-            self._set_status(f"Ошибка входа: {exc}")
-            messagebox.showerror("Ошибка", str(exc))
+            done(client)
+
+        # Не блокируем UI сетью/SSL — иначе Windows пишет «Не отвечает».
+        self._jobs += 1
+        self.refresh_btn.configure(text="Читаю…", state="disabled")
+
+        def runner() -> None:
+            try:
+                client = work()
+            except Exception as exc:
+                self.after(0, lambda e=exc: finish(error=e))
+                return
+            self.after(0, lambda c=client: finish(client=c))
+
+        threading.Thread(target=runner, daemon=True).start()
 
     def _show_operator_login(self, parent=None) -> None:
         path = self.config_data.credentials
@@ -951,8 +986,8 @@ class SheetsHubApp(ctk.CTk):
         ).pack(anchor="w", padx=14, pady=(12, 4))
         ctk.CTkLabel(
             box,
-            text="Дальше откроется окно с ссылкой Google. Если страница белая — "
-            "откройте ссылку в Edge или Firefox.",
+            text="Один раз: почта → «Разрешить» в браузере. Дальше программа входит сама, "
+            "без повторного разрешения (пока не нажмёте «Сменить вход»).",
             text_color=MUTED,
             font=ctk.CTkFont(size=12),
             wraplength=460,
@@ -1035,10 +1070,12 @@ class SheetsHubApp(ctk.CTk):
             path = self.config_data.credentials
             save_config(self.config_data)
         hint = (login_hint or load_last_email(path)).strip()
-        if token_path_near(path).exists():
+        # Уже есть постоянный вход этой же почты — браузер не открываем.
+        if has_saved_login(path):
             current = credentials_email(path)
-            if hint and current and current.lower() == hint.lower():
+            if not hint or (current and current.lower() == hint.lower()) or "@" not in (current or ""):
                 return True
+            # Другая почта — сброс и новый одноразовый consent.
             clear_user_login(path)
         return self._oauth_guided_login(path, hint, parent=parent)
 
@@ -1071,12 +1108,12 @@ class SheetsHubApp(ctk.CTk):
         ctk.CTkLabel(
             box,
             text=(
-                "1) Нажмите «Открыть браузер» (или скопируйте ссылку в Edge/Firefox).\n"
-                "2) Если экран белый — отключите VPN и проверку HTTPS в антивирусе, "
-                "откройте ссылку в другом браузере.\n"
-                "3) Войдите почтой и нажмите «Разрешить».\n"
-                "4) Если браузер сам не вернул в программу — вставьте сюда адрес "
-                "из строки (начинается с http://127.0.0.1:8765/?code=)."
+                "Не закрывайте это окно, пока не войдёте.\n\n"
+                "1) «Открыть браузер» → войдите почтой.\n"
+                "2) Один раз нажмите «Разрешить» — это сохраняется на этом ПК.\n"
+                "3) Если браузер пишет про 127.0.0.1 — скопируйте адрес с ?code= "
+                "из строки и вставьте ниже.\n"
+                "4) Не нажимайте «Перезагрузить» на странице 127.0.0.1."
             ),
             text_color=MUTED,
             font=ctk.CTkFont(size=12),
@@ -1084,7 +1121,7 @@ class SheetsHubApp(ctk.CTk):
             justify="left",
         ).pack(anchor="w", padx=14, pady=(0, 8))
 
-        status_var = tk.StringVar(value="Ожидаю вход…")
+        status_var = tk.StringVar(value="Готовлю приём входа…")
         ctk.CTkLabel(box, textvariable=status_var, text_color=GREEN, anchor="w").pack(
             anchor="w", padx=14, pady=(0, 6)
         )
@@ -1103,7 +1140,7 @@ class SheetsHubApp(ctk.CTk):
 
         def open_browser() -> None:
             webbrowser.open(auth_url, new=1, autoraise=True)
-            status_var.set("Браузер открыт. Войдите и разрешите доступ…")
+            status_var.set("Браузер открыт. После входа вернитесь сюда — окно не закрывайте.")
 
         def copy_link() -> None:
             try:
@@ -1114,36 +1151,66 @@ class SheetsHubApp(ctk.CTk):
                 status_var.set("Не удалось скопировать — откройте браузер кнопкой ниже.")
 
         def finish_with_url(response_url: str) -> None:
-            try:
+            status_var.set("Обмениваю код на вход…")
+            paste.configure(state="disabled")
+
+            def work():
                 finish_oauth_with_response_url(
                     flow,
                     response_url,
                     client_secrets_path=path,
                     login_hint=hint,
                 )
-            except Exception as exc:
+
+            def done_ok(_=None) -> None:
+                done["ok"] = True
+                try:
+                    dialog.destroy()
+                except Exception:
+                    pass
+
+            def done_err(exc: BaseException) -> None:
+                try:
+                    paste.configure(state="normal")
+                except Exception:
+                    pass
                 messagebox.showerror("Вход не выполнен", str(exc), parent=dialog)
                 status_var.set("Не вышло — проверьте адрес или попробуйте снова.")
-                return
-            done["ok"] = True
-            dialog.destroy()
+
+            def runner() -> None:
+                try:
+                    work()
+                except Exception as exc:
+                    self.after(0, lambda e=exc: done_err(e))
+                    return
+                self.after(0, done_ok)
+
+            threading.Thread(target=runner, daemon=True).start()
 
         def submit_paste() -> None:
             text = paste_var.get().strip()
             if not text:
                 messagebox.showwarning("Адрес", "Вставьте адрес из строки браузера.", parent=dialog)
                 return
+            if "code=" not in text and not text.startswith("4/"):
+                messagebox.showwarning(
+                    "Нет кода",
+                    "В адресе должен быть ?code=…\n"
+                    "Кликните в строку адреса браузера (даже на странице ошибки), "
+                    "скопируйте всё целиком и вставьте сюда.",
+                    parent=dialog,
+                )
+                return
             finish_with_url(text)
 
         def show_admin_help() -> None:
             messagebox.showinfo(
-                "Если страница Google белая",
-                "Проверьте в Google Cloud Console (проект helix):\n\n"
-                "1) APIs & Services → Enable APIs → Google Sheets API включён.\n"
-                "2) OAuth consent screen создан (External).\n"
-                "3) Статус Testing → в Test users добавлена ваша почта.\n"
-                "4) Credentials → OAuth client типа Desktop.\n\n"
-                "Потом откройте ссылку входа в Edge или Firefox без VPN.",
+                "Подсказка",
+                "Ошибка «127.0.0.1 не позволяет установить соединение» после Google — "
+                "часто нормально.\n\n"
+                "Скопируйте адрес из строки браузера с ?code= и вставьте в программу.\n\n"
+                "Если снова 403 access_denied — в Google Cloud → OAuth consent screen "
+                "добавьте почту в Test users.",
                 parent=dialog,
             )
 
@@ -1154,15 +1221,32 @@ class SheetsHubApp(ctk.CTk):
             anchor="e", padx=14, pady=(0, 12)
         )
 
+        ready = threading.Event()
+
         def listener() -> None:
             try:
-                response_url = listen_for_oauth_redirect(timeout=300)
+                response_url = listen_for_oauth_redirect(timeout=300, ready=ready)
                 events.put(("ok", response_url))
             except Exception as exc:
+                ready.set()
                 events.put(("err", str(exc)))
 
         threading.Thread(target=listener, daemon=True).start()
-        dialog.after(300, open_browser)
+
+        def open_when_ready(attempt: int = 0) -> None:
+            if done["ok"] or not dialog.winfo_exists():
+                return
+            if ready.is_set():
+                status_var.set("Приём готов. Открываю браузер…")
+                open_browser()
+                return
+            if attempt > 50:
+                status_var.set("Приём не поднялся — используйте вставку адреса вручную.")
+                open_browser()
+                return
+            dialog.after(100, lambda: open_when_ready(attempt + 1))
+
+        dialog.after(100, open_when_ready)
 
         def poll() -> None:
             if done["ok"] or not dialog.winfo_exists():
@@ -1253,7 +1337,6 @@ class SheetsHubApp(ctk.CTk):
             raw_count = len(booking)
             self.records = explode_records(booking)
             self._calendar_fp = None
-            self._schedule_render(immediate=True)
             extra = f" · {len(errors)} ошибок" if errors else ""
             if getattr(self.client, "read_only_public", False):
                 extra += " · чтение CSV"
@@ -1261,14 +1344,15 @@ class SheetsHubApp(ctk.CTk):
             slots = sum(1 for item in self.records if item.layout == "calendar")
             info_note = f" · справка: {len(self.info_records)}" if self.info_records else ""
             if slots:
-                self._set_status(f"{selected_name}: {slots} слотов, занято {booked}{info_note}{extra}")
+                self._status_after_draw = f"{selected_name}: {slots} слотов, занято {booked}{info_note}{extra}"
             else:
                 split_note = ""
                 if len(self.records) > raw_count:
                     split_note = f" · разбито на {len(self.records)} пунктов"
-                self._set_status(
+                self._status_after_draw = (
                     f"{selected_name}: строк {raw_count}{split_note}{info_note}{extra}"
                 )
+            self._schedule_render(immediate=True)
             if errors:
                 messagebox.showwarning("Таблица не загрузилась", "\n\n".join(errors[:8]))
 
@@ -1463,6 +1547,10 @@ class SheetsHubApp(ctk.CTk):
                     self._calendar_fp = fp
                 else:
                     self._apply_calendar_search_styles()
+                    pending = getattr(self, "_status_after_draw", None)
+                    if pending:
+                        self._set_status(pending)
+                        self._status_after_draw = None
                 booked = sum(1 for item in calendar if item.values.get("Статус") == "Занято")
                 self._visible = calendar
                 self.count_label.configure(text=str(booked))
@@ -1487,6 +1575,10 @@ class SheetsHubApp(ctk.CTk):
 
             self._visible = records
             self.count_label.configure(text=str(len(records)))
+            pending = getattr(self, "_status_after_draw", None)
+            if pending:
+                self._set_status(pending)
+                self._status_after_draw = None
             self.after_idle(self._fit_columns)
         finally:
             self._rendering = False
@@ -1514,6 +1606,13 @@ class SheetsHubApp(ctk.CTk):
             self.vsb.grid(row=0, column=1, rowspan=3, sticky="ns")
 
     def _draw_calendars(self, records: list[Record]) -> None:
+        if self._cal_draw_after_id is not None:
+            try:
+                self.after_cancel(self._cal_draw_after_id)
+            except Exception:
+                pass
+            self._cal_draw_after_id = None
+        self._cal_draw_gen += 1
         self._slot_labels = {}
         self._cal_col_frames = {}
         self._cal_placed_cells = []
@@ -1528,6 +1627,7 @@ class SheetsHubApp(ctk.CTk):
                 groups.setdefault((record.spreadsheet_id, record.sheet, record.source_name), []).append(record)
             if not groups:
                 self.cal_header_title.configure(text="")
+                self._cal_resizing = False
                 return
             ((_, _, name), items) = next(iter(groups.items()))
             self._draw_one_calendar(name, items)
@@ -1536,13 +1636,19 @@ class SheetsHubApp(ctk.CTk):
                 self.cal_x_canvas.grid(row=1, column=0, sticky="nsew")
             except tk.TclError:
                 pass
-        finally:
-            self.after_idle(self._finish_calendar_draw)
+        except Exception:
+            self._cal_resizing = False
+            raise
 
     def _finish_calendar_draw(self) -> None:
+        self._cal_draw_after_id = None
         self._cal_resizing = False
         self._refresh_cal_scroll()
         self._apply_calendar_search_styles()
+        pending = getattr(self, "_status_after_draw", None)
+        if pending:
+            self._set_status(pending)
+            self._status_after_draw = None
 
     def _draw_one_calendar(self, name: str, items: list[Record]) -> None:
         # Сетка и цвета — только UI приложения. Из таблицы берём дату/время/текст слота.
@@ -1564,7 +1670,6 @@ class SheetsHubApp(ctk.CTk):
         self._cal_date_w = date_w
         self._cal_total_w = time_w + date_w * max(len(dates), 1)
 
-        # place() с общими X — шапка и тело всегда совпадают (grid разъезжался при скролле).
         try:
             header.configure(width=self._cal_total_w, height=CAL_HEADER_H)
             header.grid_propagate(False)
@@ -1596,7 +1701,37 @@ class SheetsHubApp(ctk.CTk):
                 wraplength=max(40, date_w - 12),
             )
 
-        for row, time in enumerate(times):
+        # Тело рисуем порциями — иначе Windows помечает окно «Не отвечает».
+        gen = self._cal_draw_gen
+        self._cal_draw_state = {
+            "gen": gen,
+            "body": body,
+            "times": times,
+            "dates": dates,
+            "cell_map": cell_map,
+            "date_w": date_w,
+            "time_w": time_w,
+            "row_idx": 0,
+        }
+        self._set_status(f"Рисую календарь… 0/{len(times)}")
+        self._cal_draw_after_id = self.after(1, self._draw_calendar_chunk)
+
+    def _draw_calendar_chunk(self) -> None:
+        state = getattr(self, "_cal_draw_state", None)
+        if not state or state.get("gen") != self._cal_draw_gen:
+            self._cal_draw_after_id = None
+            return
+        body = state["body"]
+        times: list = state["times"]
+        dates: list = state["dates"]
+        cell_map = state["cell_map"]
+        date_w = state["date_w"]
+        time_w = state["time_w"]
+        row_idx = state["row_idx"]
+        batch = 2
+        end = min(row_idx + batch, len(times))
+        for row in range(row_idx, end):
+            time = times[row]
             self._cal_body_cell(
                 body,
                 row,
@@ -1612,6 +1747,13 @@ class SheetsHubApp(ctk.CTk):
             for col, date in enumerate(dates, start=1):
                 record = cell_map.get((time, date))
                 self._draw_slot(body, record, row, col, date_w)
+        state["row_idx"] = end
+        if end < len(times):
+            self._set_status(f"Рисую календарь… {end}/{len(times)}")
+            self._cal_draw_after_id = self.after(1, self._draw_calendar_chunk)
+            return
+        self._cal_draw_after_id = None
+        self.after_idle(self._finish_calendar_draw)
 
     def _register_cal_cell(self, col: int, cell: tk.Frame, *, row: int, row_h: int, header: bool) -> None:
         self._cal_col_frames.setdefault(col, []).append(cell)
