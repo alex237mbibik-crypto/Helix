@@ -11,7 +11,7 @@ import customtkinter as ctk
 import tkinter as tk
 
 from sheets_hub.auth import credential_kind
-from sheets_hub.calendar_sheet import extract_phone, info_tone
+from sheets_hub.calendar_sheet import classify_slot, extract_phone, info_tone, is_lock_text
 from sheets_hub.client import SheetsClient, SheetsError
 from sheets_hub.config import (
     KIND_INFO,
@@ -40,8 +40,10 @@ GREEN_SOFT = "#e6f4ea"
 SLOT_GREEN = "#7cb342"
 SLOT_BOOKED = "#558b2f"
 SLOT_BLOCKED = "#f1f3f4"
+SLOT_LOCK = "#f9a825"
 SLOT_TIME = "#f1f3f4"
 SLOT_OUTLINE = "#dadce0"
+AUTO_REFRESH_MS = 30_000
 CAL_TIME_W = 72
 CAL_DATE_W = 176
 CAL_ROW_H = 72
@@ -183,10 +185,14 @@ class SheetsHubApp(ctk.CTk):
         self._connecting = False
         self._cal_draw_after_id: str | None = None
         self._cal_draw_gen = 0
+        self._auto_refresh_after_id: str | None = None
+        self._booking_open = 0
+        self._lock_busy = False
 
         self._build()
         self._sync_source_filter_from_config()
         self.after(200, self._try_connect)
+        self._schedule_auto_refresh()
 
     def _fit_to_screen(self) -> None:
         self.update_idletasks()
@@ -938,6 +944,7 @@ class SheetsHubApp(ctk.CTk):
                 self.reload_all()
             else:
                 self._set_status("Укажите таблицы в «Таблицы» — ссылку, с которой читать и куда писать.")
+            self._schedule_auto_refresh()
 
         def finish(client=None, error: BaseException | None = None) -> None:
             self._connecting = False
@@ -1037,6 +1044,29 @@ class SheetsHubApp(ctk.CTk):
                 messagebox.showerror("Ошибка", str(error))
             return
         done(result)
+
+    def _schedule_auto_refresh(self) -> None:
+        if self._auto_refresh_after_id is not None:
+            try:
+                self.after_cancel(self._auto_refresh_after_id)
+            except Exception:
+                pass
+        self._auto_refresh_after_id = self.after(AUTO_REFRESH_MS, self._auto_refresh_tick)
+
+    def _auto_refresh_tick(self) -> None:
+        self._auto_refresh_after_id = None
+        try:
+            if (
+                self.client
+                and self._jobs == 0
+                and self._booking_open == 0
+                and not self._lock_busy
+                and not self._connecting
+                and self._valid_sources()
+            ):
+                self.reload_all()
+        finally:
+            self._schedule_auto_refresh()
 
     def reload_all(self) -> None:
         if not self.client:
@@ -1190,6 +1220,8 @@ class SheetsHubApp(ctk.CTk):
             ).lower()
             if status == "Не записывать":
                 bg, fg = SLOT_BLOCKED, MUTED
+            elif status == "Записывают":
+                bg, fg = SLOT_LOCK, "#3e2723"
             elif status == "Занято":
                 if query and query in blob:
                     bg, fg = "#9ccc65", TEXT
@@ -1216,6 +1248,10 @@ class SheetsHubApp(ctk.CTk):
             text = "не записывать"
             bold = False
             bg, fg = SLOT_BLOCKED, MUTED
+        elif status == "Записывают":
+            text = "записывают…"
+            bold = True
+            bg, fg = SLOT_LOCK, "#3e2723"
         elif status == "Занято":
             name = record.values.get("Клиент", "").strip() or "занято"
             phone = record.values.get("Телефон", "").strip()
@@ -1544,6 +1580,8 @@ class SheetsHubApp(ctk.CTk):
         status = record.values.get("Статус", "")
         if status == "Не записывать":
             bg, fg, text = SLOT_BLOCKED, MUTED, "не записывать"
+        elif status == "Записывают":
+            bg, fg, text = SLOT_LOCK, "#3e2723", "записывают…"
         elif status == "Занято":
             name = record.values.get("Клиент", "").strip() or "занято"
             phone = record.values.get("Телефон", "").strip()
@@ -1560,7 +1598,7 @@ class SheetsHubApp(ctk.CTk):
             text=text,
             bg=bg,
             fg=fg,
-            font=_ui_font(11, bold=status == "Занято"),
+            font=_ui_font(11, bold=status in {"Занято", "Записывают"}),
             wraplength=max(40, width - 14),
             justify="left",
             anchor="nw",
@@ -1572,7 +1610,46 @@ class SheetsHubApp(ctk.CTk):
 
     def _edit_calendar_cell(self, record: Record) -> None:
         self._picked = record
-        self._edit_cell(record, "Клиент")
+        if record.values.get("Статус") == "Не записывать":
+            messagebox.showinfo("Слот закрыт", "В эту ячейку нельзя записывать.")
+            return
+        if not self.client:
+            messagebox.showerror("Нет подключения", "Сначала подключите ключ в «Таблицы».")
+            return
+        if self._lock_busy or self._booking_open:
+            self._set_status("Сначала закройте текущее окно записи.")
+            return
+        self._lock_busy = True
+        self._set_status("Закрепляю слот…")
+
+        def work():
+            try:
+                return ("ok", self.client.acquire_calendar_lock(record))
+            except Exception as exc:
+                return ("err", exc)
+
+        def done(payload) -> None:
+            self._lock_busy = False
+            kind, data = payload
+            if kind == "err":
+                self._set_status(str(data).split("\n")[0])
+                messagebox.showwarning("Слот занят", str(data))
+                self.reload_all()
+                return
+            previous, lock_text = data
+            record.values["Статус"] = "Записывают"
+            record.values["Клиент"] = ""
+            record.values["Телефон"] = ""
+            self._refresh_slot_label(record)
+            self._set_status("Слот закреплён — введите данные")
+            self._edit_cell(
+                record,
+                "Клиент",
+                sheet_previous=previous,
+                lock_text=lock_text,
+            )
+
+        self._run_bg(work, done, alert=False)
 
     def _render_views(self) -> None:
         self._render_table()
@@ -1781,6 +1858,9 @@ class SheetsHubApp(ctk.CTk):
         field = columns[col_index]
         if field == "Источник":
             return
+        if record.layout == "calendar" and field == "Клиент":
+            self._edit_calendar_cell(record)
+            return
         try:
             record.header_for(field)
         except KeyError:
@@ -1810,13 +1890,23 @@ class SheetsHubApp(ctk.CTk):
         dialog.grab_set()
         return dialog
 
-    def _edit_cell(self, record: Record, field: str) -> None:
+    def _edit_cell(
+        self,
+        record: Record,
+        field: str,
+        *,
+        sheet_previous: str | None = None,
+        lock_text: str | None = None,
+    ) -> None:
         calendar = record.layout == "calendar" and field == "Клиент"
         when = f"{record.values.get('Дата', '')} · {record.values.get('Время', '')}".strip(" ·")
         dialog = self._dialog(
             "Запись" if calendar else "Изменить ячейку",
             "520x420" if calendar else "480x240",
         )
+        if calendar and lock_text:
+            self._booking_open += 1
+
         ctk.CTkLabel(
             dialog,
             text=when or f"{record.source_name} · строка {record.row}",
@@ -1826,18 +1916,36 @@ class SheetsHubApp(ctk.CTk):
         box.pack(fill="x", padx=16, pady=8)
         entry = _styled_entry(box, "Иванова А. +79001234567" if calendar else "Иванова А.")
         entry.pack(fill="x", padx=10, pady=(4, 10))
+
         initial = record.values.get(field, "")
+        prev_for_form = sheet_previous if sheet_previous is not None else ""
         if calendar:
-            phone = str(record.values.get("Телефон") or "").strip()
-            name = str(record.values.get("Клиент") or "").strip()
-            if record.values.get("Статус") == "Свободно":
-                initial = ""
-            elif phone and phone not in name:
-                initial = f"{name} {phone}".strip()
+            prev_status = classify_slot(prev_for_form) if sheet_previous is not None else record.values.get("Статус", "")
+            if sheet_previous is not None:
+                if prev_status == "Свободно" or is_lock_text(prev_for_form):
+                    initial = ""
+                elif prev_status == "Не записывать":
+                    initial = prev_for_form
+                else:
+                    name, phone = extract_phone(prev_for_form)
+                    if phone and phone not in name:
+                        initial = f"{name} {phone}".strip()
+                    else:
+                        initial = name or prev_for_form
             else:
-                initial = name
+                phone = str(record.values.get("Телефон") or "").strip()
+                name = str(record.values.get("Клиент") or "").strip()
+                if record.values.get("Статус") == "Свободно":
+                    initial = ""
+                elif phone and phone not in name:
+                    initial = f"{name} {phone}".strip()
+                else:
+                    initial = name
         entry.insert(0, initial)
-        if calendar and record.values.get("Статус") == "Свободно":
+        if calendar and (
+            (sheet_previous is not None and classify_slot(prev_for_form) == "Свободно")
+            or (sheet_previous is None and record.values.get("Статус") == "Свободно")
+        ):
             entry.delete(0, "end")
         entry.focus()
 
@@ -1852,7 +1960,7 @@ class SheetsHubApp(ctk.CTk):
                 font=ctk.CTkFont(size=13, weight="bold"),
                 text_color=TEXT,
             ).pack(anchor="w", padx=12, pady=(10, 4))
-            existing = str(record.values.get("Клиент") or "").lower()
+            existing = (prev_for_form or str(record.values.get("Клиент") or "")).lower()
             if "береме" in existing:
                 pregnant_var.set("yes")
             radios = ctk.CTkFrame(preg_box, fg_color="transparent")
@@ -1899,10 +2007,52 @@ class SheetsHubApp(ctk.CTk):
             pregnant_var.trace_add("write", sync_warn)
             sync_warn()
 
+        state = {"closed": False, "saved": False}
+
+        def release_booking_counter() -> None:
+            if calendar and lock_text and not state["closed"]:
+                state["closed"] = True
+                self._booking_open = max(0, self._booking_open - 1)
+
+        def restore_previous() -> None:
+            if not lock_text or not self.client:
+                return
+            restore_value = sheet_previous if sheet_previous is not None else ""
+
+            def work():
+                try:
+                    current = self.client.read_cell(record, "Клиент")
+                    if current == lock_text:
+                        self.client.update_cell(record, "Клиент", restore_value)
+                except Exception:
+                    pass
+                return True
+
+            def done(_):
+                self.reload_all()
+
+            self._run_bg(work, done, alert=False)
+
+        def close_dialog(*, restore: bool) -> None:
+            if state["saved"]:
+                release_booking_counter()
+                try:
+                    dialog.destroy()
+                except Exception:
+                    pass
+                return
+            release_booking_counter()
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
+            if restore and lock_text:
+                restore_previous()
+
         def save(*, freeing: bool = False) -> None:
             value = entry.get()
             if not self.client:
-                messagebox.showerror("Нет подключения", "Сначала войдите через Google в «Таблицы».")
+                messagebox.showerror("Нет подключения", "Сначала подключите ключ в «Таблицы».")
                 return
             if calendar and not freeing:
                 typed = value.strip()
@@ -1916,6 +2066,8 @@ class SheetsHubApp(ctk.CTk):
                     return
 
             def work():
+                if lock_text:
+                    self.client.assert_calendar_lock(record, lock_text)
                 to_write = write_back_value(record, field, value)
                 self.client.update_cell(record, field, to_write)
                 record.values[field] = value
@@ -1924,6 +2076,7 @@ class SheetsHubApp(ctk.CTk):
                 return to_write
 
             def done(_value):
+                state["saved"] = True
                 if calendar:
                     typed = value.strip()
                     if not typed or typed.lower() == "запись":
@@ -1951,7 +2104,7 @@ class SheetsHubApp(ctk.CTk):
                 else:
                     self._schedule_render(immediate=True)
                 self._set_status(f"Сохранено в таблицу: {when or record.source_name}")
-                dialog.destroy()
+                close_dialog(restore=False)
                 self.reload_all()
 
             self._run_bg(work, done)
@@ -1963,7 +2116,11 @@ class SheetsHubApp(ctk.CTk):
         buttons = ctk.CTkFrame(dialog, fg_color="transparent")
         buttons.pack(fill="x", padx=16, pady=(0, 16))
         self._primary_button(buttons, "Сохранить", lambda: save(freeing=False), 140).pack(side="left")
-        if calendar and record.values.get("Статус") == "Занято":
+        show_free = calendar and (
+            (sheet_previous is not None and classify_slot(sheet_previous or "") == "Занято")
+            or (sheet_previous is None and record.values.get("Статус") == "Занято")
+        )
+        if show_free:
             ctk.CTkButton(
                 buttons,
                 text="Освободить",
@@ -1975,8 +2132,12 @@ class SheetsHubApp(ctk.CTk):
                 hover_color=DANGER_HOVER,
                 font=ctk.CTkFont(size=13, weight="bold"),
             ).pack(side="left", padx=(8, 0))
+        self._outline_button(buttons, "Отмена", lambda: close_dialog(restore=True), 100).pack(
+            side="right"
+        )
         dialog.bind("<Return>", lambda *_: save(freeing=False))
-
+        dialog.bind("<Escape>", lambda *_: close_dialog(restore=True))
+        dialog.protocol("WM_DELETE_WINDOW", lambda: close_dialog(restore=True))
     def _delete_row(self) -> None:
         record = self._selected_record()
         if not record:

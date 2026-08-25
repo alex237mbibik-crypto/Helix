@@ -25,7 +25,13 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from sheets_hub.auth import AuthError, account_label, credential_kind, load_gspread_credentials
-from sheets_hub.calendar_sheet import is_calendar_matrix, parse_sheet_rows
+from sheets_hub.calendar_sheet import (
+    is_calendar_matrix,
+    is_lock_text,
+    lock_is_fresh,
+    make_lock_text,
+    parse_sheet_rows,
+)
 from sheets_hub.config import (
     KIND_INFO,
     KIND_RECORDS,
@@ -1208,6 +1214,99 @@ class SheetsClient:
         if header != field:
             record.values[header] = value
         self.read_only_public = False
+
+    def read_cell(self, record: Record, field: str) -> str:
+        try:
+            header = record.header_for(field)
+        except KeyError as exc:
+            raise SheetsError(f"В листе нет колонки «{field}»") from exc
+        col = record.col_index[header]
+
+        def _read_gspread() -> str:
+            worksheet = self._call(
+                lambda: self._gc.open_by_key(record.spreadsheet_id).worksheet(record.sheet)
+            )
+            return str(self._call(lambda: worksheet.cell(record.row, col).value) or "").strip()
+
+        def _read_insecure() -> str:
+            self._connect(insecure=True)
+            return _read_gspread()
+
+        def _read_requests_insecure() -> str:
+            return _read_cell_via_requests_insecure(
+                self._credentials_path,
+                record.spreadsheet_id,
+                record.sheet,
+                record.row,
+                col,
+            )
+
+        attempts: list[Callable[[], str]] = []
+        if sys.platform == "win32":
+            attempts.append(
+                lambda: _read_cell_via_curl(
+                    self._credentials_path, record.spreadsheet_id, record.sheet, record.row, col
+                )
+            )
+            attempts.append(_read_requests_insecure)
+            attempts.append(_read_insecure)
+        else:
+            attempts.append(_read_gspread)
+            attempts.append(
+                lambda: _read_cell_via_curl(
+                    self._credentials_path, record.spreadsheet_id, record.sheet, record.row, col
+                )
+            )
+            attempts.append(_read_requests_insecure)
+            attempts.append(_read_insecure)
+
+        errors: list[str] = []
+        for action in attempts:
+            try:
+                return str(action() or "").strip()
+            except Exception as exc:
+                errors.append(str(exc))
+                msg = str(exc).lower()
+                if "403" in msg or "permission" in msg or "access_denied" in msg:
+                    break
+        raise SheetsError(
+            "Не удалось прочитать ячейку из Google Таблицы.\n"
+            + "\n".join(errors[:4] or ["нет деталей"])
+        )
+
+    def acquire_calendar_lock(self, record: Record) -> tuple[str, str]:
+        """Ставит маркер «записывают» в слот. Возвращает (прежнее значение, текст блокировки)."""
+        current = self.read_cell(record, "Клиент")
+        if is_lock_text(current) and lock_is_fresh(current):
+            raise SheetsError(
+                "Этот слот сейчас заполняет другой оператор.\n"
+                "Подождите немного или нажмите «Обновить»."
+            )
+        lock_text, _token = make_lock_text()
+        self.update_cell(record, "Клиент", lock_text)
+        actual = self.read_cell(record, "Клиент")
+        if actual != lock_text:
+            raise SheetsError(
+                "Не удалось закрепить слот — его уже занял другой оператор.\n"
+                "Обновите календарь и выберите другой слот."
+            )
+        return current, lock_text
+
+    def assert_calendar_lock(self, record: Record, lock_text: str) -> None:
+        """Перед сохранением: слот всё ещё наш."""
+        current = self.read_cell(record, "Клиент")
+        if current == lock_text:
+            return
+        if is_lock_text(current) and lock_is_fresh(current):
+            raise SheetsError(
+                "Слот перехватил другой оператор. Ваша запись не сохранена.\n"
+                "Обновите календарь."
+            )
+        raise SheetsError(
+            "Ячейка изменилась, пока вы её редактировали.\n"
+            f"Сейчас в таблице: «{current or '(пусто)'}».\n"
+            "Сохранение отменено — обновите календарь."
+        )
 
     def append_row(self, dest: SheetRef, values: dict[str, str]) -> None:
         worksheet = self._open_worksheet(dest)

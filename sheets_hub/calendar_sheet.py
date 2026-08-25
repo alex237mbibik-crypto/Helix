@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import re
+import secrets
+import time
 
 from sheets_hub.config import KIND_INFO, KIND_RECORDS, SheetRef, is_info_ref
 from sheets_hub.models import Record
 from sheets_hub.split import address_key, service_key
+
+# Маркер в ячейке, пока оператор держит диалог записи. Виден другим после обновления.
+LOCK_TTL_SEC = 120
+_LOCK_PREFIX = "⏳"
 
 _TIME_RE = re.compile(
     r"^\s*(?:\d{4}-\d{2}-\d{2}\s+)?(\d{1,2})[:.\-](\d{2})(?:[:.\-]\d{2})?\s*(?:am|pm)?\s*$",
@@ -163,8 +169,46 @@ def extract_phone(text: str) -> tuple[str, str]:
     return name, phone
 
 
+def make_lock_text() -> tuple[str, str]:
+    """Возвращает (текст для ячейки, token)."""
+    token = secrets.token_hex(3)
+    return f"{_LOCK_PREFIX}|{int(time.time())}|{token}|записывает", token
+
+
+def is_lock_text(text: str) -> bool:
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    if raw.startswith(_LOCK_PREFIX):
+        return True
+    return _norm(raw).startswith("записывает")
+
+
+def lock_age_sec(text: str) -> float | None:
+    """Возраст блокировки в секундах; None если это не lock."""
+    raw = (text or "").strip()
+    if not is_lock_text(raw):
+        return None
+    parts = raw.split("|")
+    if len(parts) >= 2 and parts[0].startswith(_LOCK_PREFIX):
+        try:
+            return max(0.0, time.time() - float(parts[1]))
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+def lock_is_fresh(text: str) -> bool:
+    age = lock_age_sec(text)
+    if age is None:
+        return False
+    return age < LOCK_TTL_SEC
+
+
 def classify_slot(text: str) -> str:
     raw = _norm(text)
+    if is_lock_text(text):
+        return "Записывают"
     if raw in _BLOCKED_MARKERS or raw.startswith("не запис"):
         return "Не записывать"
     if raw in _FREE_MARKERS:
@@ -332,9 +376,9 @@ def parse_calendar_rows(
         for col_idx in date_cols:
             cell = row[col_idx].strip() if col_idx < len(row) else ""
             status = classify_slot(cell)
-            display = "" if status == "Свободно" else cell
+            display = "" if status in {"Свободно", "Записывают"} else cell
             name, phone = extract_phone(display) if status == "Занято" else (display, "")
-            if status == "Свободно":
+            if status in {"Свободно", "Записывают"}:
                 name, phone = "", ""
             values = _with_tags(
                 {
