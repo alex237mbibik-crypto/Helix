@@ -273,6 +273,8 @@ class AppConfig:
     credentials: Path
     sources: list[SheetRef]
     destinations: list[SheetRef]
+    registry_spreadsheet_id: str = ""
+    registry_sheet: str = "SheetsHub"
 
 
 def usable_refs(refs: list[SheetRef]) -> list[SheetRef]:
@@ -353,10 +355,23 @@ def load_config(path: Path | None = None) -> AppConfig:
     tables = merge_tables(sources, destinations)
     if not tables:
         tables = sources or destinations
+    registry = raw.get("registry") or {}
+    if isinstance(registry, str):
+        registry_id = registry
+        registry_sheet = "SheetsHub"
+    else:
+        registry_id = str(
+            (registry or {}).get("spreadsheet_id")
+            or raw.get("registry_spreadsheet_id")
+            or ""
+        ).strip()
+        registry_sheet = str((registry or {}).get("sheet") or "SheetsHub").strip() or "SheetsHub"
     return AppConfig(
         credentials=creds,
         sources=tables,
         destinations=list(tables),
+        registry_spreadsheet_id=registry_id,
+        registry_sheet=registry_sheet,
     )
 
 
@@ -370,11 +385,17 @@ def save_config(config: AppConfig, path: Path | None = None) -> None:
 
     tables = merge_tables(config.sources, config.destinations) or config.sources
     dumped = [_dump_ref(item) for item in tables]
-    payload = {
+    payload: dict[str, Any] = {
         "credentials": creds_value,
         "sources": dumped,
         "destinations": dumped,
     }
+    registry_id = (config.registry_spreadsheet_id or "").strip()
+    if registry_id:
+        payload["registry"] = {
+            "spreadsheet_id": registry_id,
+            "sheet": (config.registry_sheet or "SheetsHub").strip() or "SheetsHub",
+        }
     config_path.write_text(
         yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
         encoding="utf-8",

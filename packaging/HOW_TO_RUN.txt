@@ -9,7 +9,9 @@ SheetsHub — как запустить
 3. Положите credentials.json сервисного аккаунта рядом с exe
    (или он уже будет в архиве, если задан GitHub Secret).
    Каждую таблицу откройте для email из этого файла (роль «Редактор»).
-4. Запускайте SheetsHub.exe (или start_SheetsHub.bat).
+4. В «Таблицы» укажите ссылку на общую Google-таблицу списка (тоже Редактор для SA) —
+   тогда список таблиц синхронизируется между всеми компьютерами.
+5. Запускайте SheetsHub.exe (или start_SheetsHub.bat).
 
 Если ошибка «Could not load PyInstaller's embedded PKG archive»:
 - скачайте архив заново из GitHub Actions;

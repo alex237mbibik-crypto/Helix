@@ -44,6 +44,11 @@ from sheets_hub.config import (
     requested_sheet_titles,
 )
 from sheets_hub.models import Record
+from sheets_hub.registry import (
+    DEFAULT_REGISTRY_SHEET,
+    refs_from_registry_rows,
+    refs_to_registry_rows,
+)
 from sheets_hub.split import address_key, service_key
 from sheets_hub.ssl_setup import ca_bundle_path, configure_tls, session_verify_target
 
@@ -1326,6 +1331,56 @@ class SheetsClient:
     def list_sheets(self, url_or_id: str) -> list[str]:
         spreadsheet = self._open_spreadsheet(url_or_id)
         return [ws.title for ws in spreadsheet.worksheets()]
+
+    def pull_table_registry(self, spreadsheet_id: str, sheet_title: str = "") -> list[SheetRef]:
+        """Читает общий список таблиц из Google Sheets."""
+        sid = parse_spreadsheet_id(spreadsheet_id)
+        title = (sheet_title or DEFAULT_REGISTRY_SHEET).strip() or DEFAULT_REGISTRY_SHEET
+        spreadsheet = self._call(lambda: self._gc.open_by_key(sid))
+        available = {ws.title: ws for ws in spreadsheet.worksheets()}
+        worksheet = available.get(title)
+        if worksheet is None:
+            for name, ws in available.items():
+                if name.lower() == title.lower():
+                    worksheet = ws
+                    break
+        if worksheet is None:
+            return []
+        values = self._sheet_values(worksheet)
+        return refs_from_registry_rows(values)
+
+    def push_table_registry(
+        self,
+        spreadsheet_id: str,
+        tables: list[SheetRef],
+        sheet_title: str = "",
+    ) -> None:
+        """Записывает общий список таблиц в Google Sheets (полная замена листа)."""
+        from sheets_hub.registry import REGISTRY_HEADERS
+
+        title = (sheet_title or DEFAULT_REGISTRY_SHEET).strip() or DEFAULT_REGISTRY_SHEET
+        sid = parse_spreadsheet_id(spreadsheet_id)
+        spreadsheet = self._call(lambda: self._gc.open_by_key(sid))
+        available = {ws.title: ws for ws in spreadsheet.worksheets()}
+        worksheet = available.get(title)
+        if worksheet is None:
+            for name, ws in available.items():
+                if name.lower() == title.lower():
+                    worksheet = ws
+                    break
+        if worksheet is None:
+            worksheet = self._call(
+                lambda: spreadsheet.add_worksheet(title=title, rows=200, cols=len(REGISTRY_HEADERS))
+            )
+        rows = refs_to_registry_rows(tables)
+        self._call(lambda: worksheet.clear())
+        self._call(
+            lambda: worksheet.update(
+                "A1",
+                rows,
+                value_input_option="RAW",
+            )
+        )
 
 
 def values_for_destination(record: Record, headers: list[str]) -> dict[str, str]:

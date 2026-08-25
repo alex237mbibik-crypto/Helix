@@ -29,6 +29,7 @@ from sheets_hub.config import (
     usable_refs,
 )
 from sheets_hub.models import Record
+from sheets_hub.registry import DEFAULT_REGISTRY_SHEET, tables_signature
 from sheets_hub.ssl_setup import configure_tls
 from sheets_hub.split import explode_records, write_back_value
 
@@ -188,6 +189,8 @@ class SheetsHubApp(ctk.CTk):
         self._auto_refresh_after_id: str | None = None
         self._booking_open = 0
         self._lock_busy = False
+        self._tables_dialog_open = False
+        self._registry_syncing = False
 
         self._build()
         self._sync_source_filter_from_config()
@@ -940,11 +943,8 @@ class SheetsHubApp(ctk.CTk):
             email = client.service_email
             self._set_account_label(email)
             self._set_status(f"Доступ: {email}")
-            if self._valid_sources():
-                self.reload_all()
-            else:
-                self._set_status("Укажите таблицы в «Таблицы» — ссылку, с которой читать и куда писать.")
             self._schedule_auto_refresh()
+            self._sync_registry_async(then_reload=True)
 
         def finish(client=None, error: BaseException | None = None) -> None:
             self._connecting = False
@@ -1062,11 +1062,98 @@ class SheetsHubApp(ctk.CTk):
                 and self._booking_open == 0
                 and not self._lock_busy
                 and not self._connecting
-                and self._valid_sources()
+                and not self._tables_dialog_open
+                and not self._registry_syncing
             ):
-                self.reload_all()
+                self._sync_registry_async(then_reload=True)
         finally:
             self._schedule_auto_refresh()
+
+    def _registry_configured(self) -> bool:
+        text = (self.config_data.registry_spreadsheet_id or "").strip()
+        return bool(text) and not text.upper().startswith("PASTE_")
+
+    def _apply_remote_tables(self, refs: list[SheetRef]) -> bool:
+        """Подставляет список таблиц из облака. True если что-то изменилось."""
+        local = merge_tables(self.config_data.sources, self.config_data.destinations)
+        if tables_signature(local) == tables_signature(refs):
+            return False
+        self.config_data.sources = list(refs)
+        self.config_data.destinations = list(refs)
+        try:
+            save_config(self.config_data)
+        except Exception:
+            pass
+        self._sync_source_filter_from_config()
+        return True
+
+    def _sync_registry_work(self) -> tuple[str, object]:
+        """Фоновая синхронизация списка таблиц. Возвращает (действие, данные)."""
+        if not self.client or not self._registry_configured():
+            return ("skip", None)
+        registry_id = self.config_data.registry_spreadsheet_id
+        sheet = self.config_data.registry_sheet or DEFAULT_REGISTRY_SHEET
+        remote = self.client.pull_table_registry(registry_id, sheet)
+        local = usable_refs(merge_tables(self.config_data.sources, self.config_data.destinations))
+        if not remote and local:
+            self.client.push_table_registry(registry_id, local, sheet)
+            return ("seeded", len(local))
+        if remote and tables_signature(remote) != tables_signature(local):
+            return ("pull", remote)
+        return ("ok", len(remote))
+
+    def _sync_registry_async(self, *, then_reload: bool = False) -> None:
+        if not self.client:
+            if then_reload:
+                self._set_status("Укажите таблицы в «Таблицы».")
+            return
+        if not self._registry_configured():
+            if then_reload:
+                if self._valid_sources():
+                    self.reload_all()
+                else:
+                    self._set_status(
+                        "Укажите таблицы в «Таблицы» и ссылку на общий список (registry)."
+                    )
+            return
+        if self._registry_syncing or self._tables_dialog_open or self._booking_open:
+            if then_reload and self._valid_sources() and self._jobs == 0:
+                self.reload_all()
+            return
+        self._registry_syncing = True
+
+        def work_safe():
+            try:
+                return self._sync_registry_work()
+            except Exception as exc:
+                return ("err", exc)
+
+        def done_safe(payload) -> None:
+            self._registry_syncing = False
+            action, data = payload
+            if action == "err":
+                self._set_status(f"Синхронизация таблиц: {str(data).split(chr(10))[0]}")
+                if then_reload and self._valid_sources():
+                    self.reload_all()
+                return
+            if action == "pull" and isinstance(data, list):
+                changed = self._apply_remote_tables(data)
+                self._set_status(f"Список таблиц обновлён из облака: {len(data)}")
+                if then_reload or changed:
+                    if self._valid_sources():
+                        self.reload_all()
+                    else:
+                        self._set_status("В общем списке нет таблиц.")
+                return
+            if action == "seeded":
+                self._set_status(f"Общий список таблиц создан в облаке ({data})")
+            if then_reload:
+                if self._valid_sources():
+                    self.reload_all()
+                else:
+                    self._set_status("Укажите таблицы в «Таблицы».")
+
+        self._run_bg(work_safe, done_safe, alert=False)
 
     def reload_all(self) -> None:
         if not self.client:
@@ -1986,9 +2073,15 @@ class SheetsHubApp(ctk.CTk):
 
             warn_label = ctk.CTkLabel(
                 preg_box,
-                text="7425, 74040, 74042 и 40-534 коды НЕЛЬЗЯ БЕРЕМЕННЫМ",
+                text=(
+                    "НЕЛЬЗЯ БЕРЕМЕННЫМ:\n"
+                    "7425 — ПАП-тест на основе жидкостной цитологии\n"
+                    "74040 — Цервикальный скрининг\n"
+                    "74042 — Цервикальный минимум\n"
+                    "40-534 — Маркеры пролиферации"
+                ),
                 text_color=DANGER,
-                font=ctk.CTkFont(size=13, weight="bold"),
+                font=ctk.CTkFont(size=12, weight="bold"),
                 wraplength=460,
                 justify="left",
                 anchor="w",
@@ -2184,10 +2277,11 @@ class SheetsHubApp(ctk.CTk):
         self._run_bg(work, done)
 
     def _open_tables_dialog(self) -> None:
-        dialog = self._dialog("Таблицы", "920x440")
-        dialog.minsize(720, 340)
+        dialog = self._dialog("Таблицы", "920x520")
+        dialog.minsize(720, 400)
         dialog.grid_columnconfigure(0, weight=1)
-        dialog.grid_rowconfigure(1, weight=1)
+        dialog.grid_rowconfigure(2, weight=1)
+        self._tables_dialog_open = True
 
         account = ctk.CTkFrame(dialog, fg_color=BG, corner_radius=10, border_width=1, border_color=LINE)
         account.grid(row=0, column=0, sticky="ew", padx=16, pady=(12, 8))
@@ -2231,21 +2325,111 @@ class SheetsHubApp(ctk.CTk):
         )
         self._outline_button(adv, "JSON…", pick_key, 80).grid(row=0, column=2, padx=4)
 
+        sync_box = ctk.CTkFrame(dialog, fg_color=BG, corner_radius=10, border_width=1, border_color=LINE)
+        sync_box.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 8))
+        sync_box.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            sync_box,
+            text="Общий список (для всех ПК)",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=TEXT,
+        ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 2))
+        ctk.CTkLabel(
+            sync_box,
+            text="Отдельная Google-таблица: шарьте её на сервисный аккаунт как Редактор. "
+            "Лист по умолчанию — SheetsHub.",
+            text_color=MUTED,
+            font=ctk.CTkFont(size=11),
+            wraplength=700,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", padx=12, pady=(0, 6))
+        registry_var = tk.StringVar(value=self.config_data.registry_spreadsheet_id or "")
+        sheet_var = tk.StringVar(value=self.config_data.registry_sheet or DEFAULT_REGISTRY_SHEET)
+        ctk.CTkLabel(sync_box, text="Ссылка", text_color=MUTED, font=ctk.CTkFont(size=11)).grid(
+            row=2, column=0, sticky="w", padx=12, pady=(0, 10)
+        )
+        _styled_entry(
+            sync_box,
+            "https://docs.google.com/spreadsheets/d/…",
+            textvariable=registry_var,
+            height=28,
+        ).grid(row=2, column=1, sticky="ew", padx=4, pady=(0, 10))
+        _styled_entry(sync_box, "SheetsHub", textvariable=sheet_var, height=28, width=120).grid(
+            row=2, column=2, sticky="e", padx=(4, 12), pady=(0, 10)
+        )
+
         tables = self._tables()
         editor = _RefList(dialog, "Таблицы", tables, "Таблица")
-        editor.frame.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 8))
+        editor.frame.grid(row=2, column=0, sticky="nsew", padx=16, pady=(0, 8))
+
+        def close_dialog() -> None:
+            self._tables_dialog_open = False
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
 
         def save() -> None:
             refs = editor.collect()
+            registry_id = registry_var.get().strip()
+            registry_sheet = sheet_var.get().strip() or DEFAULT_REGISTRY_SHEET
             self.config_data.sources = refs
             self.config_data.destinations = list(refs)
+            self.config_data.registry_spreadsheet_id = registry_id
+            self.config_data.registry_sheet = registry_sheet
             save_config(self.config_data)
-            dialog.destroy()
-            self.client = None
-            self._try_connect()
 
-        self._primary_button(dialog, "Сохранить таблицы", save, 200).grid(row=2, column=0, pady=(0, 14))
+            if not registry_id or registry_id.upper().startswith("PASTE_"):
+                messagebox.showwarning(
+                    "Нет общего списка",
+                    "Укажите ссылку на Google-таблицу «Общий список», "
+                    "чтобы таблицы появлялись на всех компьютерах.",
+                    parent=dialog,
+                )
+                close_dialog()
+                self.client = None
+                self._try_connect()
+                return
 
+            if not self.client:
+                close_dialog()
+                self._try_connect()
+                return
+
+            self._set_status("Сохраняю общий список таблиц…")
+
+            def work():
+                self.client.push_table_registry(registry_id, refs, registry_sheet)
+                return len(refs)
+
+            def done(count) -> None:
+                self._set_status(f"Общий список сохранён: {count} таблиц")
+                close_dialog()
+                self.client = None
+                self._try_connect()
+
+            def work_safe():
+                try:
+                    return ("ok", work())
+                except Exception as exc:
+                    return ("err", exc)
+
+            def done_safe(payload) -> None:
+                kind, data = payload
+                if kind == "err":
+                    messagebox.showerror(
+                        "Не удалось сохранить в облако",
+                        str(data)
+                        + "\n\nПроверьте: таблица общего списка открыта для сервисного аккаунта (Редактор).",
+                        parent=dialog,
+                    )
+                    return
+                done(data)
+
+            self._run_bg(work_safe, done_safe, alert=False)
+
+        self._primary_button(dialog, "Сохранить таблицы", save, 200).grid(row=3, column=0, pady=(0, 14))
+        dialog.protocol("WM_DELETE_WINDOW", close_dialog)
 
 class _RefList:
     def __init__(
