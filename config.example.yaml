@@ -1,18 +1,12 @@
-# Скопируйте файл как config.yaml и подставьте свои таблицы.
-# ID таблицы — кусок ссылки между /d/ и /edit:
-# https://docs.google.com/spreadsheets/d/ВОТ_ЭТОТ_ID/edit
+# credentials.json — JSON сервисного аккаунта (локально на каждом ПК).
 #
-# Одна ссылка = и чтение, и запись в ту же таблицу.
-# sources и destinations в файле совпадают (программа пишет оба блока сама).
-# service / address — необязательно: подпись врача и адрес.
-# sheet: имя вкладки внизу Google Таблицы. Один лист = одна таблица в программе.
-#   sheet: АВГУСТ 2026
-#   sheet: все   — больше не грузит все вкладки; берётся текущий месяц или первый лист
-# kind: info — отдельная справочная таблица (не календарь)
+# registry — ОДНА служебная Google-таблица на всю клинику (не календарь!).
+# В ней программа хранит общий список рабочих таблиц для всех компьютеров.
+# Откройте её для client_email сервисного аккаунта как Редактор.
+# Лист SheetsHub создаётся сам при первом сохранении.
 #
-# registry — одна общая Google-таблица со списком всех календарей.
-# Её нужно открыть для сервисного аккаунта (Редактор). Тогда список таблиц
-# синхронизируется между всеми компьютерами (каждые 30 с и при сохранении).
+# sources ниже — необязательный локальный кэш; после настройки registry
+# список всегда берётся из облака.
 
 credentials: credentials.json
 
@@ -20,24 +14,6 @@ registry:
   spreadsheet_id: PASTE_REGISTRY_SPREADSHEET_ID_OR_URL
   sheet: SheetsHub
 
-sources:
-  - name: Гинеколог
-    spreadsheet_id: PASTE_SPREADSHEET_ID_OR_URL
-    sheet: все
-    # service: Гинеколог
-    # address: пр-т Партизанский, 56
+sources: []
 
-  - name: Справка клиники
-    spreadsheet_id: PASTE_SPREADSHEET_ID_OR_URL
-    sheet: Информация
-    kind: info
-
-destinations:
-  - name: Гинеколог
-    spreadsheet_id: PASTE_SPREADSHEET_ID_OR_URL
-    sheet: все
-
-  - name: Справка клиники
-    spreadsheet_id: PASTE_SPREADSHEET_ID_OR_URL
-    sheet: Информация
-    kind: info
+destinations: []

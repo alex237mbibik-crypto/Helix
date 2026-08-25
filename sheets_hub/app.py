@@ -1088,19 +1088,23 @@ class SheetsHubApp(ctk.CTk):
         return True
 
     def _sync_registry_work(self) -> tuple[str, object]:
-        """Фоновая синхронизация списка таблиц. Возвращает (действие, данные)."""
+        """Облако — единственный источник списка таблиц для всех ПК."""
         if not self.client or not self._registry_configured():
             return ("skip", None)
         registry_id = self.config_data.registry_spreadsheet_id
         sheet = self.config_data.registry_sheet or DEFAULT_REGISTRY_SHEET
         remote = self.client.pull_table_registry(registry_id, sheet)
         local = usable_refs(merge_tables(self.config_data.sources, self.config_data.destinations))
+        # Пустой облачный список + есть локальный кэш → один раз заливаем в облако.
         if not remote and local:
             self.client.push_table_registry(registry_id, local, sheet)
             return ("seeded", len(local))
-        if remote and tables_signature(remote) != tables_signature(local):
-            return ("pull", remote)
-        return ("ok", len(remote))
+        # Облако главное: всегда подтягиваем, даже если локально что-то другое.
+        if remote:
+            if tables_signature(remote) != tables_signature(local):
+                return ("pull", remote)
+            return ("ok", len(remote))
+        return ("ok", 0)
 
     def _sync_registry_async(self, *, then_reload: bool = False) -> None:
         if not self.client:
@@ -1109,12 +1113,9 @@ class SheetsHubApp(ctk.CTk):
             return
         if not self._registry_configured():
             if then_reload:
-                if self._valid_sources():
-                    self.reload_all()
-                else:
-                    self._set_status(
-                        "Укажите таблицы в «Таблицы» и ссылку на общий список (registry)."
-                    )
+                self._set_status(
+                    "Нужна служебная Google-таблица для общего списка. Откройте «Таблицы»."
+                )
             return
         if self._registry_syncing or self._tables_dialog_open or self._booking_open:
             if then_reload and self._valid_sources() and self._jobs == 0:
@@ -2277,8 +2278,8 @@ class SheetsHubApp(ctk.CTk):
         self._run_bg(work, done)
 
     def _open_tables_dialog(self) -> None:
-        dialog = self._dialog("Таблицы", "920x520")
-        dialog.minsize(720, 400)
+        dialog = self._dialog("Таблицы", "920x540")
+        dialog.minsize(720, 420)
         dialog.grid_columnconfigure(0, weight=1)
         dialog.grid_rowconfigure(2, weight=1)
         self._tables_dialog_open = True
@@ -2330,22 +2331,26 @@ class SheetsHubApp(ctk.CTk):
         sync_box.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(
             sync_box,
-            text="Общий список (для всех ПК)",
+            text="Список таблиц общий для всех компьютеров",
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=TEXT,
-        ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 2))
+        ).grid(row=0, column=0, columnspan=3, sticky="w", padx=12, pady=(10, 2))
         ctk.CTkLabel(
             sync_box,
-            text="Отдельная Google-таблица: шарьте её на сервисный аккаунт как Редактор. "
-            "Лист по умолчанию — SheetsHub.",
+            text="Один раз: создайте пустую Google-таблицу (не календарь), откройте её для "
+            f"{email or 'сервисного аккаунта'} как Редактор и вставьте ссылку ниже. "
+            "Дальше все ПК берут один и тот же список таблиц из облака.",
             text_color=MUTED,
             font=ctk.CTkFont(size=11),
-            wraplength=700,
+            wraplength=780,
             justify="left",
         ).grid(row=1, column=0, columnspan=3, sticky="w", padx=12, pady=(0, 6))
-        registry_var = tk.StringVar(value=self.config_data.registry_spreadsheet_id or "")
+        raw_reg = (self.config_data.registry_spreadsheet_id or "").strip()
+        if raw_reg.upper().startswith("PASTE_"):
+            raw_reg = ""
+        registry_var = tk.StringVar(value=raw_reg)
         sheet_var = tk.StringVar(value=self.config_data.registry_sheet or DEFAULT_REGISTRY_SHEET)
-        ctk.CTkLabel(sync_box, text="Ссылка", text_color=MUTED, font=ctk.CTkFont(size=11)).grid(
+        ctk.CTkLabel(sync_box, text="Служебная таблица", text_color=MUTED, font=ctk.CTkFont(size=11)).grid(
             row=2, column=0, sticky="w", padx=12, pady=(0, 10)
         )
         _styled_entry(
@@ -2358,9 +2363,19 @@ class SheetsHubApp(ctk.CTk):
             row=2, column=2, sticky="e", padx=(4, 12), pady=(0, 10)
         )
 
-        tables = self._tables()
-        editor = _RefList(dialog, "Таблицы", tables, "Таблица")
+        editor = _RefList(
+            dialog,
+            "Рабочие таблицы (общие)",
+            self._tables(),
+            "Таблица",
+            subtitle="Этот список одинаковый на всех ПК. Добавили здесь — появится везде после сохранения.",
+        )
         editor.frame.grid(row=2, column=0, sticky="nsew", padx=16, pady=(0, 8))
+
+        status_var = tk.StringVar(value="")
+        ctk.CTkLabel(dialog, textvariable=status_var, text_color=MUTED, font=ctk.CTkFont(size=11)).grid(
+            row=3, column=0, sticky="w", padx=20, pady=(0, 4)
+        )
 
         def close_dialog() -> None:
             self._tables_dialog_open = False
@@ -2369,44 +2384,29 @@ class SheetsHubApp(ctk.CTk):
             except Exception:
                 pass
 
-        def save() -> None:
-            refs = editor.collect()
+        def load_from_cloud() -> None:
             registry_id = registry_var.get().strip()
             registry_sheet = sheet_var.get().strip() or DEFAULT_REGISTRY_SHEET
-            self.config_data.sources = refs
-            self.config_data.destinations = list(refs)
-            self.config_data.registry_spreadsheet_id = registry_id
-            self.config_data.registry_sheet = registry_sheet
-            save_config(self.config_data)
-
             if not registry_id or registry_id.upper().startswith("PASTE_"):
-                messagebox.showwarning(
-                    "Нет общего списка",
-                    "Укажите ссылку на Google-таблицу «Общий список», "
-                    "чтобы таблицы появлялись на всех компьютерах.",
-                    parent=dialog,
-                )
-                close_dialog()
-                self.client = None
-                self._try_connect()
+                status_var.set("Сначала вставьте ссылку на служебную таблицу.")
                 return
-
             if not self.client:
-                close_dialog()
-                self._try_connect()
+                status_var.set("Нет подключения к Google — проверьте JSON ключа.")
                 return
-
-            self._set_status("Сохраняю общий список таблиц…")
+            status_var.set("Загружаю общий список…")
 
             def work():
-                self.client.push_table_registry(registry_id, refs, registry_sheet)
-                return len(refs)
+                return self.client.pull_table_registry(registry_id, registry_sheet)
 
-            def done(count) -> None:
-                self._set_status(f"Общий список сохранён: {count} таблиц")
-                close_dialog()
-                self.client = None
-                self._try_connect()
+            def done(refs) -> None:
+                editor.replace_refs(refs)
+                self.config_data.registry_spreadsheet_id = registry_id
+                self.config_data.registry_sheet = registry_sheet
+                if refs:
+                    self._apply_remote_tables(refs)
+                    status_var.set(f"Загружено из облака: {len(refs)} таблиц")
+                else:
+                    status_var.set("В облаке пока пусто — добавьте таблицы и сохраните.")
 
             def work_safe():
                 try:
@@ -2417,10 +2417,11 @@ class SheetsHubApp(ctk.CTk):
             def done_safe(payload) -> None:
                 kind, data = payload
                 if kind == "err":
+                    status_var.set(str(data).split("\n")[0])
                     messagebox.showerror(
-                        "Не удалось сохранить в облако",
+                        "Не удалось загрузить",
                         str(data)
-                        + "\n\nПроверьте: таблица общего списка открыта для сервисного аккаунта (Редактор).",
+                        + "\n\nОткройте служебную таблицу для сервисного аккаунта (Редактор).",
                         parent=dialog,
                     )
                     return
@@ -2428,8 +2429,70 @@ class SheetsHubApp(ctk.CTk):
 
             self._run_bg(work_safe, done_safe, alert=False)
 
-        self._primary_button(dialog, "Сохранить таблицы", save, 200).grid(row=3, column=0, pady=(0, 14))
+        def save() -> None:
+            refs = editor.collect()
+            registry_id = registry_var.get().strip()
+            registry_sheet = sheet_var.get().strip() or DEFAULT_REGISTRY_SHEET
+            if not registry_id or registry_id.upper().startswith("PASTE_"):
+                messagebox.showwarning(
+                    "Нужна служебная таблица",
+                    "Список таблиц общий для всех ПК.\n\n"
+                    "1) Создайте пустую Google-таблицу\n"
+                    "2) Откройте её для сервисного аккаунта как Редактор\n"
+                    "3) Вставьте ссылку в поле «Служебная таблица»\n"
+                    "4) Сохраните снова",
+                    parent=dialog,
+                )
+                return
+            if not refs:
+                messagebox.showwarning("Нет таблиц", "Добавьте хотя бы одну рабочую таблицу.", parent=dialog)
+                return
+            if not self.client:
+                messagebox.showerror("Нет подключения", "Сначала нужен рабочий credentials.json.", parent=dialog)
+                return
+
+            self.config_data.sources = refs
+            self.config_data.destinations = list(refs)
+            self.config_data.registry_spreadsheet_id = registry_id
+            self.config_data.registry_sheet = registry_sheet
+            save_config(self.config_data)
+            status_var.set("Сохраняю общий список в облако…")
+
+            def work_safe():
+                try:
+                    self.client.push_table_registry(registry_id, refs, registry_sheet)
+                    return ("ok", len(refs))
+                except Exception as exc:
+                    return ("err", exc)
+
+            def done_safe(payload) -> None:
+                kind, data = payload
+                if kind == "err":
+                    messagebox.showerror(
+                        "Не удалось сохранить в облако",
+                        str(data)
+                        + "\n\nСлужебная таблица должна быть открыта для сервисного аккаунта (Редактор).",
+                        parent=dialog,
+                    )
+                    return
+                self._set_status(f"Общий список сохранён: {data} таблиц — виден на всех ПК")
+                close_dialog()
+                self.client = None
+                self._try_connect()
+
+            self._run_bg(work_safe, done_safe, alert=False)
+
+        buttons = ctk.CTkFrame(dialog, fg_color="transparent")
+        buttons.grid(row=4, column=0, pady=(0, 14))
+        self._outline_button(buttons, "Загрузить из облака", load_from_cloud, 180).pack(
+            side="left", padx=(0, 8)
+        )
+        self._primary_button(buttons, "Сохранить для всех ПК", save, 200).pack(side="left")
         dialog.protocol("WM_DELETE_WINDOW", close_dialog)
+
+        # При открытии сразу тянем общий список, если ссылка уже есть.
+        if self._registry_configured() and self.client:
+            dialog.after(200, load_from_cloud)
 
 class _RefList:
     def __init__(
@@ -2438,6 +2501,8 @@ class _RefList:
         title: str,
         refs: list[SheetRef],
         placeholder: str,
+        *,
+        subtitle: str = "Одна ссылка: читаем и пишем сюда же. Лист — все или АВГУСТ 2026.",
     ) -> None:
         self.placeholder = placeholder
         self.rows: list[dict] = []
@@ -2457,10 +2522,12 @@ class _RefList:
         ).grid(row=0, column=0, sticky="w")
         ctk.CTkLabel(
             header,
-            text="Одна ссылка: читаем и пишем сюда же. Лист — все или АВГУСТ 2026.",
+            text=subtitle,
             text_color=MUTED,
             font=ctk.CTkFont(size=12),
             anchor="w",
+            wraplength=640,
+            justify="left",
         ).grid(row=1, column=0, sticky="w")
         ctk.CTkButton(
             header,
@@ -2495,6 +2562,19 @@ class _RefList:
         else:
             self.add_empty()
 
+    def replace_refs(self, refs: list[SheetRef]) -> None:
+        for row in list(self.rows):
+            try:
+                row["frame"].destroy()
+            except Exception:
+                pass
+        self.rows.clear()
+        self._next_row = 0
+        if refs:
+            for ref in refs:
+                self._add_row(ref)
+        else:
+            self.add_empty()
     def _layout_columns(self, widget) -> None:
         widget.grid_columnconfigure(0, weight=0, minsize=108)
         widget.grid_columnconfigure(1, weight=1, minsize=220)
