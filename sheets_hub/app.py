@@ -10,18 +10,7 @@ from typing import Callable
 import customtkinter as ctk
 import tkinter as tk
 
-from sheets_hub.auth import (
-    AuthError,
-    build_authorization_url,
-    clear_user_login,
-    credential_kind,
-    finish_oauth_with_response_url,
-    has_saved_login,
-    listen_for_oauth_redirect,
-    load_last_email,
-    save_last_email,
-    token_path_near,
-)
+from sheets_hub.auth import credential_kind
 from sheets_hub.calendar_sheet import extract_phone, info_tone
 from sheets_hub.client import SheetsClient, SheetsError
 from sheets_hub.config import (
@@ -285,12 +274,11 @@ class SheetsHubApp(ctk.CTk):
 
         self.refresh_btn = self._primary_button(toolbar, "Обновить", self.reload_all, 120)
         self.refresh_btn.pack(side="left", padx=(0, 8))
-        self._outline_button(toolbar, "Сменить вход", self._change_operator, 120).pack(side="left", padx=(0, 8))
         self._outline_button(toolbar, "Таблицы", self._open_tables_dialog, 110).pack(side="left")
 
         self.account_label = ctk.CTkLabel(
             header,
-            text="Вход не выполнен",
+            text="Нет ключа доступа",
             text_color=MUTED,
             font=ctk.CTkFont(size=12),
             anchor="e",
@@ -892,9 +880,9 @@ class SheetsHubApp(ctk.CTk):
         if not hasattr(self, "account_label"):
             return
         if not text:
-            self.account_label.configure(text="Вход не выполнен", text_color=MUTED)
+            self.account_label.configure(text="Нет ключа доступа", text_color=MUTED)
         else:
-            self.account_label.configure(text=f"Оператор: {text}", text_color=GREEN)
+            self.account_label.configure(text=f"Сервис: {text}", text_color=GREEN)
 
     def _resolve_credentials_path(self) -> Path | None:
         found = find_credentials_file(self.config_data.credentials)
@@ -919,26 +907,19 @@ class SheetsHubApp(ctk.CTk):
                 self.after(200, self._ask_for_credentials)
             return
         kind = credential_kind(path)
-        if kind == "unknown":
+        if kind != "service_account":
             self.client = None
             self._set_account_label("")
-            self._set_status("credentials.json есть, но это не OAuth Desktop JSON.")
+            self._set_status("Нужен JSON сервисного аккаунта (type: service_account).")
             if prompt_key:
                 messagebox.showwarning(
                     "Неверный credentials.json",
                     f"Файл найден:\n{path}\n\n"
-                    "Нужен JSON OAuth-клиента Desktop из Google Cloud "
-                    "(внутри должен быть блок \"installed\"), "
-                    "а не обычный текст и не только example.",
+                    "Нужен JSON сервисного аккаунта из Google Cloud "
+                    "(поле \"type\": \"service_account\" и client_email).\n\n"
+                    "Каждую таблицу откройте для этого email с ролью «Редактор».",
                 )
                 self.after(200, self._ask_for_credentials)
-            return
-        if kind == "oauth_client" and not has_saved_login(path):
-            self.client = None
-            self._set_account_label("")
-            self._set_status("Файл найден. Один раз войдите почтой Google.")
-            if prompt_key:
-                self.after(200, self._show_operator_login)
             return
         if self._connecting:
             return
@@ -952,7 +933,7 @@ class SheetsHubApp(ctk.CTk):
             self.client = client
             email = client.service_email
             self._set_account_label(email)
-            self._set_status(f"Вход: {email}")
+            self._set_status(f"Доступ: {email}")
             if self._valid_sources():
                 self.reload_all()
             else:
@@ -968,11 +949,6 @@ class SheetsHubApp(ctk.CTk):
                 self.client = None
                 self._set_account_label("")
                 self._set_status(str(error).split("\n")[0])
-                msg = str(error)
-                if "Нет сохранённого входа" in msg or "Токен устарел" in msg:
-                    if prompt_key:
-                        self.after(200, self._show_operator_login)
-                    return
                 if isinstance(error, SheetsError):
                     messagebox.showwarning("Нет доступа к Google", str(error))
                 else:
@@ -994,90 +970,25 @@ class SheetsHubApp(ctk.CTk):
 
         threading.Thread(target=runner, daemon=True).start()
 
-    def _show_operator_login(self, parent=None) -> None:
-        path = self._resolve_credentials_path()
-        if path is None or credential_kind(path) != "oauth_client":
-            self._ask_for_credentials()
-            return
-
-        host = parent or self
-        dialog = self._dialog("Вход оператора", "520x280")
-        dialog.transient(host)
-        dialog.grab_set()
-
-        box = ctk.CTkFrame(dialog, fg_color=BG, corner_radius=10, border_width=1, border_color=LINE)
-        box.pack(fill="both", expand=True, padx=16, pady=16)
-
-        ctk.CTkLabel(
-            box,
-            text="Ваша рабочая почта Google",
-            font=ctk.CTkFont(size=16, weight="bold"),
-            text_color=TEXT,
-        ).pack(anchor="w", padx=14, pady=(12, 4))
-        ctk.CTkLabel(
-            box,
-            text="Один раз: почта → «Разрешить» в браузере. Дальше программа входит сама, "
-            "без повторного разрешения (пока не нажмёте «Сменить вход»).",
-            text_color=MUTED,
-            font=ctk.CTkFont(size=12),
-            wraplength=460,
-            justify="left",
-        ).pack(anchor="w", padx=14, pady=(0, 8))
-
-        email_var = tk.StringVar(value=load_last_email(path))
-        entry = _styled_entry(box, "name@company.com", textvariable=email_var, height=36)
-        entry.pack(fill="x", padx=14, pady=(0, 10))
-        entry.focus()
-
-        def submit() -> None:
-            email = email_var.get().strip()
-            if "@" not in email or "." not in email.split("@")[-1]:
-                messagebox.showwarning(
-                    "Почта",
-                    "Введите обычный адрес, например name@gmail.com",
-                    parent=dialog,
-                )
-                return
-            save_last_email(email, path)
-            dialog.destroy()
-            if self._google_login(login_hint=email):
-                self._try_connect(prompt_key=False)
-
-        entry.bind("<Return>", lambda _e: submit())
-        self._primary_button(box, "Продолжить", submit, 160).pack(anchor="e", padx=14, pady=(0, 14))
-
-    def _change_operator(self) -> None:
-        path = self._resolve_credentials_path() or self.config_data.credentials
-        if path.exists() and credential_kind(path) == "oauth_client":
-            clear_user_login(path)
-        self.client = None
-        self._set_account_label("")
-        self._set_status("Введите почту следующего оператора.")
-        self._show_operator_login()
-
     def _ask_for_credentials(self) -> None:
         expected = ROOT / "credentials.json"
         go = messagebox.askokcancel(
-            "Нужен файл приложения",
-            "Не найден рабочий OAuth Desktop JSON.\n\n"
+            "Нужен ключ сервисного аккаунта",
+            "Не найден JSON сервисного аккаунта.\n\n"
             f"Положите его сюда:\n{expected}\n\n"
-            "Имя файла лучше: credentials.json\n"
-            "(скачанный client_secret….json тоже подхватится).\n\n"
+            "Имя файла лучше: credentials.json\n\n"
             "Сейчас можно выбрать файл вручную.",
         )
         if not go:
             return
         if self._pick_credentials_file():
             save_config(self.config_data)
-            if credential_kind(self.config_data.credentials) == "oauth_client":
-                self._show_operator_login()
-            else:
-                self._try_connect(prompt_key=False)
+            self._try_connect(prompt_key=False)
 
     def _pick_credentials_file(self, parent=None) -> bool:
         chosen = filedialog.askopenfilename(
             parent=parent or self,
-            title="OAuth Desktop JSON (для администратора)",
+            title="JSON сервисного аккаунта",
             filetypes=[("JSON", "*.json"), ("Все файлы", "*.*")],
         )
         if not chosen:
@@ -1087,217 +998,16 @@ class SheetsHubApp(ctk.CTk):
         except Exception as exc:
             messagebox.showerror("Неверный ключ", str(exc), parent=parent or self)
             return False
-        self.config_data.credentials = installed
-        return True
-
-    def _google_login(self, parent=None, login_hint: str = "") -> bool:
-        path = self._resolve_credentials_path()
-        if path is None or credential_kind(path) != "oauth_client":
-            messagebox.showinfo(
-                "Нужен credentials.json",
-                f"Положите OAuth Desktop JSON сюда:\n{ROOT / 'credentials.json'}",
+        if credential_kind(installed) != "service_account":
+            messagebox.showerror(
+                "Неверный ключ",
+                "Нужен JSON сервисного аккаунта (type: service_account),\n"
+                "а не OAuth Desktop client.",
                 parent=parent or self,
             )
-            if not self._pick_credentials_file(parent=parent):
-                return False
-            path = self.config_data.credentials
-            save_config(self.config_data)
-        hint = (login_hint or load_last_email(path)).strip()
-        # Уже есть постоянный вход этой же почты — браузер не открываем.
-        if has_saved_login(path):
-            current = credentials_email(path)
-            if not hint or (current and current.lower() == hint.lower()) or "@" not in (current or ""):
-                return True
-            # Другая почта — сброс и новый одноразовый consent.
-            clear_user_login(path)
-        return self._oauth_guided_login(path, hint, parent=parent)
-
-    def _oauth_guided_login(self, path: Path, hint: str, parent=None) -> bool:
-        import queue
-        import webbrowser
-
-        try:
-            flow, auth_url = build_authorization_url(path, login_hint=hint)
-        except AuthError as exc:
-            messagebox.showerror("Вход", str(exc), parent=parent or self)
             return False
-
-        host = parent or self
-        dialog = self._dialog("Подтверждение Google", "640x460")
-        dialog.transient(host)
-        dialog.grab_set()
-        done = {"ok": False}
-        events: queue.Queue = queue.Queue()
-
-        box = ctk.CTkFrame(dialog, fg_color=BG, corner_radius=10, border_width=1, border_color=LINE)
-        box.pack(fill="both", expand=True, padx=16, pady=16)
-
-        ctk.CTkLabel(
-            box,
-            text="Войдите в Google",
-            font=ctk.CTkFont(size=16, weight="bold"),
-            text_color=TEXT,
-        ).pack(anchor="w", padx=14, pady=(12, 4))
-        ctk.CTkLabel(
-            box,
-            text=(
-                "Не закрывайте это окно, пока не войдёте.\n\n"
-                "1) «Открыть браузер» → войдите почтой.\n"
-                "2) Один раз нажмите «Разрешить» — это сохраняется на этом ПК.\n"
-                "3) Если браузер пишет про 127.0.0.1 — скопируйте адрес с ?code= "
-                "из строки и вставьте ниже.\n"
-                "4) Не нажимайте «Перезагрузить» на странице 127.0.0.1."
-            ),
-            text_color=MUTED,
-            font=ctk.CTkFont(size=12),
-            wraplength=580,
-            justify="left",
-        ).pack(anchor="w", padx=14, pady=(0, 8))
-
-        status_var = tk.StringVar(value="Готовлю приём входа…")
-        ctk.CTkLabel(box, textvariable=status_var, text_color=GREEN, anchor="w").pack(
-            anchor="w", padx=14, pady=(0, 6)
-        )
-
-        paste_var = tk.StringVar()
-        paste = _styled_entry(
-            box,
-            "http://127.0.0.1:8765/?code=…",
-            textvariable=paste_var,
-            height=34,
-        )
-        paste.pack(fill="x", padx=14, pady=(0, 8))
-
-        btns = ctk.CTkFrame(box, fg_color="transparent")
-        btns.pack(fill="x", padx=14, pady=(0, 12))
-
-        def open_browser() -> None:
-            webbrowser.open(auth_url, new=1, autoraise=True)
-            status_var.set("Браузер открыт. После входа вернитесь сюда — окно не закрывайте.")
-
-        def copy_link() -> None:
-            try:
-                dialog.clipboard_clear()
-                dialog.clipboard_append(auth_url)
-                status_var.set("Ссылка скопирована — вставьте в Edge или Firefox.")
-            except Exception:
-                status_var.set("Не удалось скопировать — откройте браузер кнопкой ниже.")
-
-        def finish_with_url(response_url: str) -> None:
-            status_var.set("Обмениваю код на вход…")
-            paste.configure(state="disabled")
-
-            def work():
-                finish_oauth_with_response_url(
-                    flow,
-                    response_url,
-                    client_secrets_path=path,
-                    login_hint=hint,
-                )
-
-            def done_ok(_=None) -> None:
-                done["ok"] = True
-                try:
-                    dialog.destroy()
-                except Exception:
-                    pass
-
-            def done_err(exc: BaseException) -> None:
-                try:
-                    paste.configure(state="normal")
-                except Exception:
-                    pass
-                messagebox.showerror("Вход не выполнен", str(exc), parent=dialog)
-                status_var.set("Не вышло — проверьте адрес или попробуйте снова.")
-
-            def runner() -> None:
-                try:
-                    work()
-                except Exception as exc:
-                    self.after(0, lambda e=exc: done_err(e))
-                    return
-                self.after(0, done_ok)
-
-            threading.Thread(target=runner, daemon=True).start()
-
-        def submit_paste() -> None:
-            text = paste_var.get().strip()
-            if not text:
-                messagebox.showwarning("Адрес", "Вставьте адрес из строки браузера.", parent=dialog)
-                return
-            if "code=" not in text and not text.startswith("4/"):
-                messagebox.showwarning(
-                    "Нет кода",
-                    "В адресе должен быть ?code=…\n"
-                    "Кликните в строку адреса браузера (даже на странице ошибки), "
-                    "скопируйте всё целиком и вставьте сюда.",
-                    parent=dialog,
-                )
-                return
-            finish_with_url(text)
-
-        def show_admin_help() -> None:
-            messagebox.showinfo(
-                "Подсказка",
-                "Ошибка «127.0.0.1 не позволяет установить соединение» после Google — "
-                "часто нормально.\n\n"
-                "Скопируйте адрес из строки браузера с ?code= и вставьте в программу.\n\n"
-                "Если снова 403 access_denied — в Google Cloud → OAuth consent screen "
-                "добавьте почту в Test users.",
-                parent=dialog,
-            )
-
-        self._primary_button(btns, "Открыть браузер", open_browser, 150).pack(side="left", padx=(0, 8))
-        self._outline_button(btns, "Скопировать ссылку", copy_link, 160).pack(side="left", padx=(0, 8))
-        self._outline_button(btns, "Что проверить", show_admin_help, 130).pack(side="left")
-        self._primary_button(box, "Готово — я вставил адрес", submit_paste, 220).pack(
-            anchor="e", padx=14, pady=(0, 12)
-        )
-
-        ready = threading.Event()
-
-        def listener() -> None:
-            try:
-                response_url = listen_for_oauth_redirect(timeout=300, ready=ready)
-                events.put(("ok", response_url))
-            except Exception as exc:
-                ready.set()
-                events.put(("err", str(exc)))
-
-        threading.Thread(target=listener, daemon=True).start()
-
-        def open_when_ready(attempt: int = 0) -> None:
-            if done["ok"] or not dialog.winfo_exists():
-                return
-            if ready.is_set():
-                status_var.set("Приём готов. Открываю браузер…")
-                open_browser()
-                return
-            if attempt > 50:
-                status_var.set("Приём не поднялся — используйте вставку адреса вручную.")
-                open_browser()
-                return
-            dialog.after(100, lambda: open_when_ready(attempt + 1))
-
-        dialog.after(100, open_when_ready)
-
-        def poll() -> None:
-            if done["ok"] or not dialog.winfo_exists():
-                return
-            try:
-                while True:
-                    kind, payload = events.get_nowait()
-                    if kind == "ok":
-                        finish_with_url(payload)
-                        return
-                    status_var.set(payload)
-            except queue.Empty:
-                pass
-            dialog.after(400, poll)
-
-        poll()
-        dialog.wait_window()
-        return bool(done["ok"])
+        self.config_data.credentials = installed
+        return True
 
     def _run_bg(self, work: Callable, done: Callable, *, alert: bool = True) -> None:
         self._jobs += 1
@@ -1549,18 +1259,10 @@ class SheetsHubApp(ctk.CTk):
                     title = "Нет связи с Google"
                     share = ""
                     if self.client and getattr(self.client, "service_email", ""):
-                        kind = getattr(self.client, "auth_kind", "")
-                        if kind == "oauth_client":
-                            share = (
-                                f"\n\nСейчас вход: {self.client.service_email}\n"
-                                "Войдите аккаунтом с доступом к таблице "
-                                "или откройте таблицу для этого аккаунта."
-                            )
-                        else:
-                            share = (
-                                f"\n\nТаблицу откройте для доступа:\n{self.client.service_email}\n"
-                                "(роль «Редактор» в Google Таблице)."
-                            )
+                        share = (
+                            f"\n\nТаблицу откройте для доступа:\n{self.client.service_email}\n"
+                            "(роль «Редактор» в Google Таблице)."
+                        )
                     message = (
                         "Таблица не загрузилась из Google.\n"
                         "Отключите VPN, выключите проверку HTTPS в антивирусе и нажмите «Повторить»."
@@ -2336,13 +2038,11 @@ class SheetsHubApp(ctk.CTk):
             email = self.client.service_email
         elif creds_path.exists():
             email = credentials_email(creds_path)
-        if email and "OAuth" in email:
-            email = load_last_email(creds_path) or email
-        email_var = tk.StringVar(value=email or "ещё не вошли")
+        email_var = tk.StringVar(value=email or "ключ не выбран")
 
         ctk.CTkLabel(
             account,
-            text="Оператор",
+            text="Сервисный аккаунт",
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=TEXT,
         ).grid(row=0, column=0, sticky="w", padx=12, pady=10)
@@ -2350,23 +2050,8 @@ class SheetsHubApp(ctk.CTk):
             row=0, column=1, sticky="ew", padx=8, pady=10
         )
 
-        def do_login() -> None:
-            dialog.destroy()
-            self._show_operator_login()
-
-        def do_switch() -> None:
-            dialog.destroy()
-            self._change_operator()
-
-        self._primary_button(account, "Войти / почта", do_login, 130).grid(
-            row=0, column=2, padx=(8, 4), pady=10
-        )
-        self._outline_button(account, "Сменить", do_switch, 100).grid(
-            row=0, column=3, padx=(4, 12), pady=10
-        )
-
         adv = ctk.CTkFrame(account, fg_color="transparent")
-        adv.grid(row=1, column=0, columnspan=4, sticky="ew", padx=8, pady=(0, 8))
+        adv.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 8))
         adv.grid_columnconfigure(1, weight=1)
         path_var = tk.StringVar(value=str(creds_path))
 
@@ -2377,7 +2062,7 @@ class SheetsHubApp(ctk.CTk):
                 email_var.set(credentials_email(installed) or installed.name)
                 save_config(self.config_data)
 
-        ctk.CTkLabel(adv, text="Файл приложения (админ)", text_color=MUTED, font=ctk.CTkFont(size=11)).grid(
+        ctk.CTkLabel(adv, text="JSON ключа", text_color=MUTED, font=ctk.CTkFont(size=11)).grid(
             row=0, column=0, sticky="w", padx=4
         )
         _styled_entry(adv, "credentials.json", textvariable=path_var, height=28).grid(

@@ -45,23 +45,17 @@ python -m sheets_hub
 
 ## Доступ к Google Таблицам
 
-Рекомендуемый способ — **вход вашим Google-аккаунтом** (OAuth Desktop). Тогда запись идёт от вашего email, без расшаривания на service account.
+Используется **один сервисный аккаунт** (одна почта вида `…@….iam.gserviceaccount.com`).
 
 1. Откройте [Google Cloud Console](https://console.cloud.google.com/).
 2. Создайте проект → **APIs & Services → Enable APIs** → включите **Google Sheets API**.
-3. **APIs & Services → OAuth consent screen** — тип External (или Internal), добавьте себя в **Test users**, если приложение в режиме Testing.
-4. **Credentials → Create credentials → OAuth client ID** → тип **Desktop app** → скачайте JSON.
-5. В программе: **Таблицы → Выбрать JSON…** → этот файл → операторы потом только вводят свою почту.
-6. Войдите тем аккаунтом, у которого уже есть доступ к таблицам (например Editor).
+3. **Credentials → Create credentials → Service account** → создайте аккаунт → **Keys → Add key → JSON**.
+4. Сохраните файл как `credentials.json` рядом с программой (или **Таблицы → JSON…**).
+5. Каждую рабочую таблицу откройте для `client_email` из JSON с ролью **Редактор**.
 
-Рядом с программой появятся `credentials.json` (клиент) и `token.json` (вход оператора). Их не коммитьте.
+Операторам вход через браузер не нужен: все пишут от имени этой одной почты.
 
-**Для операторов:** достаточно ввести свою Google-почту и один раз нажать «Разрешить» в браузере. JSON и Google Cloud им не нужны — файл приложения кладёт администратор один раз на ПК.
-
-### Старый способ (service account)
-
-По-прежнему можно указать JSON сервисного аккаунта. Тогда каждую таблицу нужно открыть для email вида `…@….iam.gserviceaccount.com` с ролью **Редактор**.
-
+`credentials.json` не коммитьте.
 ## Конфиг
 
 Скопируйте пример и подставьте свои таблицы:
@@ -108,12 +102,12 @@ build_exe.bat
 
 Готовый файл: `dist\SheetsHub\SheetsHub.exe`. Нужна **вся папка** `SheetsHub` вместе с `_internal` (один `.exe` без неё не запустится).
 
-В CI `credentials.json` кладётся в архив из GitHub Secret `SHEETS_HUB_OAUTH_JSON` (Settings → Secrets → Actions). Локально: скопируйте свой OAuth JSON в `packaging/bundled_credentials.json` перед `build_exe.bat`.
+В CI можно положить `credentials.json` в архив через GitHub Secret `SHEETS_HUB_CREDENTIALS_JSON`. Если секрета нет — положите SA JSON рядом с exe вручную. Локально: скопируйте JSON в `packaging/bundled_credentials.json` перед `build_exe.bat`.
 
 
 ## Важно
 
-- `credentials.json` и `token.json` — секреты. Не отправляйте их в чат и не коммитьте.
+- `credentials.json` — секрет. Не отправляйте его в чат и не коммитьте.
 - Если таблиц много, Google может ненадолго ограничить частоту запросов. Тогда подождите минуту и нажмите «Обновить всё».
 - Двойной клик пишет в **исходную** таблицу и строку. Кнопки «Добавить» и «Внести в назначение» пишут в таблицу из списка **destinations**.
 - В таблице-назначении в первой строке должны быть заголовки колонок.

@@ -707,8 +707,8 @@ class SheetsClient:
         if not credentials_path.exists():
             raise SheetsError(
                 "Нет файла входа Google.\n"
-                "Нажмите «Таблицы» → «Выбрать JSON…» и укажите OAuth Desktop JSON "
-                "из Google Cloud (или старый service account JSON)."
+                "Нажмите «Таблицы» → «JSON…» и укажите JSON сервисного аккаунта "
+                "из Google Cloud (type: service_account)."
             )
         self._credentials_path = credentials_path
         self.read_only_public = False
@@ -1164,20 +1164,11 @@ class SheetsClient:
 
         if not ok:
             account = getattr(self, "service_email", "") or ""
-            kind = getattr(self, "auth_kind", "") or credential_kind(self._credentials_path)
-            if kind == "oauth_client":
-                tip = (
-                    f"Аккаунт входа: {account}\n"
-                    "1) Войдите тем Google, у которого есть права на таблицу.\n"
-                    "2) Отключите VPN и проверку HTTPS в антивирусе.\n"
-                    "3) При необходимости снова нажмите «Войти через Google»."
-                )
-            else:
-                tip = (
-                    f"Сервисный аккаунт: {account}\n"
-                    "1) Выдайте ему роль «Редактор» на эту таблицу.\n"
-                    "2) Отключите VPN и проверку HTTPS в антивирусе."
-                )
+            tip = (
+                f"Сервисный аккаунт: {account}\n"
+                "1) Выдайте ему роль «Редактор» на эту таблицу.\n"
+                "2) Отключите VPN и проверку HTTPS в антивирусе."
+            )
             raise SheetsError(
                 "Не удалось записать в Google Таблицу.\n"
                 f"{tip}\n"

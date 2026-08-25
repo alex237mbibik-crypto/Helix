@@ -116,22 +116,18 @@ def credentials_email(path: Path) -> str:
 
 
 def install_google_credentials(source: Path, dest: Path | None = None) -> Path:
-    """Копирует service account или OAuth Desktop client JSON в credentials.json."""
+    """Копирует JSON сервисного аккаунта в credentials.json."""
     target = dest or (ROOT / "credentials.json")
     source = source.expanduser().resolve()
     if not source.exists():
         raise FileNotFoundError(source)
     data = json.loads(source.read_text(encoding="utf-8"))
-    kind = "unknown"
-    if data.get("type") == "service_account" and data.get("client_email"):
-        kind = "service_account"
-    elif isinstance(data.get("installed"), dict) or isinstance(data.get("web"), dict):
-        kind = "oauth_client"
-    if kind == "unknown":
+    if data.get("type") != "service_account" or not data.get("client_email"):
         raise ValueError(
-            "Нужен JSON из Google Cloud:\n"
-            "• OAuth: APIs & Services → Credentials → OAuth client → Desktop → скачать JSON\n"
-            "• или Service Account JSON (старый способ)."
+            "Нужен JSON сервисного аккаунта из Google Cloud:\n"
+            "APIs & Services → Credentials → Create credentials → Service account → "
+            "Keys → Add key → JSON.\n"
+            "В файле должны быть поля type=service_account и client_email."
         )
     target.parent.mkdir(parents=True, exist_ok=True)
     if source != target.resolve():
@@ -555,7 +551,7 @@ def load_gspread_credentials(credentials_path: Path, *, interactive: bool = Fals
         )
     raise AuthError(
         "Нет подходящего credentials.json.\n"
-        "Скачайте OAuth Desktop JSON в Google Cloud и выберите его в «Таблицы»."
+        "Скачайте JSON сервисного аккаунта в Google Cloud и выберите его в «Таблицы»."
     )
 
 

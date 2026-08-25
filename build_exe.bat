@@ -17,5 +17,5 @@ echo.
 echo Готово: dist\SheetsHub\SheetsHub.exe
 echo Нужна вся папка dist\SheetsHub вместе с _internal
 if exist dist\SheetsHub\credentials.json echo credentials.json уже лежит в папке сборки
-echo После входа появится token.json
+echo Таблицы нужно открыть для client_email из credentials.json (Редактор)
 pause
