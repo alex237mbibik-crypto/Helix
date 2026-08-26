@@ -181,7 +181,9 @@ class SheetsHubApp(ctk.CTk):
         self._search_after_id: str | None = None
         self._render_after_id: str | None = None
         self._calendar_fp: tuple | None = None
+        self._calendar_struct_fp: tuple | None = None
         self._slot_labels: dict[tuple[str, str], tk.Label] = {}
+        self._info_fp: tuple | None = None
         self._rendering = False
         self._connecting = False
         self._cal_draw_after_id: str | None = None
@@ -1173,9 +1175,13 @@ class SheetsHubApp(ctk.CTk):
             self._set_status("Нет таблиц. Откройте «Таблицы» и вставьте ссылку на Google Таблицу.")
             return
         selected_name = sources[0].name
-        # Замораживаем сетку до прихода данных — иначе Configure от статуса/кнопки её ломает.
-        self._cal_frozen = True
-        self._set_status(f"Читаю «{selected_name}»…")
+        # Мягкое обновление: не ломаем уже нарисованную сетку, пока грузятся данные.
+        quiet = bool(self._slot_labels)
+        if not quiet:
+            self._cal_frozen = True
+            self._set_status(f"Читаю «{selected_name}»…")
+        else:
+            self._set_status(f"Обновляю «{selected_name}»…")
 
         def work():
             return self.client.fetch_all(sources)
@@ -1197,7 +1203,7 @@ class SheetsHubApp(ctk.CTk):
                     self._suppress_source_trace = False
             raw_count = len(booking)
             self.records = explode_records(booking)
-            self._calendar_fp = None
+            # Не сбрасываем _calendar_fp — иначе каждые 30 с сетка мигает и пересобирается.
             extra = f" · {len(errors)} ошибок" if errors else ""
             if getattr(self.client, "read_only_public", False):
                 extra += " · чтение CSV"
@@ -1291,6 +1297,68 @@ class SheetsHubApp(ctk.CTk):
             ),
         )
 
+    def _calendar_structure_fp(self, records: list[Record]) -> tuple:
+        """Каркас сетки (даты/время) — без текста слотов."""
+        if not records:
+            return ()
+        dates = tuple(
+            dict.fromkeys(item.values.get("Дата", "") for item in records if item.values.get("Дата"))
+        )
+        times = list(
+            dict.fromkeys(item.values.get("Время", "") for item in records if item.values.get("Время"))
+        )
+        times.sort(key=_time_sort_key)
+        sample = records[0]
+        return (
+            sample.spreadsheet_id,
+            sample.sheet,
+            sample.source_name,
+            dates,
+            tuple(times),
+        )
+
+    def _slot_visual(self, record: Record) -> tuple[str, str, str, bool]:
+        status = record.values.get("Статус", "")
+        if status == "Не записывать":
+            return "не записывать", SLOT_BLOCKED, MUTED, False
+        if status == "Записывают":
+            return "записывают…", SLOT_LOCK, "#3e2723", True
+        if status == "Занято":
+            name = record.values.get("Клиент", "").strip() or "занято"
+            phone = record.values.get("Телефон", "").strip()
+            text = f"{name}\n{phone}" if phone and phone not in name else name
+            return text, SLOT_BOOKED, "#ffffff", True
+        return "запись", SLOT_GREEN, "#102910", False
+
+    def _patch_calendar_slots(self, records: list[Record]) -> bool:
+        """Обновить текст/цвет слотов на месте, без уничтожения сетки."""
+        if not self._slot_labels:
+            return False
+        cell_map = {
+            (item.values.get("Время", ""), item.values.get("Дата", "")): item for item in records
+        }
+        if set(cell_map.keys()) != set(self._slot_labels.keys()):
+            return False
+        for key, record in cell_map.items():
+            label = self._slot_labels.get(key)
+            if label is None:
+                return False
+            text, bg, fg, bold = self._slot_visual(record)
+            try:
+                label._record = record
+                label.configure(text=text, font=_ui_font(11, bold=bold), bg=bg, fg=fg)
+                cell = getattr(label, "_cell", None) or label.master
+                cell.configure(bg=bg)
+            except tk.TclError:
+                return False
+        self._apply_calendar_search_styles()
+        return True
+
+    def _on_slot_click(self, event) -> None:
+        record = getattr(event.widget, "_record", None)
+        if record is not None:
+            self._edit_calendar_cell(record)
+
     def _apply_calendar_search_styles(self) -> None:
         query = self.search_var.get().strip().lower()
         for (time, date), label in list(self._slot_labels.items()):
@@ -1331,25 +1399,7 @@ class SheetsHubApp(ctk.CTk):
         label = self._slot_labels.get(key)
         if label is None:
             return False
-        status = record.values.get("Статус", "")
-        if status == "Не записывать":
-            text = "не записывать"
-            bold = False
-            bg, fg = SLOT_BLOCKED, MUTED
-        elif status == "Записывают":
-            text = "записывают…"
-            bold = True
-            bg, fg = SLOT_LOCK, "#3e2723"
-        elif status == "Занято":
-            name = record.values.get("Клиент", "").strip() or "занято"
-            phone = record.values.get("Телефон", "").strip()
-            text = f"{name}\n{phone}" if phone and phone not in name else name
-            bold = True
-            bg, fg = SLOT_BOOKED, "#ffffff"
-        else:
-            text = "запись"
-            bold = False
-            bg, fg = SLOT_GREEN, "#102910"
+        text, bg, fg, bold = self._slot_visual(record)
         try:
             label._record = record
             label.configure(text=text, font=_ui_font(11, bold=bold), bg=bg, fg=fg)
@@ -1359,6 +1409,7 @@ class SheetsHubApp(ctk.CTk):
             return False
         calendar = [item for item in self._source_records() if item.layout == "calendar"]
         self._calendar_fp = self._calendar_fingerprint(calendar)
+        self._calendar_struct_fp = self._calendar_structure_fp(calendar)
         self._apply_calendar_search_styles()
         return True
     def _columns(self, records: list[Record]) -> list[str]:
@@ -1403,15 +1454,27 @@ class SheetsHubApp(ctk.CTk):
             if calendar:
                 self._show_calendar(True)
                 fp = self._calendar_fingerprint(calendar)
-                if fp != self._calendar_fp:
-                    self._draw_calendars(calendar)
-                    self._calendar_fp = fp
-                else:
+                struct = self._calendar_structure_fp(calendar)
+                if fp == self._calendar_fp:
                     self._apply_calendar_search_styles()
                     pending = getattr(self, "_status_after_draw", None)
                     if pending:
                         self._set_status(pending)
                         self._status_after_draw = None
+                elif (
+                    struct == self._calendar_struct_fp
+                    and self._slot_labels
+                    and self._patch_calendar_slots(calendar)
+                ):
+                    self._calendar_fp = fp
+                    pending = getattr(self, "_status_after_draw", None)
+                    if pending:
+                        self._set_status(pending)
+                        self._status_after_draw = None
+                else:
+                    self._draw_calendars(calendar)
+                    self._calendar_fp = fp
+                    self._calendar_struct_fp = struct
                 booked = sum(1 for item in calendar if item.values.get("Статус") == "Занято")
                 self._visible = calendar
                 self.count_label.configure(text=str(booked))
@@ -1419,6 +1482,7 @@ class SheetsHubApp(ctk.CTk):
 
             self._show_calendar(False)
             self._calendar_fp = None
+            self._calendar_struct_fp = None
             self._slot_labels = {}
             columns = self._columns(records)
             self.tree.configure(columns=columns)
@@ -1477,6 +1541,7 @@ class SheetsHubApp(ctk.CTk):
         self._slot_labels = {}
         self._cal_col_frames = {}
         self._cal_placed_cells = []
+        self._calendar_struct_fp = None
         self._cal_resizing = True
         try:
             for child in self.cal_host.winfo_children():
@@ -1504,6 +1569,10 @@ class SheetsHubApp(ctk.CTk):
     def _finish_calendar_draw(self) -> None:
         self._cal_draw_after_id = None
         self._cal_resizing = False
+        calendar = [item for item in self._source_records() if item.layout == "calendar"]
+        if calendar:
+            self._calendar_fp = self._calendar_fingerprint(calendar)
+            self._calendar_struct_fp = self._calendar_structure_fp(calendar)
         self._refresh_cal_scroll()
         self._apply_calendar_search_styles()
         pending = getattr(self, "_status_after_draw", None)
@@ -1665,19 +1734,7 @@ class SheetsHubApp(ctk.CTk):
         if record is None:
             self._cal_body_cell(parent, row, col, width, text="", bg=SLOT_BLOCKED, fg=MUTED)
             return
-        status = record.values.get("Статус", "")
-        if status == "Не записывать":
-            bg, fg, text = SLOT_BLOCKED, MUTED, "не записывать"
-        elif status == "Записывают":
-            bg, fg, text = SLOT_LOCK, "#3e2723", "записывают…"
-        elif status == "Занято":
-            name = record.values.get("Клиент", "").strip() or "занято"
-            phone = record.values.get("Телефон", "").strip()
-            text = f"{name}\n{phone}" if phone and phone not in name else name
-            bg, fg = SLOT_BOOKED, "#ffffff"
-        else:
-            # Тёмный текст на зелёном — иначе «запись» почти не читается.
-            bg, fg, text = SLOT_GREEN, "#102910", "запись"
+        text, bg, fg, bold = self._slot_visual(record)
         label = self._cal_body_cell(
             parent,
             row,
@@ -1686,7 +1743,7 @@ class SheetsHubApp(ctk.CTk):
             text=text,
             bg=bg,
             fg=fg,
-            font=_ui_font(11, bold=status in {"Занято", "Записывают"}),
+            font=_ui_font(11, bold=bold),
             wraplength=max(40, width - 14),
             justify="left",
             anchor="nw",
@@ -1694,7 +1751,7 @@ class SheetsHubApp(ctk.CTk):
         label._record = record
         label._cell = label.master
         self._slot_labels[(record.values.get("Время", ""), record.values.get("Дата", ""))] = label
-        label.bind("<Button-1>", lambda _event, item=record: self._edit_calendar_cell(item))
+        label.bind("<Button-1>", self._on_slot_click)
 
     def _edit_calendar_cell(self, record: Record) -> None:
         self._picked = record
@@ -1742,7 +1799,27 @@ class SheetsHubApp(ctk.CTk):
     def _render_views(self) -> None:
         self._render_table()
         # Справку после календаря — иначе update_idletasks в info ломает сетку на «Обновить».
-        self.after_idle(self._render_info)
+        self.after_idle(self._render_info_if_changed)
+
+    def _info_fingerprint(self) -> tuple:
+        items = self._filtered_info()
+        return tuple(
+            (
+                item.spreadsheet_id,
+                item.sheet,
+                item.row,
+                str(item.values.get("Текст") or ""),
+                str(item.values.get("_tone") or ""),
+            )
+            for item in items
+        )
+
+    def _render_info_if_changed(self) -> None:
+        fp = self._info_fingerprint()
+        if fp == self._info_fp and self.info_body.winfo_children():
+            return
+        self._info_fp = fp
+        self._render_info()
 
     def _active_sheet_key(self) -> tuple[str, str] | None:
         for record in self.records:
