@@ -184,6 +184,8 @@ class SheetsHubApp(ctk.CTk):
         self._calendar_struct_fp: tuple | None = None
         self._slot_labels: dict[tuple[str, str], tk.Label] = {}
         self._info_fp: tuple | None = None
+        self._info_struct_fp: tuple | None = None
+        self._info_cards: list[tk.Label] = []
         self._rendering = False
         self._connecting = False
         self._cal_draw_after_id: str | None = None
@@ -1814,11 +1816,64 @@ class SheetsHubApp(ctk.CTk):
             for item in items
         )
 
+    def _info_structure_fp(self, records: list[Record] | None = None) -> tuple:
+        items = records if records is not None else self._filtered_info()
+        return tuple((item.spreadsheet_id, item.sheet, item.row) for item in items)
+
+    def _info_has_cards(self) -> bool:
+        return bool(self._info_cards)
+
+    def _info_card_payloads(self, records: list[Record]) -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = []
+        for record in records:
+            text = str(record.values.get("Текст") or "").strip()
+            if not text:
+                text = "\n".join(
+                    str(value).strip()
+                    for key, value in record.values.items()
+                    if str(value).strip() and key not in HIDDEN
+                )
+            if not text:
+                continue
+            tone = str(record.values.get("_tone") or info_tone(text) or "info")
+            out.append((text, tone))
+        return out
+
+    def _patch_info_cards(self, payloads: list[tuple[str, str]]) -> bool:
+        if not self._info_cards or len(self._info_cards) != len(payloads):
+            return False
+        wrap = max(480, self.winfo_width() - 80) if self.winfo_width() > 100 else 980
+        for card, (text, tone) in zip(self._info_cards, payloads):
+            bg, fg = INFO_TONES.get(tone, INFO_TONES["info"])
+            try:
+                card.configure(
+                    text=text,
+                    bg=bg,
+                    fg=fg,
+                    font=_ui_font(12, bold=tone in {"warn", "ok"}),
+                    wraplength=wrap,
+                )
+            except tk.TclError:
+                return False
+        return True
+
     def _render_info_if_changed(self) -> None:
+        records = self._filtered_info()
         fp = self._info_fingerprint()
-        if fp == self._info_fp and self.info_body.winfo_children():
+        struct = self._info_structure_fp(records)
+        if fp == self._info_fp and self._info_has_cards():
+            return
+        payloads = self._info_card_payloads(records)
+        if (
+            struct == self._info_struct_fp
+            and self._info_has_cards()
+            and len(payloads) == len(self._info_cards)
+            and self._patch_info_cards(payloads)
+        ):
+            self._info_fp = fp
             return
         self._info_fp = fp
+        self._info_struct_fp = struct
         self._render_info()
 
     def _active_sheet_key(self) -> tuple[str, str] | None:
@@ -1891,6 +1946,7 @@ class SheetsHubApp(ctk.CTk):
         return self._info_scroll if self._info_scroll is not None else self.info_body
 
     def _reset_info_host(self, *, scrollable: bool) -> ctk.CTkFrame:
+        self._info_cards = []
         if self._info_scroll is not None:
             self._info_scroll.destroy()
             self._info_scroll = None
@@ -1935,6 +1991,8 @@ class SheetsHubApp(ctk.CTk):
         records = self._filtered_info()
         if not records:
             self._reset_info_host(scrollable=False)
+            self._info_cards = []
+            self._info_struct_fp = None
             self.info_wrap.grid_remove()
             return
         self.info_wrap.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 8))
@@ -1944,12 +2002,15 @@ class SheetsHubApp(ctk.CTk):
         cards = self._fill_info_cards(host, records)
         if not cards:
             self.info_wrap.grid_remove()
+            self._info_cards = []
             return
         self.update_idletasks()
         need_scroll = host.winfo_reqheight() > self._info_max_h
         if need_scroll:
             host = self._reset_info_host(scrollable=True)
-            self._fill_info_cards(host, records)
+            cards = self._fill_info_cards(host, records)
+        self._info_cards = cards
+        self._info_struct_fp = self._info_structure_fp(records)
 
     def _fill_info_cards(self, host, records: list[Record]) -> list[tk.Label]:
         cards: list[tk.Label] = []
