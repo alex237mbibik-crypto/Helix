@@ -272,6 +272,13 @@ def _info_record(
     )
 
 
+def _first_text_col(row: list[str]) -> int:
+    for idx, cell in enumerate(row):
+        if (cell or "").strip():
+            return idx + 1
+    return 1
+
+
 def parse_info_rows(
     rows: list[list[str]],
     source: SheetRef,
@@ -289,7 +296,9 @@ def parse_info_rows(
         text = _row_text(row)
         if not text:
             continue
-        records.append(_info_record(source, spreadsheet_id, offset, text))
+        records.append(
+            _info_record(source, spreadsheet_id, offset, text, col=_first_text_col(row))
+        )
     return records
 
 

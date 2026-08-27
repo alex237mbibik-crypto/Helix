@@ -56,14 +56,148 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 _RETRY_ATTEMPTS = 2
 _HTTP_TIMEOUT = (3, 8)
 _PROBE_TIMEOUT = (2, 5)
+_CURL_MAX_TIME = "8"
+_CURL_CONNECT = "3"
+_CURL_TIMEOUT = 10
+_PS_TIMEOUT_SEC = 8
+_PS_SUBPROCESS_TIMEOUT = 10
 _TOKEN_URL = "https://oauth2.googleapis.com/token"
 _SHEETS_VALUES_URL = "https://sheets.googleapis.com/v4/spreadsheets/{sid}/values/{range}"
 # Больше 38 строк календаря на практике не нужно — быстрее загрузка и легче UI.
 MAX_SHEET_ROWS = 38
+# Кэш списка вкладок (htmlview) — не качать при каждом «Обновить».
+_SHEET_LIST_TTL_SEC = 300
+_SHEET_LIST_CACHE: dict[str, tuple[float, list[tuple[str, str]]]] = {}
+# spreadsheet_id -> {sheet_title: gid}
+_SHEET_GID_CACHE: dict[str, dict[str, str]] = {}
+# Какой способ скачивания CSV сработал в этот раз — пробуем его первым.
+_PUBLIC_FETCH_PREF: str = ""
+_PREFERRED_CALENDAR_SHEET: dict[str, str] = {}
+# Цвета заливки: spreadsheet_id|sheet → (ts, {(row, col): "#rrggbb"})
+_COLOR_CACHE: dict[str, tuple[float, dict[tuple[int, int], str]]] = {}
+_COLOR_CACHE_TTL_SEC = 180
 
 
 class SheetsError(Exception):
     pass
+
+
+def _rgb_dict_to_hex(color: dict | None) -> str | None:
+    if not isinstance(color, dict):
+        return None
+    r = float(color.get("red", 0) or 0)
+    g = float(color.get("green", 0) or 0)
+    b = float(color.get("blue", 0) or 0)
+    ri, gi, bi = int(round(r * 255)), int(round(g * 255)), int(round(b * 255))
+    # Пустая / почти белая заливка — как «нет цвета» для UI.
+    if ri >= 250 and gi >= 250 and bi >= 250:
+        return None
+    if ri + gi + bi < 8:
+        return None
+    return f"#{ri:02x}{gi:02x}{bi:02x}"
+
+
+def contrast_fg(bg_hex: str) -> str:
+    raw = (bg_hex or "").lstrip("#")
+    if len(raw) != 6:
+        return "#202124"
+    try:
+        r, g, b = int(raw[0:2], 16), int(raw[2:4], 16), int(raw[4:6], 16)
+    except ValueError:
+        return "#202124"
+    lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+    return "#202124" if lum > 0.55 else "#ffffff"
+
+
+def _fetch_sheet_colors(
+    credentials_path: Path,
+    spreadsheet_id: str,
+    sheet: str,
+    *,
+    max_rows: int = MAX_SHEET_ROWS,
+    max_cols: int = 40,
+) -> dict[tuple[int, int], str]:
+    """Цвета заливки ячеек через Sheets API includeGridData."""
+    title = (sheet or "").strip() or "Sheet1"
+    cache_key = f"{spreadsheet_id}|{title}"
+    now = time.time()
+    cached = _COLOR_CACHE.get(cache_key)
+    if cached and (now - cached[0]) < _COLOR_CACHE_TTL_SEC:
+        return cached[1]
+
+    safe = title.replace("'", "''")
+    cell_range = f"'{safe}'!A1:{_col_to_a1(max_cols)}{max_rows}"
+    fields = (
+        "sheets.data.rowData.values.effectiveFormat.backgroundColor,"
+        "sheets.data.rowData.values.userEnteredFormat.backgroundColor"
+    )
+    token = _access_token(credentials_path)
+    url = (
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}"
+        f"?includeGridData=true"
+        f"&ranges={quote(cell_range, safe='')}"
+        f"&fields={quote(fields, safe='')}"
+    )
+    data: dict = {}
+    try:
+        data = _curl_json("GET", url, headers={"Authorization": f"Bearer {token}"})
+    except Exception:
+        try:
+            response = requests.get(
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=25,
+                verify=False,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except Exception:
+            return cached[1] if cached else {}
+
+    colors: dict[tuple[int, int], str] = {}
+    sheets = data.get("sheets") or []
+    if not sheets:
+        return cached[1] if cached else {}
+    grid = (sheets[0].get("data") or [{}])[0]
+    for r_idx, row in enumerate(grid.get("rowData") or []):
+        values = row.get("values") or []
+        for c_idx, cell in enumerate(values):
+            fmt = cell.get("effectiveFormat") or cell.get("userEnteredFormat") or {}
+            hex_color = _rgb_dict_to_hex(fmt.get("backgroundColor"))
+            if hex_color:
+                colors[(r_idx + 1, c_idx + 1)] = hex_color
+    if colors:
+        _COLOR_CACHE[cache_key] = (now, colors)
+    return colors
+
+
+def enrich_records_with_sheet_colors(
+    records: list[Record],
+    color_map: dict[tuple[int, int], str],
+) -> None:
+    if not records or not color_map:
+        return
+    by_row: dict[int, list[tuple[int, str]]] = {}
+    for (row, col), hex_c in color_map.items():
+        by_row.setdefault(row, []).append((col, hex_c))
+    for row in by_row:
+        by_row[row].sort(key=lambda item: item[0])
+
+    for record in records:
+        if record.layout == "calendar":
+            col = record.col_index.get("Клиент")
+            if not col:
+                continue
+            bg = color_map.get((record.row, int(col)))
+        else:
+            col = record.col_index.get("Текст")
+            bg = color_map.get((record.row, int(col))) if col else None
+            if not bg:
+                row_colors = by_row.get(record.row) or []
+                if row_colors:
+                    bg = row_colors[0][1]
+        if bg:
+            record.values["_bg"] = bg
 
 
 def _is_network_error(exc: BaseException) -> bool:
@@ -120,7 +254,15 @@ def _fetch_url_curl(url: str, *, insecure: bool = False) -> str:
     if not curl:
         raise OSError("curl не найден")
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    cmd = [curl, "-fsSL", "--max-time", "12", "--connect-timeout", "5", url]
+    cmd = [
+        curl,
+        "-fsSL",
+        "--max-time",
+        _CURL_MAX_TIME,
+        "--connect-timeout",
+        _CURL_CONNECT,
+        url,
+    ]
     if insecure:
         cmd.insert(1, "-k")
     else:
@@ -128,7 +270,7 @@ def _fetch_url_curl(url: str, *, insecure: bool = False) -> str:
     result = subprocess.run(
         cmd,
         capture_output=True,
-        timeout=15,
+        timeout=_CURL_TIMEOUT,
         creationflags=flags if sys.platform == "win32" else 0,
     )
     if result.returncode != 0:
@@ -141,16 +283,15 @@ def _fetch_url_powershell(url: str) -> str:
     if sys.platform != "win32":
         raise OSError("PowerShell доступен только в Windows")
     safe_url = url.replace("'", "''")
-    # Короткий таймаут, чтобы не висеть минутами при SSL-блоке.
     command = (
         "$ProgressPreference='SilentlyContinue'; "
-        f"(Invoke-WebRequest -Uri '{safe_url}' -UseBasicParsing -TimeoutSec 12).Content"
+        f"(Invoke-WebRequest -Uri '{safe_url}' -UseBasicParsing -TimeoutSec {_PS_TIMEOUT_SEC}).Content"
     )
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-Command", command],
         capture_output=True,
-        timeout=16,
+        timeout=_PS_SUBPROCESS_TIMEOUT,
         creationflags=flags,
     )
     if result.returncode != 0:
@@ -176,6 +317,7 @@ def _fetch_url_requests(url: str, *, verify: bool | str) -> str:
 
 
 def _fetch_public_csv(spreadsheet_id: str, sheet: str = "", gid: str = "") -> list[list[str]]:
+    global _PUBLIC_FETCH_PREF
     resolved_gid = str(gid or "").strip() or _lookup_sheet_gid(spreadsheet_id, sheet)
     url = _public_csv_url(spreadsheet_id, sheet=sheet if not resolved_gid else "", gid=resolved_gid)
     # Сначала самые быстрые варианты для Windows с битым SSL.
@@ -201,6 +343,9 @@ def _fetch_public_csv(spreadsheet_id: str, sheet: str = "", gid: str = "") -> li
     if ca:
         attempts.append(("Python + cacert.pem", lambda c=ca: _fetch_url_requests(url, verify=c)))
 
+    if _PUBLIC_FETCH_PREF:
+        attempts.sort(key=lambda item: 0 if item[0] == _PUBLIC_FETCH_PREF else 1)
+
     errors: list[str] = []
     for label, fetch in attempts:
         try:
@@ -208,6 +353,7 @@ def _fetch_public_csv(spreadsheet_id: str, sheet: str = "", gid: str = "") -> li
             rows = _parse_csv_text(text)
             if not rows:
                 raise SheetsError("пустой ответ")
+            _PUBLIC_FETCH_PREF = label
             return rows
         except Exception as exc:
             errors.append(f"{label}: {exc}")
@@ -217,10 +363,6 @@ def _fetch_public_csv(spreadsheet_id: str, sheet: str = "", gid: str = "") -> li
         + "\n".join(errors[-3:])
         + "\n\nОтключите VPN и проверку HTTPS в антивирусе."
     )
-
-
-# spreadsheet_id -> {sheet_title_lower: gid}
-_SHEET_GID_CACHE: dict[str, dict[str, str]] = {}
 
 
 def _lookup_sheet_gid(spreadsheet_id: str, sheet: str) -> str:
@@ -241,6 +383,13 @@ def _lookup_sheet_gid(spreadsheet_id: str, sheet: str) -> str:
 
 
 def _fetch_url_text(url: str) -> str:
+    if _PUBLIC_FETCH_PREF == "curl без проверки SSL" or (
+        sys.platform == "win32" and not _PUBLIC_FETCH_PREF
+    ):
+        try:
+            return _fetch_url_curl(url, insecure=True)
+        except Exception:
+            pass
     if sys.platform == "win32":
         try:
             return _fetch_url_curl(url, insecure=True)
@@ -256,12 +405,19 @@ def _fetch_url_text(url: str) -> str:
         return _fetch_url_requests(url, verify=session_verify_target())
 
 
-def _list_public_sheets(spreadsheet_id: str) -> list[tuple[str, str]]:
+def _list_public_sheets(spreadsheet_id: str, *, force: bool = False) -> list[tuple[str, str]]:
     """[(title, gid), ...] из публичной htmlview — без Sheets API."""
+    now = time.time()
+    cached = _SHEET_LIST_CACHE.get(spreadsheet_id)
+    if not force and cached and (now - cached[0]) < _SHEET_LIST_TTL_SEC:
+        return cached[1]
+
     url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/htmlview"
     try:
         text = _fetch_url_text(url)
     except Exception:
+        if cached:
+            return cached[1]
         return []
     pairs = re.findall(
         r'items\.push\(\{\s*name:\s*"([^"]+)"\s*,\s*pageUrl:\s*"([^"]+)"',
@@ -282,6 +438,8 @@ def _list_public_sheets(spreadsheet_id: str) -> list[tuple[str, str]]:
             gid_map[title] = gid
     if gid_map:
         _SHEET_GID_CACHE[spreadsheet_id] = gid_map
+    if out:
+        _SHEET_LIST_CACHE[spreadsheet_id] = (now, out)
     return out
 
 
@@ -968,6 +1126,8 @@ class SheetsClient:
         return _is_network_error(exc)
 
     def _load_source_public(self, source: SheetRef) -> list[Record]:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         sid = source.normalized_id()
         available: list[str] = []
         try:
@@ -976,18 +1136,46 @@ class SheetsClient:
             available = []
         # Не зовём Sheets API list_sheets здесь — на Windows это часто зависает
         # и весь UI остаётся на «Обновляю…».
-        parts = _parts_for_source(source, available or None)
+        preferred = _PREFERRED_CALENDAR_SHEET.get(sid, "")
+        if preferred and available and preferred in available:
+            parts = _parts_for_source(replace(source, sheet=preferred), available or None)
+        else:
+            parts = _parts_for_source(source, available or None)
         loaded: list[Record] = []
         errors: list[Exception] = []
-        for part in parts:
+
+        def fetch_part(part: SheetRef) -> tuple[SheetRef, list[Record] | None, Exception | None]:
             try:
-                loaded.extend(self._fetch_source_public(part))
+                return part, self._fetch_source_public(part), None
             except Exception as exc:
-                if is_info_ref(part) or is_info_title(part.sheet):
-                    continue
-                errors.append(exc)
+                return part, None, exc
+
+        workers = max(1, min(4, len(parts)))
+        if workers == 1:
+            results = [fetch_part(parts[0])] if parts else []
+        else:
+            results = []
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(fetch_part, part) for part in parts]
+                for fut in as_completed(futures):
+                    results.append(fut.result())
+
+        for part, rows, exc in results:
+            if rows is not None:
+                loaded.extend(rows)
+                continue
+            if exc is None:
+                continue
+            if is_info_ref(part) or is_info_title(part.sheet):
+                continue
+            errors.append(exc)
 
         has_calendar = any(item.layout == "calendar" for item in loaded)
+        if has_calendar:
+            for item in loaded:
+                if item.layout == "calendar" and item.sheet:
+                    _PREFERRED_CALENDAR_SHEET[sid] = item.sheet
+                    break
         # Если взяли только «УСЛУГИ», а календарь на другой вкладке — догружаем.
         if not has_calendar and available:
             for title in available:
@@ -1002,24 +1190,60 @@ class SheetsClient:
                 if any(item.layout == "calendar" for item in extra):
                     loaded.extend(extra)
                     has_calendar = True
-                    for info_title in companion_info_titles(available, title):
-                        if any(part.sheet == info_title for part in parts):
-                            continue
-                        try:
-                            loaded.extend(
-                                self._fetch_source_public(
-                                    replace(source, sheet=info_title, kind=KIND_INFO)
-                                )
-                            )
-                        except Exception:
-                            pass
+                    _PREFERRED_CALENDAR_SHEET[sid] = title
+                    info_parts = [
+                        replace(source, sheet=info_title, kind=KIND_INFO)
+                        for info_title in companion_info_titles(available, title)
+                        if not any(part.sheet == info_title for part in parts)
+                    ]
+                    if info_parts:
+                        with ThreadPoolExecutor(max_workers=min(4, len(info_parts))) as pool:
+                            for fut in as_completed(
+                                [pool.submit(self._fetch_source_public, p) for p in info_parts]
+                            ):
+                                try:
+                                    loaded.extend(fut.result())
+                                except Exception:
+                                    pass
                     break
 
         if loaded:
+            self._attach_sheet_colors(loaded)
             return loaded
         if errors:
             raise errors[0]
         raise SheetsError(f"Не удалось прочитать «{source.name}»")
+
+    def _attach_sheet_colors(self, records: list[Record]) -> None:
+        """Подтянуть заливку ячеек (цвет врача) — мягко, без падения чтения."""
+        if not records:
+            return
+        by_sheet: dict[tuple[str, str], list[Record]] = {}
+        for record in records:
+            key = (record.spreadsheet_id, record.sheet or "")
+            by_sheet.setdefault(key, []).append(record)
+
+        def one(sid: str, title: str, group: list[Record]) -> None:
+            try:
+                colors = _fetch_sheet_colors(self._credentials_path, sid, title)
+                enrich_records_with_sheet_colors(group, colors)
+            except Exception:
+                pass
+
+        items = [(sid, title, group) for (sid, title), group in by_sheet.items() if sid and title]
+        if len(items) == 1:
+            sid, title, group = items[0]
+            one(sid, title, group)
+            return
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        with ThreadPoolExecutor(max_workers=min(4, len(items))) as pool:
+            futures = [pool.submit(one, sid, title, group) for sid, title, group in items]
+            for fut in as_completed(futures):
+                try:
+                    fut.result()
+                except Exception:
+                    pass
 
     def _mark_public_read(self, source_name: str, spreadsheet_id: str = "") -> None:
         # Не вызываем probe_api здесь: на Windows SSL-запрос может зависнуть
@@ -1051,8 +1275,11 @@ class SheetsClient:
                     pass
 
             try:
+                batch: list[Record] = []
                 for part in self.expand_source(source):
-                    records.extend(self.fetch_source(part))
+                    batch.extend(self.fetch_source(part))
+                self._attach_sheet_colors(batch)
+                records.extend(batch)
             except Exception as exc:
                 if _can_try_public_read(source) and self._should_try_public_read(exc):
                     try:
@@ -1066,7 +1293,7 @@ class SheetsClient:
                     errors.append(f"{source.name}: {msg}")
         return records, errors
 
-    def update_cell(self, record: Record, field: str, value: str) -> None:
+    def update_cell(self, record: Record, field: str, value: str, *, confirm: bool = True) -> None:
         try:
             header = record.header_for(field)
         except KeyError as exc:
@@ -1187,34 +1414,35 @@ class SheetsClient:
             )
 
         expected = str(cell_value or "").strip()
-        read_attempts: list[Callable[[], str]] = []
-        if sys.platform == "win32":
-            read_attempts.append(lambda: _read_cell_via_curl(self._credentials_path, record.spreadsheet_id, record.sheet, record.row, col))
-            read_attempts.append(_read_requests_insecure)
-            read_attempts.append(_read_insecure)
-        else:
-            read_attempts.append(_read_gspread)
-            read_attempts.append(lambda: _read_cell_via_curl(self._credentials_path, record.spreadsheet_id, record.sheet, record.row, col))
-            read_attempts.append(_read_requests_insecure)
-            read_attempts.append(_read_insecure)
+        if confirm:
+            read_attempts: list[Callable[[], str]] = []
+            if sys.platform == "win32":
+                read_attempts.append(lambda: _read_cell_via_curl(self._credentials_path, record.spreadsheet_id, record.sheet, record.row, col))
+                read_attempts.append(_read_requests_insecure)
+                read_attempts.append(_read_insecure)
+            else:
+                read_attempts.append(_read_gspread)
+                read_attempts.append(lambda: _read_cell_via_curl(self._credentials_path, record.spreadsheet_id, record.sheet, record.row, col))
+                read_attempts.append(_read_requests_insecure)
+                read_attempts.append(_read_insecure)
 
-        last_read_error = ""
-        confirmed = False
-        for read_back in read_attempts:
-            try:
-                actual = str(read_back() or "").strip()
-                confirmed = actual == expected
-                if confirmed:
-                    break
-                last_read_error = f"после записи в ячейке осталось «{actual}»"
-            except Exception as exc:
-                last_read_error = str(exc)
-        if not confirmed:
-            raise SheetsError(
-                "Google не подтвердил сохранение в ячейке.\n"
-                f"Ожидали: «{expected or '(пусто)'}».\n"
-                f"Детали: {last_read_error or 'значение не подтвердилось'}"
-            )
+            last_read_error = ""
+            confirmed = False
+            for read_back in read_attempts:
+                try:
+                    actual = str(read_back() or "").strip()
+                    confirmed = actual == expected
+                    if confirmed:
+                        break
+                    last_read_error = f"после записи в ячейке осталось «{actual}»"
+                except Exception as exc:
+                    last_read_error = str(exc)
+            if not confirmed:
+                raise SheetsError(
+                    "Google не подтвердил сохранение в ячейке.\n"
+                    f"Ожидали: «{expected or '(пусто)'}».\n"
+                    f"Детали: {last_read_error or 'значение не подтвердилось'}"
+                )
         record.values[field] = value
         if header != field:
             record.values[header] = value
@@ -1279,22 +1507,27 @@ class SheetsClient:
             + "\n".join(errors[:4] or ["нет деталей"])
         )
 
-    def acquire_calendar_lock(self, record: Record) -> tuple[str, str]:
-        """Ставит маркер «записывают» в слот. Возвращает (прежнее значение, текст блокировки)."""
-        current = self.read_cell(record, "Клиент")
-        if is_lock_text(current) and lock_is_fresh(current):
-            raise SheetsError(
-                "Этот слот сейчас заполняет другой оператор.\n"
-                "Подождите немного или нажмите «Обновить»."
-            )
+    def acquire_calendar_lock(
+        self,
+        record: Record,
+        *,
+        previous_hint: str | None = None,
+    ) -> tuple[str, str]:
+        """Ставит маркер «записывают». Быстрый путь: без лишних чтений до/после записи."""
+        if previous_hint is not None and not (
+            is_lock_text(previous_hint) and lock_is_fresh(previous_hint)
+        ):
+            current = previous_hint
+        else:
+            current = self.read_cell(record, "Клиент")
+            if is_lock_text(current) and lock_is_fresh(current):
+                raise SheetsError(
+                    "Этот слот сейчас заполняет другой оператор.\n"
+                    "Подождите немного или нажмите «Обновить»."
+                )
         lock_text, _token = make_lock_text()
-        self.update_cell(record, "Клиент", lock_text)
-        actual = self.read_cell(record, "Клиент")
-        if actual != lock_text:
-            raise SheetsError(
-                "Не удалось закрепить слот — его уже занял другой оператор.\n"
-                "Обновите календарь и выберите другой слот."
-            )
+        # confirm=False — иначе клик ждёт ещё одно чтение (~секунды). Проверка при сохранении.
+        self.update_cell(record, "Клиент", lock_text, confirm=False)
         return current, lock_text
 
     def assert_calendar_lock(self, record: Record, lock_text: str) -> None:
