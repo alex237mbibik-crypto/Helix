@@ -165,6 +165,9 @@ class SheetRef:
         text = (self.spreadsheet_id or "").strip()
         return not text or text.upper().startswith("PASTE_")
 
+    def city(self) -> str:
+        return extract_city(self.address)
+
     def label(self) -> str:
         parts = [self.name]
         if self.service:
@@ -175,6 +178,23 @@ class SheetRef:
 
     def dest_key(self) -> str:
         return f"{self.name}|{self.spreadsheet_id}|{self.sheet}|{self.service}|{self.address}"
+
+
+def extract_city(address: str) -> str:
+    """«г. Минск, пр-т …» → Минск; «Минск, ул. …» → Минск; без города → ''."""
+    raw = (address or "").strip()
+    if not raw:
+        return ""
+    head = raw.split(",")[0].strip()
+    prefixed = re.match(r"^(?:г\.|город)\s*(.+)$", head, flags=re.IGNORECASE)
+    if prefixed:
+        return prefixed.group(1).strip(" .")
+    # «Минск, пр-т Партизанский, 56» — город без префикса.
+    if "," in raw and not re.search(r"\d", head) and 1 < len(head) < 40:
+        low = head.lower()
+        if not low.startswith(("ул", "пр", "пер", "бул", "наб", "пл", "мкр")):
+            return head
+    return ""
 
 
 _ALL_SHEETS = {"", "*", "все", "all", "все листы"}

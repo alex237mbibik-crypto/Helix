@@ -180,10 +180,15 @@ class SheetsHubApp(ctk.CTk):
         self._picked: Record | None = None
         self._last_error_message = ""
         self.source_filter_var = tk.StringVar(value="")
+        self.service_filter_var = tk.StringVar(value="")
+        self.city_filter_var = tk.StringVar(value="")
+        self.address_filter_var = tk.StringVar(value="")
         self.sheet_filter_var = tk.StringVar(value="")
         self._suppress_source_trace = False
+        self._suppress_param_trace = False
         self._suppress_sheet_trace = False
         self._sheet_titles_by_sid: dict[str, list[str]] = {}
+        self._cal_drawing = False
         self._search_after_id: str | None = None
         self._render_after_id: str | None = None
         self._calendar_fp: tuple | None = None
@@ -309,7 +314,6 @@ class SheetsHubApp(ctk.CTk):
         filter_area = ctk.CTkFrame(parent, fg_color="transparent")
         filter_area.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 2))
         filter_area.grid_columnconfigure(0, weight=1)
-        filter_area.grid_columnconfigure(1, weight=0)
 
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_: self._on_search_changed())
@@ -318,87 +322,80 @@ class SheetsHubApp(ctk.CTk):
             "Поиск по имени, дате или телефону",
             height=32,
             textvariable=self.search_var,
-        ).grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        source_box = ctk.CTkFrame(filter_area, fg_color="transparent")
-        source_box.grid(row=0, column=1, sticky="e")
-        ctk.CTkLabel(
-            source_box,
-            text="Таблица",
-            text_color=MUTED,
-            font=ctk.CTkFont(size=12),
-        ).pack(side="left", padx=(0, 8))
-        # Общая обводка вокруг текста и стрелки (у CTkComboBox кнопка иначе снаружи рамки).
-        combo_wrap = ctk.CTkFrame(
-            source_box,
-            fg_color=CARD,
-            corner_radius=6,
-            border_width=1,
-            border_color=BORDER,
+        ).grid(row=0, column=0, sticky="ew", pady=(0, 4))
+
+        params = ctk.CTkFrame(filter_area, fg_color="transparent")
+        params.grid(row=1, column=0, sticky="ew")
+        params.grid_columnconfigure(1, weight=1)
+        params.grid_columnconfigure(3, weight=1)
+        params.grid_columnconfigure(5, weight=1)
+        params.grid_columnconfigure(7, weight=1)
+
+        self.service_filter = self._param_combo(
+            params, self.service_filter_var, "Услуга", 0, self._on_param_filter_changed
         )
-        combo_wrap.pack(side="left")
-        self.source_filter = ctk.CTkComboBox(
-            combo_wrap,
-            values=[""],
-            variable=self.source_filter_var,
-            width=190,
-            height=30,
-            corner_radius=5,
-            border_width=0,
-            fg_color=CARD,
-            button_color=CARD,
-            button_hover_color=HOVER,
-            text_color=TEXT,
-            dropdown_fg_color=CARD,
-            dropdown_text_color=TEXT,
-            dropdown_hover_color=HOVER,
-            font=ctk.CTkFont(size=13),
-            state="readonly",
-            command=lambda _value: self._on_source_filter_changed(),
+        self.city_filter = self._param_combo(
+            params, self.city_filter_var, "Город", 2, self._on_param_filter_changed
         )
-        self.source_filter.pack(side="left", padx=1, pady=1)
-        self.source_filter.set("Таблица")
-        ctk.CTkLabel(
-            source_box,
-            text="Лист",
-            text_color=MUTED,
-            font=ctk.CTkFont(size=12),
-        ).pack(side="left", padx=(12, 8))
-        sheet_wrap = ctk.CTkFrame(
-            source_box,
-            fg_color=CARD,
-            corner_radius=6,
-            border_width=1,
-            border_color=BORDER,
+        self.address_filter = self._param_combo(
+            params, self.address_filter_var, "Адрес", 4, self._on_param_filter_changed
         )
-        sheet_wrap.pack(side="left")
-        self.sheet_filter = ctk.CTkComboBox(
-            sheet_wrap,
-            values=[""],
-            variable=self.sheet_filter_var,
-            width=170,
-            height=30,
-            corner_radius=5,
-            border_width=0,
-            fg_color=CARD,
-            button_color=CARD,
-            button_hover_color=HOVER,
-            text_color=TEXT,
-            dropdown_fg_color=CARD,
-            dropdown_text_color=TEXT,
-            dropdown_hover_color=HOVER,
-            font=ctk.CTkFont(size=13),
-            state="readonly",
-            command=lambda _value: self._on_sheet_filter_changed(),
+        self.sheet_filter = self._param_combo(
+            params, self.sheet_filter_var, "Лист", 6, self._on_sheet_filter_changed
         )
-        self.sheet_filter.pack(side="left", padx=1, pady=1)
-        self.sheet_filter.set("Лист")
+
         ctk.CTkLabel(
             filter_area,
-            text="Нажмите ячейку, чтобы записать имя. Пустое поле — слот свободен.",
+            text="Пустой параметр не учитывается. Нажмите ячейку, чтобы записать имя.",
             text_color=MUTED,
             font=ctk.CTkFont(size=12),
             anchor="w",
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ).grid(row=2, column=0, sticky="w", pady=(4, 0))
+
+    def _param_combo(
+        self,
+        parent: ctk.CTkFrame,
+        variable: tk.StringVar,
+        label: str,
+        column: int,
+        command,
+    ) -> ctk.CTkComboBox:
+        ctk.CTkLabel(
+            parent,
+            text=label,
+            text_color=MUTED,
+            font=ctk.CTkFont(size=12),
+        ).grid(row=0, column=column, sticky="w", padx=(0 if column == 0 else 8, 6))
+        wrap = ctk.CTkFrame(
+            parent,
+            fg_color=CARD,
+            corner_radius=6,
+            border_width=1,
+            border_color=BORDER,
+        )
+        wrap.grid(row=0, column=column + 1, sticky="ew")
+        combo = ctk.CTkComboBox(
+            wrap,
+            values=[""],
+            variable=variable,
+            width=150,
+            height=30,
+            corner_radius=5,
+            border_width=0,
+            fg_color=CARD,
+            button_color=CARD,
+            button_hover_color=HOVER,
+            text_color=TEXT,
+            dropdown_fg_color=CARD,
+            dropdown_text_color=TEXT,
+            dropdown_hover_color=HOVER,
+            font=ctk.CTkFont(size=13),
+            state="readonly",
+            command=lambda _value: command(),
+        )
+        combo.pack(side="left", fill="x", expand=True, padx=1, pady=1)
+        combo.set("")
+        return combo
 
     def _build_status(self, parent: ctk.CTkFrame) -> None:
         self.status = ctk.CTkLabel(
@@ -892,44 +889,101 @@ class SheetsHubApp(ctk.CTk):
     def _valid_sources(self) -> list[SheetRef]:
         return self._tables()
 
+    def _norm_filter(self, value: str) -> str:
+        return (value or "").strip().lower()
+
+    def _filter_tables_by_params(self, tables: list[SheetRef] | None = None) -> list[SheetRef]:
+        items = [ref for ref in (tables if tables is not None else self._tables()) if not ref.is_placeholder()]
+        service = self._norm_filter(self.service_filter_var.get())
+        city = self._norm_filter(self.city_filter_var.get())
+        address = self._norm_filter(self.address_filter_var.get())
+        out: list[SheetRef] = []
+        for ref in items:
+            if service and self._norm_filter(ref.service) != service:
+                continue
+            if city and self._norm_filter(ref.city()) != city:
+                continue
+            if address and self._norm_filter(ref.address) != address:
+                continue
+            out.append(ref)
+        return out
+
     def _selected_sources(self) -> list[SheetRef]:
+        matched = self._filter_tables_by_params()
+        if matched:
+            return [matched[0]]
         tables = [ref for ref in self._tables() if not ref.is_placeholder()]
-        if not tables:
-            return []
-        selected = self.source_filter_var.get().strip()
-        if selected:
-            matched = [ref for ref in tables if ref.name == selected]
-            if matched:
-                return matched
-        return [tables[0]]
+        return [tables[0]] if tables else []
+
+    def _set_combo_values(self, combo: ctk.CTkComboBox, variable: tk.StringVar, values: list[str]) -> None:
+        cleaned = [""] + [v for v in values if v]
+        current = variable.get().strip()
+        combo.configure(values=cleaned)
+        if current and current in cleaned:
+            variable.set(current)
+        else:
+            variable.set("")
+            combo.set("")
 
     def _sync_source_filter_from_config(self) -> None:
-        names = [ref.name for ref in self._tables() if not ref.is_placeholder() and ref.name]
-        values = names or [""]
-        current = self.source_filter_var.get().strip()
-        self._suppress_source_trace = True
+        """Обновить списки Услуга / Город / Адрес по таблицам и текущему выбору."""
+        if not hasattr(self, "service_filter"):
+            return
+        tables = [ref for ref in self._tables() if not ref.is_placeholder()]
+        self._suppress_param_trace = True
         try:
-            self.source_filter.configure(values=values)
-            if current in values and current:
-                self.source_filter_var.set(current)
-            elif values and values[0]:
-                self.source_filter_var.set(values[0])
+            services = sorted({ref.service.strip() for ref in tables if ref.service.strip()}, key=str.lower)
+            self._set_combo_values(self.service_filter, self.service_filter_var, services)
+
+            service = self._norm_filter(self.service_filter_var.get())
+            after_service = [
+                ref
+                for ref in tables
+                if not service or self._norm_filter(ref.service) == service
+            ]
+            cities = sorted(
+                {ref.city() for ref in after_service if ref.city()},
+                key=str.lower,
+            )
+            self._set_combo_values(self.city_filter, self.city_filter_var, cities)
+
+            city = self._norm_filter(self.city_filter_var.get())
+            after_city = [
+                ref
+                for ref in after_service
+                if not city or self._norm_filter(ref.city()) == city
+            ]
+            addresses = sorted(
+                {ref.address.strip() for ref in after_city if ref.address.strip()},
+                key=str.lower,
+            )
+            self._set_combo_values(self.address_filter, self.address_filter_var, addresses)
+
+            # Держим source_filter_var = имя выбранной таблицы (для статусов/фильтра записей).
+            matched = self._filter_tables_by_params(tables)
+            if matched:
+                self.source_filter_var.set(matched[0].name)
+            elif tables:
+                self.source_filter_var.set(tables[0].name)
             else:
                 self.source_filter_var.set("")
-                self.source_filter.set("Таблица")
         finally:
-            self._suppress_source_trace = False
+            self._suppress_param_trace = False
+
+    def _on_param_filter_changed(self, *_args) -> None:
+        if getattr(self, "_suppress_param_trace", False):
+            return
+        self._sync_source_filter_from_config()
+        if self.client:
+            self._calendar_fp = None
+            self._calendar_struct_fp = None
+            self.reload_all()
+        else:
+            self._schedule_render(immediate=True)
 
     def _on_source_filter_changed(self, *_args) -> None:
-        if getattr(self, "_suppress_source_trace", False):
-            return
-        selected = self.source_filter_var.get().strip()
-        if not selected or selected == "Таблица":
-            self._schedule_render(immediate=True)
-            return
-        # Всегда перечитываем выбранную таблицу — иначе в справке может остаться чужое.
-        if self.client:
-            self.reload_all()
+        # Старый обработчик имени таблицы — параметры теперь главные.
+        self._on_param_filter_changed()
 
     def _active_spreadsheet_id(self) -> str:
         sources = self._selected_sources()
@@ -1316,14 +1370,6 @@ class SheetsHubApp(ctk.CTk):
             booking = [item for item in records if item.kind != KIND_INFO]
             self.info_records = self._dedupe_info([item for item in records if item.kind == KIND_INFO])
             self._sync_source_filter_from_config()
-            if selected_name and selected_name in [
-                ref.name for ref in self._tables() if not ref.is_placeholder()
-            ]:
-                self._suppress_source_trace = True
-                try:
-                    self.source_filter_var.set(selected_name)
-                finally:
-                    self._suppress_source_trace = False
             raw_count = len(booking)
             self.records = explode_records(booking)
             self._sync_sheet_filter(sheet_titles)
@@ -1445,10 +1491,10 @@ class SheetsHubApp(ctk.CTk):
         if not records:
             return ()
         dates = tuple(
-            dict.fromkeys(item.values.get("Дата", "") for item in records if item.values.get("Дата"))
+            sorted({item.values.get("Дата", "") for item in records if item.values.get("Дата")})
         )
         times = list(
-            dict.fromkeys(item.values.get("Время", "") for item in records if item.values.get("Время"))
+            {item.values.get("Время", "") for item in records if item.values.get("Время")}
         )
         times.sort(key=_time_sort_key)
         sample = records[0]
@@ -1618,18 +1664,22 @@ class SheetsHubApp(ctk.CTk):
                 self._show_calendar(True)
                 fp = self._calendar_fingerprint(calendar)
                 struct = self._calendar_structure_fp(calendar)
-                if fp == self._calendar_fp:
+                if fp == self._calendar_fp and self._slot_labels:
                     self._apply_calendar_search_styles()
                     pending = getattr(self, "_status_after_draw", None)
                     if pending:
                         self._set_status(pending)
                         self._status_after_draw = None
-                elif (
-                    struct == self._calendar_struct_fp
-                    and self._slot_labels
-                    and self._patch_calendar_slots(calendar)
-                ):
+                elif self._slot_labels and self._patch_calendar_slots(calendar):
+                    # Мягкое обновление: те же дата/время — только текст и цвет ячеек.
                     self._calendar_fp = fp
+                    self._calendar_struct_fp = struct
+                    pending = getattr(self, "_status_after_draw", None)
+                    if pending:
+                        self._set_status(pending)
+                        self._status_after_draw = None
+                elif getattr(self, "_cal_drawing", False):
+                    # Уже идёт полная отрисовка — не запускаем вторую.
                     pending = getattr(self, "_status_after_draw", None)
                     if pending:
                         self._set_status(pending)
@@ -1701,10 +1751,10 @@ class SheetsHubApp(ctk.CTk):
                 pass
             self._cal_draw_after_id = None
         self._cal_draw_gen += 1
+        self._cal_drawing = True
         self._slot_labels = {}
         self._cal_col_frames = {}
         self._cal_placed_cells = []
-        self._calendar_struct_fp = None
         self._cal_resizing = True
         try:
             for child in self.cal_host.winfo_children():
@@ -1717,6 +1767,7 @@ class SheetsHubApp(ctk.CTk):
             if not groups:
                 self.cal_header_title.configure(text="")
                 self._cal_resizing = False
+                self._cal_drawing = False
                 return
             ((_, _, name), items) = next(iter(groups.items()))
             self._draw_one_calendar(name, items)
@@ -1727,11 +1778,13 @@ class SheetsHubApp(ctk.CTk):
                 pass
         except Exception:
             self._cal_resizing = False
+            self._cal_drawing = False
             raise
 
     def _finish_calendar_draw(self) -> None:
         self._cal_draw_after_id = None
         self._cal_resizing = False
+        self._cal_drawing = False
         calendar = [item for item in self._source_records() if item.layout == "calendar"]
         if calendar:
             self._calendar_fp = self._calendar_fingerprint(calendar)
@@ -2952,7 +3005,7 @@ class SheetsHubApp(ctk.CTk):
             "Рабочие таблицы (общие)",
             self._tables(),
             "Таблица",
-            subtitle="Этот список одинаковый на всех ПК. Добавили здесь — появится везде после сохранения.",
+            subtitle="Этот список одинаковый на всех ПК. В адресе указывайте город: «г. Минск, пр-т …».",
         )
         editor.frame.grid(row=3, column=0, sticky="nsew", padx=16, pady=(0, 8))
 
