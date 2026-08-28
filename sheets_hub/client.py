@@ -109,6 +109,29 @@ def contrast_fg(bg_hex: str) -> str:
     return "#202124" if lum > 0.55 else "#ffffff"
 
 
+def soften_fill(bg_hex: str, *, fallback: str = "#1b5e20") -> str:
+    """Приглушить кислотные/слишком яркие заливки из Google для экрана."""
+    raw = (bg_hex or "").lstrip("#")
+    if len(raw) != 6:
+        return fallback
+    try:
+        r, g, b = int(raw[0:2], 16), int(raw[2:4], 16), int(raw[4:6], 16)
+    except ValueError:
+        return fallback
+    lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+    # Неоновый / «кислотный» зелёный — сразу в спокойный лесной.
+    if g >= 160 and g >= r + 30 and g >= b + 30 and lum >= 0.42:
+        return fallback
+    if lum <= 0.50:
+        return f"#{r:02x}{g:02x}{b:02x}"
+    target = 0.40
+    factor = target / lum if lum else 1.0
+    r = max(0, min(255, int(round(r * factor))))
+    g = max(0, min(255, int(round(g * factor))))
+    b = max(0, min(255, int(round(b * factor))))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
 def _fetch_sheet_colors(
     credentials_path: Path,
     spreadsheet_id: str,

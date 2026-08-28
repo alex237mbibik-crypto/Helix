@@ -58,6 +58,36 @@ def format_booking_message(record: Record, client_text: str) -> str:
     return "\n".join(lines)
 
 
+def format_free_message(record: Record, previous_client: str = "") -> str:
+    date = str(record.values.get("Дата") or "").strip()
+    time = str(record.values.get("Время") or "").strip()
+    when = " · ".join(part for part in (date, time) if part)
+    lines = ["Слот освобождён"]
+    if when:
+        lines.append(f"Когда: {when}")
+    prev = (previous_client or "").strip()
+    if prev and is_booking_value(prev) and not is_lock_text_safe(prev):
+        name, phone = extract_phone(prev)
+        lines.append(f"Было: {name or prev}")
+        if phone:
+            lines.append(f"Телефон: {phone}")
+    if record.source_name:
+        lines.append(f"Таблица: {record.source_name}")
+    sheet = (record.sheet or "").strip()
+    if sheet:
+        lines.append(f"Лист: {sheet}")
+    return "\n".join(lines)
+
+
+def is_lock_text_safe(text: str) -> bool:
+    try:
+        from sheets_hub.calendar_sheet import is_lock_text
+
+        return is_lock_text(text)
+    except Exception:
+        return False
+
+
 def _normalize_chat_id(chat_id: str) -> str:
     raw = (chat_id or "").strip().replace(" ", "")
     return raw
@@ -185,7 +215,35 @@ def notify_booking_async(
         return
 
     message = format_booking_message(record, client_text)
-    # Копия настроек — чтобы поток не зависел от последующих правок UI.
+    _notify_async(settings, message, on_done=on_done)
+
+
+def notify_free_async(
+    settings: TelegramConfig,
+    record: Record,
+    previous_client: str = "",
+    *,
+    on_done: Callable[[bool, str], None] | None = None,
+) -> None:
+    if not settings.bot_token.strip() or not settings.chat_id.strip():
+        if on_done:
+            on_done(False, "Telegram не настроен (нет токена или chat_id)")
+        return
+    if not settings.enabled:
+        if on_done:
+            on_done(False, "Telegram выключен — включите в «Таблицы»")
+        return
+
+    message = format_free_message(record, previous_client)
+    _notify_async(settings, message, on_done=on_done)
+
+
+def _notify_async(
+    settings: TelegramConfig,
+    message: str,
+    *,
+    on_done: Callable[[bool, str], None] | None = None,
+) -> None:
     snap = TelegramConfig(
         enabled=True,
         bot_token=settings.bot_token.strip(),

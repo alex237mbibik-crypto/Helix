@@ -12,7 +12,7 @@ import tkinter as tk
 
 from sheets_hub.auth import credential_kind
 from sheets_hub.calendar_sheet import classify_slot, extract_phone, info_tone, is_lock_text
-from sheets_hub.client import SheetsClient, SheetsError, contrast_fg
+from sheets_hub.client import SheetsClient, SheetsError, contrast_fg, soften_fill
 from sheets_hub.config import (
     KIND_INFO,
     KIND_RECORDS,
@@ -32,15 +32,15 @@ from sheets_hub.models import Record
 from sheets_hub.registry import DEFAULT_REGISTRY_SHEET, tables_signature
 from sheets_hub.ssl_setup import configure_tls
 from sheets_hub.split import explode_records, write_back_value
-from sheets_hub.telegram import notify_booking_async, send_message
+from sheets_hub.telegram import notify_booking_async, notify_free_async, send_message
 
 HIDDEN = {"_sid", "_sheet", "_row", "_tone", "_bg"}
 
 GREEN = "#188038"
 GREEN_HOVER = "#137333"
 GREEN_SOFT = "#e6f4ea"
-SLOT_GREEN = "#2e7d32"
-SLOT_BOOKED = "#1b5e20"
+SLOT_GREEN = "#1b5e20"
+SLOT_BOOKED = "#145214"
 SLOT_BLOCKED = "#f1f3f4"
 SLOT_LOCK = "#f9a825"
 SLOT_TIME = "#f1f3f4"
@@ -55,7 +55,7 @@ CAL_HEADER_H = 60
 CAL_GAP = 1
 INFO_TONES = {
     "warn": ("#f8d7c4", "#c5221f"),
-    "ok": ("#2e7d32", "#ffffff"),
+    "ok": ("#1b5e20", "#ffffff"),
     "note": ("#fff59d", "#202124"),
     "info": ("#b3e5fc", "#202124"),
 }
@@ -1463,6 +1463,8 @@ class SheetsHubApp(ctk.CTk):
     def _slot_visual(self, record: Record) -> tuple[str, str, str, bool]:
         status = record.values.get("Статус", "")
         sheet_bg = str(record.values.get("_bg") or "").strip()
+        if sheet_bg:
+            sheet_bg = soften_fill(sheet_bg, fallback=SLOT_GREEN)
         if status == "Не записывать":
             return "не записывать", SLOT_BLOCKED, MUTED, False
         if status == "Записывают":
@@ -1528,6 +1530,8 @@ class SheetsHubApp(ctk.CTk):
                 bg, fg = SLOT_LOCK, "#3e2723"
             elif status == "Занято":
                 sheet_bg = str(record.values.get("_bg") or "").strip()
+                if sheet_bg:
+                    sheet_bg = soften_fill(sheet_bg, fallback=SLOT_GREEN)
                 base_bg = sheet_bg or SLOT_BOOKED
                 base_fg = contrast_fg(base_bg) if sheet_bg else "#ffffff"
                 if query and query in blob:
@@ -1538,6 +1542,8 @@ class SheetsHubApp(ctk.CTk):
                     bg, fg = base_bg, base_fg
             else:
                 sheet_bg = str(record.values.get("_bg") or "").strip()
+                if sheet_bg:
+                    sheet_bg = soften_fill(sheet_bg, fallback=SLOT_GREEN)
                 if query:
                     bg, fg = ("#e8f5e9", MUTED)
                 elif sheet_bg:
@@ -2063,7 +2069,8 @@ class SheetsHubApp(ctk.CTk):
         wrap = max(480, self.winfo_width() - 80) if self.winfo_width() > 100 else 980
         for card, (text, tone, sheet_bg) in zip(self._info_cards, payloads):
             if sheet_bg:
-                bg, fg = sheet_bg, contrast_fg(sheet_bg)
+                bg = soften_fill(sheet_bg, fallback=SLOT_GREEN)
+                fg = contrast_fg(bg)
             else:
                 bg, fg = INFO_TONES.get(tone, INFO_TONES["info"])
             try:
@@ -2248,7 +2255,8 @@ class SheetsHubApp(ctk.CTk):
             tone = record.values.get("_tone") or info_tone(text)
             sheet_bg = str(record.values.get("_bg") or "").strip()
             if sheet_bg:
-                bg, fg = sheet_bg, contrast_fg(sheet_bg)
+                bg = soften_fill(sheet_bg, fallback=SLOT_GREEN)
+                fg = contrast_fg(bg)
             else:
                 bg, fg = INFO_TONES.get(tone, INFO_TONES["info"])
             wrap = max(480, self.winfo_width() - 80) if self.winfo_width() > 100 else 980
@@ -2574,10 +2582,31 @@ class SheetsHubApp(ctk.CTk):
                 state["saved"] = True
                 if calendar:
                     typed = value.strip()
-                    if not typed or typed.lower() == "запись":
+                    prev_raw = active_previous()
+                    was_booked = bool(prev_raw) and classify_slot(prev_raw) == "Занято"
+                    if not typed or typed.lower() == "запись" or freeing:
                         record.values["Клиент"] = ""
                         record.values["Телефон"] = ""
                         record.values["Статус"] = "Свободно"
+                        if freeing or was_booked:
+
+                            def tg_free_done(ok: bool, err: str) -> None:
+                                def apply() -> None:
+                                    if ok:
+                                        self._set_status(
+                                            f"Слот освобождён · Telegram: {when or 'ок'}"
+                                        )
+                                    elif err:
+                                        self._set_status(f"Слот освобождён · Telegram: {err}")
+
+                                self.after(0, apply)
+
+                            notify_free_async(
+                                self.config_data.telegram,
+                                record,
+                                prev_raw if was_booked else "",
+                                on_done=tg_free_done,
+                            )
                     elif "не запис" in typed.lower():
                         record.values["Клиент"] = typed
                         record.values["Статус"] = "Не записывать"
@@ -2667,12 +2696,38 @@ class SheetsHubApp(ctk.CTk):
                 self.client.update_cell(record, "Клиент", "")
                 return True
 
+            prev_client = " ".join(
+                part
+                for part in (
+                    str(record.values.get("Клиент") or "").strip(),
+                    str(record.values.get("Телефон") or "").strip(),
+                )
+                if part
+            )
+            when = f"{record.values.get('Дата', '')} · {record.values.get('Время', '')}".strip(" ·")
+
             def done(_):
                 record.values["Клиент"] = ""
                 record.values["Телефон"] = ""
                 record.values["Статус"] = "Свободно"
                 self._render_table()
                 self._set_status("Слот освобождён")
+
+                def tg_done(ok: bool, err: str) -> None:
+                    def apply() -> None:
+                        if ok:
+                            self._set_status(f"Слот освобождён · Telegram: {when or 'ок'}")
+                        elif err:
+                            self._set_status(f"Слот освобождён · Telegram: {err}")
+
+                    self.after(0, apply)
+
+                notify_free_async(
+                    self.config_data.telegram,
+                    record,
+                    prev_client,
+                    on_done=tg_done,
+                )
 
             self._run_bg(work, done)
             return
