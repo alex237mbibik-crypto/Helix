@@ -39,8 +39,8 @@ HIDDEN = {"_sid", "_sheet", "_row", "_tone", "_bg"}
 GREEN = "#188038"
 GREEN_HOVER = "#137333"
 GREEN_SOFT = "#e6f4ea"
-SLOT_GREEN = "#7cb342"
-SLOT_BOOKED = "#558b2f"
+SLOT_GREEN = "#2e7d32"
+SLOT_BOOKED = "#1b5e20"
 SLOT_BLOCKED = "#f1f3f4"
 SLOT_LOCK = "#f9a825"
 SLOT_TIME = "#f1f3f4"
@@ -55,7 +55,7 @@ CAL_HEADER_H = 60
 CAL_GAP = 1
 INFO_TONES = {
     "warn": ("#f8d7c4", "#c5221f"),
-    "ok": ("#7cb342", "#202124"),
+    "ok": ("#2e7d32", "#ffffff"),
     "note": ("#fff59d", "#202124"),
     "info": ("#b3e5fc", "#202124"),
 }
@@ -1476,7 +1476,7 @@ class SheetsHubApp(ctk.CTk):
             return text, SLOT_BOOKED, "#ffffff", True
         if sheet_bg:
             return "запись", sheet_bg, contrast_fg(sheet_bg), False
-        return "запись", SLOT_GREEN, "#102910", False
+        return "запись", SLOT_GREEN, "#ffffff", False
 
     def _patch_calendar_slots(self, records: list[Record]) -> bool:
         """Обновить текст/цвет слотов на месте, без уничтожения сетки."""
@@ -1531,19 +1531,19 @@ class SheetsHubApp(ctk.CTk):
                 base_bg = sheet_bg or SLOT_BOOKED
                 base_fg = contrast_fg(base_bg) if sheet_bg else "#ffffff"
                 if query and query in blob:
-                    bg, fg = "#9ccc65", TEXT
+                    bg, fg = "#66bb6a", "#102910"
                 elif query:
-                    bg, fg = "#dce8d4", MUTED
+                    bg, fg = "#c8e6c9", MUTED
                 else:
                     bg, fg = base_bg, base_fg
             else:
                 sheet_bg = str(record.values.get("_bg") or "").strip()
                 if query:
-                    bg, fg = ("#e8f0e0", MUTED)
+                    bg, fg = ("#e8f5e9", MUTED)
                 elif sheet_bg:
                     bg, fg = sheet_bg, contrast_fg(sheet_bg)
                 else:
-                    bg, fg = SLOT_GREEN, "#102910"
+                    bg, fg = SLOT_GREEN, "#ffffff"
             try:
                 label.configure(bg=bg, fg=fg)
                 cell = getattr(label, "_cell", None) or label.master
@@ -2586,7 +2586,24 @@ class SheetsHubApp(ctk.CTk):
                         name, phone = extract_phone(typed)
                         record.values["Клиент"] = name or typed
                         record.values["Телефон"] = phone
-                        notify_booking_async(self.config_data.telegram, record, typed)
+
+                        def tg_done(ok: bool, err: str) -> None:
+                            def apply() -> None:
+                                if ok:
+                                    self._set_status(
+                                        f"Сохранено · Telegram: {when or 'запись'} отправлено"
+                                    )
+                                elif err:
+                                    self._set_status(f"Сохранено · Telegram: {err}")
+
+                            self.after(0, apply)
+
+                        notify_booking_async(
+                            self.config_data.telegram,
+                            record,
+                            typed,
+                            on_done=tg_done,
+                        )
                     if self._refresh_slot_label(record):
                         booked = sum(
                             1
@@ -2681,10 +2698,10 @@ class SheetsHubApp(ctk.CTk):
         self._run_bg(work, done)
 
     def _open_tables_dialog(self) -> None:
-        dialog = self._dialog("Таблицы", "920x620")
-        dialog.minsize(720, 420)
+        dialog = self._dialog("Таблицы", "960x700")
+        dialog.minsize(780, 520)
         dialog.grid_columnconfigure(0, weight=1)
-        dialog.grid_rowconfigure(3, weight=1)
+        dialog.grid_rowconfigure(3, weight=1, minsize=180)
         self._tables_dialog_open = True
 
         account = ctk.CTkFrame(dialog, fg_color=BG, corner_radius=10, border_width=1, border_color=LINE)
@@ -2769,20 +2786,13 @@ class SheetsHubApp(ctk.CTk):
         tg_box = ctk.CTkFrame(dialog, fg_color=BG, corner_radius=10, border_width=1, border_color=LINE)
         tg_box.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 8))
         tg_box.grid_columnconfigure(1, weight=1)
+        tg_box.grid_columnconfigure(3, weight=1)
         ctk.CTkLabel(
             tg_box,
             text="Telegram — уведомления о записи",
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=TEXT,
-        ).grid(row=0, column=0, columnspan=3, sticky="w", padx=12, pady=(10, 2))
-        ctk.CTkLabel(
-            tg_box,
-            text="После сохранения клиента в ячейке календаря бот отправит дату, время и данные в чат.",
-            text_color=MUTED,
-            font=ctk.CTkFont(size=11),
-            wraplength=780,
-            justify="left",
-        ).grid(row=1, column=0, columnspan=3, sticky="w", padx=12, pady=(0, 6))
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(8, 2))
         tg_enabled_var = tk.BooleanVar(value=bool(self.config_data.telegram.enabled))
         tg_token_var = tk.StringVar(value=self.config_data.telegram.bot_token or "")
         tg_chat_var = tk.StringVar(value=self.config_data.telegram.chat_id or "")
@@ -2795,23 +2805,38 @@ class SheetsHubApp(ctk.CTk):
             progress_color=GREEN,
             button_color=CARD,
             button_hover_color=LINE,
-        ).grid(row=2, column=0, sticky="w", padx=12, pady=(0, 8))
-        ctk.CTkLabel(tg_box, text="Токен бота", text_color=MUTED, font=ctk.CTkFont(size=11)).grid(
-            row=3, column=0, sticky="w", padx=12, pady=(0, 8)
+        ).grid(row=0, column=2, columnspan=2, sticky="e", padx=12, pady=(8, 2))
+        ctk.CTkLabel(tg_box, text="Токен", text_color=MUTED, font=ctk.CTkFont(size=11)).grid(
+            row=1, column=0, sticky="w", padx=12, pady=(0, 8)
         )
         _styled_entry(tg_box, "123456:ABC…", textvariable=tg_token_var, height=28, show="*").grid(
-            row=3, column=1, sticky="ew", padx=4, pady=(0, 8)
+            row=1, column=1, sticky="ew", padx=4, pady=(0, 8)
         )
         ctk.CTkLabel(tg_box, text="Chat ID", text_color=MUTED, font=ctk.CTkFont(size=11)).grid(
-            row=4, column=0, sticky="w", padx=12, pady=(0, 10)
+            row=1, column=2, sticky="w", padx=8, pady=(0, 8)
         )
-        _styled_entry(tg_box, "-100… или 123456789", textvariable=tg_chat_var, height=28).grid(
-            row=4, column=1, sticky="ew", padx=4, pady=(0, 10)
+        _styled_entry(tg_box, "-100…", textvariable=tg_chat_var, height=28, width=140).grid(
+            row=1, column=3, sticky="ew", padx=(4, 4), pady=(0, 8)
         )
+
+        status_var = tk.StringVar(value="")
+
+        def apply_telegram_settings(*, persist: bool = True) -> None:
+            self.config_data.telegram.enabled = bool(tg_enabled_var.get())
+            self.config_data.telegram.bot_token = tg_token_var.get().strip()
+            self.config_data.telegram.chat_id = tg_chat_var.get().strip()
+            if persist:
+                try:
+                    save_config(self.config_data)
+                except Exception:
+                    pass
 
         def test_telegram() -> None:
             from sheets_hub.config import TelegramConfig
 
+            # Тест включает уведомления и сразу пишет их в config.yaml.
+            tg_enabled_var.set(True)
+            apply_telegram_settings(persist=True)
             settings = TelegramConfig(
                 enabled=True,
                 bot_token=tg_token_var.get().strip(),
@@ -2832,9 +2857,20 @@ class SheetsHubApp(ctk.CTk):
             def done(result):
                 ok, err = result
                 if ok:
-                    status_var.set("Тестовое сообщение отправлено в Telegram.")
+                    status_var.set("Тест отправлен. Настройки Telegram сохранены.")
+                    messagebox.showinfo(
+                        "Telegram",
+                        "Сообщение ушло в чат.\nНастройки сохранены — записи тоже будут слаться.",
+                        parent=dialog,
+                    )
                 else:
                     status_var.set(f"Telegram: {err.split(chr(10))[0]}")
+                    messagebox.showerror(
+                        "Telegram",
+                        f"Не удалось отправить:\n{err}\n\n"
+                        "Проверьте токен, chat_id и что вы уже написали боту / добавили его в группу.",
+                        parent=dialog,
+                    )
 
             def work_safe():
                 try:
@@ -2852,8 +2888,8 @@ class SheetsHubApp(ctk.CTk):
 
             self._run_bg(work_safe, done_safe, alert=False)
 
-        self._outline_button(tg_box, "Тест", test_telegram, 80).grid(
-            row=3, column=2, rowspan=2, padx=(4, 12), pady=(0, 10)
+        self._outline_button(tg_box, "Тест", test_telegram, 70).grid(
+            row=1, column=4, padx=(4, 12), pady=(0, 8)
         )
 
         editor = _RefList(
@@ -2865,12 +2901,12 @@ class SheetsHubApp(ctk.CTk):
         )
         editor.frame.grid(row=3, column=0, sticky="nsew", padx=16, pady=(0, 8))
 
-        status_var = tk.StringVar(value="")
         ctk.CTkLabel(dialog, textvariable=status_var, text_color=MUTED, font=ctk.CTkFont(size=11)).grid(
             row=4, column=0, sticky="w", padx=20, pady=(0, 4)
         )
 
         def close_dialog() -> None:
+            apply_telegram_settings(persist=True)
             self._tables_dialog_open = False
             try:
                 dialog.destroy()
@@ -2892,13 +2928,14 @@ class SheetsHubApp(ctk.CTk):
                 return self.client.pull_table_registry(registry_id, registry_sheet)
 
             def done(refs) -> None:
-                editor.replace_refs(refs)
                 self.config_data.registry_spreadsheet_id = registry_id
                 self.config_data.registry_sheet = registry_sheet
                 if refs:
+                    editor.replace_refs(refs)
                     self._apply_remote_tables(refs)
                     status_var.set(f"Загружено из облака: {len(refs)} таблиц")
                 else:
+                    # Не затираем локальный список пустой загрузкой — иначе «+ Добавить» сразу сбрасывается.
                     status_var.set("В облаке пока пусто — добавьте таблицы и сохраните.")
 
             def work_safe():
@@ -2948,9 +2985,7 @@ class SheetsHubApp(ctk.CTk):
             self.config_data.destinations = list(refs)
             self.config_data.registry_spreadsheet_id = registry_id
             self.config_data.registry_sheet = registry_sheet
-            self.config_data.telegram.enabled = bool(tg_enabled_var.get())
-            self.config_data.telegram.bot_token = tg_token_var.get().strip()
-            self.config_data.telegram.chat_id = tg_chat_var.get().strip()
+            apply_telegram_settings(persist=False)
             save_config(self.config_data)
             status_var.set("Сохраняю общий список в облако…")
 
@@ -3002,7 +3037,6 @@ class _RefList:
     ) -> None:
         self.placeholder = placeholder
         self.rows: list[dict] = []
-        self._next_row = 0
         self.frame = ctk.CTkFrame(parent, fg_color=BG, corner_radius=10, border_width=1, border_color=LINE)
         self.frame.grid_columnconfigure(0, weight=1)
         self.frame.grid_rowconfigure(2, weight=1)
@@ -3034,7 +3068,7 @@ class _RefList:
             fg_color=GREEN,
             hover_color=GREEN_HOVER,
             command=self.add_empty,
-        ).grid(row=0, column=1, rowspan=2, sticky="e")
+        ).grid(row=0, column=1, rowspan=2, sticky="e", padx=(8, 0))
 
         colnames = ctk.CTkFrame(self.frame, fg_color="transparent")
         colnames.grid(row=1, column=0, sticky="ew", padx=10, pady=(4, 0))
@@ -3048,9 +3082,22 @@ class _RefList:
                 anchor="w",
             ).grid(row=0, column=col, sticky="w", padx=3)
 
-        self.body = ctk.CTkScrollableFrame(self.frame, fg_color="transparent")
-        self.body.grid(row=2, column=0, sticky="nsew", padx=6, pady=(0, 8))
+        self.body = ctk.CTkScrollableFrame(self.frame, fg_color="transparent", height=160)
+        self.body.grid(row=2, column=0, sticky="nsew", padx=6, pady=(0, 4))
         self.body.grid_columnconfigure(0, weight=1)
+
+        add_bar = ctk.CTkFrame(self.frame, fg_color="transparent")
+        add_bar.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 8))
+        ctk.CTkButton(
+            add_bar,
+            text="+ Добавить таблицу",
+            width=160,
+            height=30,
+            corner_radius=8,
+            fg_color=GREEN,
+            hover_color=GREEN_HOVER,
+            command=self.add_empty,
+        ).pack(side="left")
 
         if refs:
             for ref in refs:
@@ -3065,12 +3112,12 @@ class _RefList:
             except Exception:
                 pass
         self.rows.clear()
-        self._next_row = 0
         if refs:
             for ref in refs:
                 self._add_row(ref)
         else:
             self.add_empty()
+
     def _layout_columns(self, widget) -> None:
         widget.grid_columnconfigure(0, weight=0, minsize=108)
         widget.grid_columnconfigure(1, weight=1, minsize=220)
@@ -3081,17 +3128,29 @@ class _RefList:
 
     def add_empty(self) -> None:
         self._add_row(SheetRef(name=self.placeholder, spreadsheet_id="", sheet="все"))
-        self.body.after(40, self._scroll_to_end)
+        try:
+            self.body.after(40, self._scroll_to_end)
+        except Exception:
+            pass
 
     def _scroll_to_end(self) -> None:
-        self.body.update_idletasks()
-        canvas = getattr(self.body, "_parent_canvas", None)
-        if canvas is not None:
-            canvas.yview_moveto(1.0)
+        try:
+            self.body.update_idletasks()
+            canvas = getattr(self.body, "_parent_canvas", None)
+            if canvas is not None:
+                canvas.yview_moveto(1.0)
+        except Exception:
+            pass
+
+    def _reindex_rows(self) -> None:
+        for idx, row in enumerate(self.rows):
+            try:
+                row["frame"].grid(row=idx, column=0, sticky="ew", pady=2)
+            except Exception:
+                pass
 
     def _add_row(self, ref: SheetRef) -> None:
-        index = self._next_row
-        self._next_row += 1
+        index = len(self.rows)
         name_var = tk.StringVar(
             value="" if ref.name in {"Источник", "Назначение", "Таблица", self.placeholder} else ref.name
         )
@@ -3131,8 +3190,13 @@ class _RefList:
         }
 
         def remove() -> None:
-            row_data["frame"].destroy()
-            self.rows.remove(row_data)
+            try:
+                row_data["frame"].destroy()
+            except Exception:
+                pass
+            if row_data in self.rows:
+                self.rows.remove(row_data)
+            self._reindex_rows()
 
         ctk.CTkButton(
             row_frame,
