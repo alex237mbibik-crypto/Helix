@@ -180,6 +180,7 @@ class SheetsHubApp(ctk.CTk):
         self._picked: Record | None = None
         self._last_error_message = ""
         self.source_filter_var = tk.StringVar(value="")
+        self.name_filter_var = tk.StringVar(value="")
         self.service_filter_var = tk.StringVar(value="")
         self.city_filter_var = tk.StringVar(value="")
         self.address_filter_var = tk.StringVar(value="")
@@ -326,27 +327,29 @@ class SheetsHubApp(ctk.CTk):
 
         params = ctk.CTkFrame(filter_area, fg_color="transparent")
         params.grid(row=1, column=0, sticky="ew")
-        params.grid_columnconfigure(1, weight=1)
-        params.grid_columnconfigure(3, weight=1)
-        params.grid_columnconfigure(5, weight=1)
-        params.grid_columnconfigure(7, weight=1)
+        for col in (1, 3, 5, 7, 9):
+            params.grid_columnconfigure(col, weight=1)
 
+        # Каскад: Название → Услуга → Город → Адрес (каждый список только по уже выбранному).
+        self.name_filter = self._param_combo(
+            params, self.name_filter_var, "Название", 0, self._on_param_filter_changed
+        )
         self.service_filter = self._param_combo(
-            params, self.service_filter_var, "Услуга", 0, self._on_param_filter_changed
+            params, self.service_filter_var, "Услуга", 2, self._on_param_filter_changed
         )
         self.city_filter = self._param_combo(
-            params, self.city_filter_var, "Город", 2, self._on_param_filter_changed
+            params, self.city_filter_var, "Город", 4, self._on_param_filter_changed
         )
         self.address_filter = self._param_combo(
-            params, self.address_filter_var, "Адрес", 4, self._on_param_filter_changed
+            params, self.address_filter_var, "Адрес", 6, self._on_param_filter_changed
         )
         self.sheet_filter = self._param_combo(
-            params, self.sheet_filter_var, "Лист", 6, self._on_sheet_filter_changed
+            params, self.sheet_filter_var, "Лист", 8, self._on_sheet_filter_changed
         )
 
         ctk.CTkLabel(
             filter_area,
-            text="Пустой параметр не учитывается. Нажмите ячейку, чтобы записать имя.",
+            text="Выбор по цепочке: название → услуга → город → адрес. Пустое поле не учитывается.",
             text_color=MUTED,
             font=ctk.CTkFont(size=12),
             anchor="w",
@@ -894,11 +897,14 @@ class SheetsHubApp(ctk.CTk):
 
     def _filter_tables_by_params(self, tables: list[SheetRef] | None = None) -> list[SheetRef]:
         items = [ref for ref in (tables if tables is not None else self._tables()) if not ref.is_placeholder()]
+        name = self._norm_filter(self.name_filter_var.get())
         service = self._norm_filter(self.service_filter_var.get())
         city = self._norm_filter(self.city_filter_var.get())
         address = self._norm_filter(self.address_filter_var.get())
         out: list[SheetRef] = []
         for ref in items:
+            if name and self._norm_filter(ref.name) != name:
+                continue
             if service and self._norm_filter(ref.service) != service:
                 continue
             if city and self._norm_filter(ref.resolved_city()) != city:
@@ -926,19 +932,29 @@ class SheetsHubApp(ctk.CTk):
             combo.set("")
 
     def _sync_source_filter_from_config(self) -> None:
-        """Обновить списки Услуга / Город / Адрес по таблицам и текущему выбору."""
-        if not hasattr(self, "service_filter"):
+        """Каскад списков: Название → Услуга → Город → Адрес."""
+        if not hasattr(self, "name_filter"):
             return
         tables = [ref for ref in self._tables() if not ref.is_placeholder()]
         self._suppress_param_trace = True
         try:
-            services = sorted({ref.service.strip() for ref in tables if ref.service.strip()}, key=str.lower)
+            names = sorted({ref.name.strip() for ref in tables if ref.name.strip()}, key=str.lower)
+            self._set_combo_values(self.name_filter, self.name_filter_var, names)
+
+            name = self._norm_filter(self.name_filter_var.get())
+            after_name = [
+                ref for ref in tables if not name or self._norm_filter(ref.name) == name
+            ]
+            services = sorted(
+                {ref.service.strip() for ref in after_name if ref.service.strip()},
+                key=str.lower,
+            )
             self._set_combo_values(self.service_filter, self.service_filter_var, services)
 
             service = self._norm_filter(self.service_filter_var.get())
             after_service = [
                 ref
-                for ref in tables
+                for ref in after_name
                 if not service or self._norm_filter(ref.service) == service
             ]
             cities = sorted(
@@ -959,7 +975,6 @@ class SheetsHubApp(ctk.CTk):
             )
             self._set_combo_values(self.address_filter, self.address_filter_var, addresses)
 
-            # Держим source_filter_var = имя выбранной таблицы (для статусов/фильтра записей).
             matched = self._filter_tables_by_params(tables)
             if matched:
                 self.source_filter_var.set(matched[0].name)
