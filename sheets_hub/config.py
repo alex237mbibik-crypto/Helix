@@ -269,12 +269,23 @@ Source = SheetRef
 
 
 @dataclass
+class TelegramConfig:
+    enabled: bool = False
+    bot_token: str = ""
+    chat_id: str = ""
+
+    def is_configured(self) -> bool:
+        return bool(self.enabled and self.bot_token.strip() and self.chat_id.strip())
+
+
+@dataclass
 class AppConfig:
     credentials: Path
     sources: list[SheetRef]
     destinations: list[SheetRef]
     registry_spreadsheet_id: str = ""
     registry_sheet: str = "SheetsHub"
+    telegram: TelegramConfig = field(default_factory=TelegramConfig)
 
 
 def usable_refs(refs: list[SheetRef]) -> list[SheetRef]:
@@ -366,12 +377,19 @@ def load_config(path: Path | None = None) -> AppConfig:
             or ""
         ).strip()
         registry_sheet = str((registry or {}).get("sheet") or "SheetsHub").strip() or "SheetsHub"
+    tg_raw = raw.get("telegram") or {}
+    telegram = TelegramConfig(
+        enabled=bool(tg_raw.get("enabled")),
+        bot_token=str(tg_raw.get("bot_token") or "").strip(),
+        chat_id=str(tg_raw.get("chat_id") or "").strip(),
+    )
     return AppConfig(
         credentials=creds,
         sources=tables,
         destinations=list(tables),
         registry_spreadsheet_id=registry_id,
         registry_sheet=registry_sheet,
+        telegram=telegram,
     )
 
 
@@ -396,6 +414,11 @@ def save_config(config: AppConfig, path: Path | None = None) -> None:
             "spreadsheet_id": registry_id,
             "sheet": (config.registry_sheet or "SheetsHub").strip() or "SheetsHub",
         }
+    payload["telegram"] = {
+        "enabled": bool(config.telegram.enabled),
+        "bot_token": config.telegram.bot_token,
+        "chat_id": config.telegram.chat_id,
+    }
     config_path.write_text(
         yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
         encoding="utf-8",

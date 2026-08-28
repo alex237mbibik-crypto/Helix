@@ -1565,6 +1565,39 @@ class SheetsClient:
         spreadsheet = self._open_spreadsheet(url_or_id)
         return [ws.title for ws in spreadsheet.worksheets()]
 
+    def list_calendar_sheet_titles(self, spreadsheet_id: str) -> list[str]:
+        """Вкладки-календари (месяцы), без справок вроде «Услуги»."""
+        sid = parse_spreadsheet_id(spreadsheet_id)
+        titles: list[str] = []
+        try:
+            titles = _list_public_sheet_titles(sid)
+        except Exception:
+            titles = []
+        if not titles:
+            try:
+                titles = self.list_sheets(sid)
+            except Exception:
+                return []
+        return [title for title in titles if title and not is_info_title(title)]
+
+    def preferred_calendar_sheet(self, spreadsheet_id: str) -> str:
+        try:
+            sid = parse_spreadsheet_id(spreadsheet_id)
+        except ValueError:
+            return ""
+        return _PREFERRED_CALENDAR_SHEET.get(sid, "")
+
+    def set_preferred_calendar_sheet(self, spreadsheet_id: str, sheet: str) -> None:
+        try:
+            sid = parse_spreadsheet_id(spreadsheet_id)
+        except ValueError:
+            return
+        title = (sheet or "").strip()
+        if title:
+            _PREFERRED_CALENDAR_SHEET[sid] = title
+        else:
+            _PREFERRED_CALENDAR_SHEET.pop(sid, None)
+
     def pull_table_registry(self, spreadsheet_id: str, sheet_title: str = "") -> list[SheetRef]:
         """Читает общий список таблиц из Google Sheets."""
         sid = parse_spreadsheet_id(spreadsheet_id)

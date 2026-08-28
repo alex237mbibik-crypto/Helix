@@ -32,6 +32,7 @@ from sheets_hub.models import Record
 from sheets_hub.registry import DEFAULT_REGISTRY_SHEET, tables_signature
 from sheets_hub.ssl_setup import configure_tls
 from sheets_hub.split import explode_records, write_back_value
+from sheets_hub.telegram import notify_booking_async, send_message
 
 HIDDEN = {"_sid", "_sheet", "_row", "_tone", "_bg"}
 
@@ -179,7 +180,10 @@ class SheetsHubApp(ctk.CTk):
         self._picked: Record | None = None
         self._last_error_message = ""
         self.source_filter_var = tk.StringVar(value="")
+        self.sheet_filter_var = tk.StringVar(value="")
         self._suppress_source_trace = False
+        self._suppress_sheet_trace = False
+        self._sheet_titles_by_sid: dict[str, list[str]] = {}
         self._search_after_id: str | None = None
         self._render_after_id: str | None = None
         self._calendar_fp: tuple | None = None
@@ -353,6 +357,41 @@ class SheetsHubApp(ctk.CTk):
         )
         self.source_filter.pack(side="left", padx=1, pady=1)
         self.source_filter.set("Таблица")
+        ctk.CTkLabel(
+            source_box,
+            text="Лист",
+            text_color=MUTED,
+            font=ctk.CTkFont(size=12),
+        ).pack(side="left", padx=(12, 8))
+        sheet_wrap = ctk.CTkFrame(
+            source_box,
+            fg_color=CARD,
+            corner_radius=6,
+            border_width=1,
+            border_color=BORDER,
+        )
+        sheet_wrap.pack(side="left")
+        self.sheet_filter = ctk.CTkComboBox(
+            sheet_wrap,
+            values=[""],
+            variable=self.sheet_filter_var,
+            width=170,
+            height=30,
+            corner_radius=5,
+            border_width=0,
+            fg_color=CARD,
+            button_color=CARD,
+            button_hover_color=HOVER,
+            text_color=TEXT,
+            dropdown_fg_color=CARD,
+            dropdown_text_color=TEXT,
+            dropdown_hover_color=HOVER,
+            font=ctk.CTkFont(size=13),
+            state="readonly",
+            command=lambda _value: self._on_sheet_filter_changed(),
+        )
+        self.sheet_filter.pack(side="left", padx=1, pady=1)
+        self.sheet_filter.set("Лист")
         ctk.CTkLabel(
             filter_area,
             text="Нажмите ячейку, чтобы записать имя. Пустое поле — слот свободен.",
@@ -891,6 +930,71 @@ class SheetsHubApp(ctk.CTk):
         # Всегда перечитываем выбранную таблицу — иначе в справке может остаться чужое.
         if self.client:
             self.reload_all()
+
+    def _active_spreadsheet_id(self) -> str:
+        sources = self._selected_sources()
+        if not sources:
+            return ""
+        try:
+            return sources[0].normalized_id()
+        except ValueError:
+            return ""
+
+    def _current_calendar_sheet(self) -> str:
+        for item in self.records:
+            if item.layout == "calendar" and item.sheet:
+                return item.sheet
+        return ""
+
+    def _sync_sheet_filter(self, titles: list[str] | None = None) -> None:
+        if not hasattr(self, "sheet_filter"):
+            return
+        sid = self._active_spreadsheet_id()
+        values = list(titles or [])
+        if not values and sid:
+            values = list(self._sheet_titles_by_sid.get(sid) or [])
+        if not values:
+            current = self._current_calendar_sheet()
+            values = [current] if current else [""]
+        if sid and values and values != [""]:
+            self._sheet_titles_by_sid[sid] = values
+
+        preferred = ""
+        if self.client and sid:
+            preferred = self.client.preferred_calendar_sheet(sid)
+        current = preferred or self._current_calendar_sheet()
+        if current and current not in values:
+            values = [current, *[v for v in values if v != current]]
+
+        self._suppress_sheet_trace = True
+        try:
+            self.sheet_filter.configure(values=values or [""])
+            if current and current in values:
+                self.sheet_filter_var.set(current)
+            elif values and values[0]:
+                self.sheet_filter_var.set(values[0])
+            else:
+                self.sheet_filter_var.set("")
+                self.sheet_filter.set("Лист")
+        finally:
+            self._suppress_sheet_trace = False
+
+    def _on_sheet_filter_changed(self, *_args) -> None:
+        if getattr(self, "_suppress_sheet_trace", False):
+            return
+        title = self.sheet_filter_var.get().strip()
+        if not title or title == "Лист" or not self.client:
+            return
+        sid = self._active_spreadsheet_id()
+        if not sid:
+            return
+        if self.client.preferred_calendar_sheet(sid) == title:
+            return
+        self.client.set_preferred_calendar_sheet(sid, title)
+        self._calendar_fp = None
+        self._calendar_struct_fp = None
+        self.reload_all()
+
     def _set_account_label(self, email: str = "") -> None:
         text = (email or "").strip()
         if not hasattr(self, "account_label"):
@@ -1197,11 +1301,17 @@ class SheetsHubApp(ctk.CTk):
             self._set_status(f"Обновляю «{selected_name}»…")
 
         def work():
-            return self.client.fetch_all(sources)
+            records, errors = self.client.fetch_all(sources)
+            sheet_titles: list[str] = []
+            try:
+                sheet_titles = self.client.list_calendar_sheet_titles(sources[0].normalized_id())
+            except Exception:
+                sheet_titles = []
+            return records, errors, sheet_titles
 
         def done(result):
             self._cal_frozen = False
-            records, errors = result
+            records, errors, sheet_titles = result
             self._last_error_message = "\n\n".join(errors[:8]) if errors else ""
             booking = [item for item in records if item.kind != KIND_INFO]
             self.info_records = self._dedupe_info([item for item in records if item.kind == KIND_INFO])
@@ -1216,27 +1326,46 @@ class SheetsHubApp(ctk.CTk):
                     self._suppress_source_trace = False
             raw_count = len(booking)
             self.records = explode_records(booking)
+            self._sync_sheet_filter(sheet_titles)
             # Не сбрасываем _calendar_fp — иначе каждые 30 с сетка мигает и пересобирается.
             extra = f" · {len(errors)} ошибок" if errors else ""
             if getattr(self.client, "read_only_public", False):
                 extra += " · чтение CSV"
             booked = sum(1 for item in self.records if item.layout == "calendar" and item.values.get("Статус") == "Занято")
             slots = sum(1 for item in self.records if item.layout == "calendar")
+            sheet_name = self._current_calendar_sheet()
+            sheet_note = f" · {sheet_name}" if sheet_name else ""
             info_note = f" · справка: {len(self.info_records)}" if self.info_records else ""
             if slots:
-                self._status_after_draw = f"{selected_name}: {slots} слотов, занято {booked}{info_note}{extra}"
+                self._status_after_draw = (
+                    f"{selected_name}{sheet_note}: {slots} слотов, занято {booked}{info_note}{extra}"
+                )
             else:
                 split_note = ""
                 if len(self.records) > raw_count:
                     split_note = f" · разбито на {len(self.records)} пунктов"
                 self._status_after_draw = (
-                    f"{selected_name}: строк {raw_count}{split_note}{info_note}{extra}"
+                    f"{selected_name}{sheet_note}: строк {raw_count}{split_note}{info_note}{extra}"
                 )
             self._schedule_render(immediate=True)
             if errors:
                 messagebox.showwarning("Таблица не загрузилась", "\n\n".join(errors[:8]))
 
-        self._run_bg(work, done)
+        def work_safe():
+            try:
+                return ("ok", work())
+            except Exception as exc:
+                return ("err", exc)
+
+        def done_safe(payload):
+            kind, data = payload
+            if kind == "err":
+                self._cal_frozen = False
+                self._finish_bg(lambda *_: None, None, data, alert=True)
+                return
+            self._finish_bg(done, data, None, alert=False)
+
+        self._run_bg(work_safe, done_safe, alert=False)
 
     def _status_value(self, record: Record) -> str:
         for key, value in record.values.items():
@@ -2457,6 +2586,7 @@ class SheetsHubApp(ctk.CTk):
                         name, phone = extract_phone(typed)
                         record.values["Клиент"] = name or typed
                         record.values["Телефон"] = phone
+                        notify_booking_async(self.config_data.telegram, record, typed)
                     if self._refresh_slot_label(record):
                         booked = sum(
                             1
@@ -2551,10 +2681,10 @@ class SheetsHubApp(ctk.CTk):
         self._run_bg(work, done)
 
     def _open_tables_dialog(self) -> None:
-        dialog = self._dialog("Таблицы", "920x540")
+        dialog = self._dialog("Таблицы", "920x620")
         dialog.minsize(720, 420)
         dialog.grid_columnconfigure(0, weight=1)
-        dialog.grid_rowconfigure(2, weight=1)
+        dialog.grid_rowconfigure(3, weight=1)
         self._tables_dialog_open = True
 
         account = ctk.CTkFrame(dialog, fg_color=BG, corner_radius=10, border_width=1, border_color=LINE)
@@ -2636,6 +2766,96 @@ class SheetsHubApp(ctk.CTk):
             row=2, column=2, sticky="e", padx=(4, 12), pady=(0, 10)
         )
 
+        tg_box = ctk.CTkFrame(dialog, fg_color=BG, corner_radius=10, border_width=1, border_color=LINE)
+        tg_box.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 8))
+        tg_box.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            tg_box,
+            text="Telegram — уведомления о записи",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=TEXT,
+        ).grid(row=0, column=0, columnspan=3, sticky="w", padx=12, pady=(10, 2))
+        ctk.CTkLabel(
+            tg_box,
+            text="После сохранения клиента в ячейке календаря бот отправит дату, время и данные в чат.",
+            text_color=MUTED,
+            font=ctk.CTkFont(size=11),
+            wraplength=780,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", padx=12, pady=(0, 6))
+        tg_enabled_var = tk.BooleanVar(value=bool(self.config_data.telegram.enabled))
+        tg_token_var = tk.StringVar(value=self.config_data.telegram.bot_token or "")
+        tg_chat_var = tk.StringVar(value=self.config_data.telegram.chat_id or "")
+        ctk.CTkSwitch(
+            tg_box,
+            text="Включить",
+            variable=tg_enabled_var,
+            text_color=TEXT,
+            fg_color=GREEN,
+            progress_color=GREEN,
+            button_color=CARD,
+            button_hover_color=LINE,
+        ).grid(row=2, column=0, sticky="w", padx=12, pady=(0, 8))
+        ctk.CTkLabel(tg_box, text="Токен бота", text_color=MUTED, font=ctk.CTkFont(size=11)).grid(
+            row=3, column=0, sticky="w", padx=12, pady=(0, 8)
+        )
+        _styled_entry(tg_box, "123456:ABC…", textvariable=tg_token_var, height=28, show="*").grid(
+            row=3, column=1, sticky="ew", padx=4, pady=(0, 8)
+        )
+        ctk.CTkLabel(tg_box, text="Chat ID", text_color=MUTED, font=ctk.CTkFont(size=11)).grid(
+            row=4, column=0, sticky="w", padx=12, pady=(0, 10)
+        )
+        _styled_entry(tg_box, "-100… или 123456789", textvariable=tg_chat_var, height=28).grid(
+            row=4, column=1, sticky="ew", padx=4, pady=(0, 10)
+        )
+
+        def test_telegram() -> None:
+            from sheets_hub.config import TelegramConfig
+
+            settings = TelegramConfig(
+                enabled=True,
+                bot_token=tg_token_var.get().strip(),
+                chat_id=tg_chat_var.get().strip(),
+            )
+            if not settings.bot_token or not settings.chat_id:
+                messagebox.showwarning(
+                    "Telegram",
+                    "Укажите токен бота и chat_id.",
+                    parent=dialog,
+                )
+                return
+            status_var.set("Отправляю тест в Telegram…")
+
+            def work():
+                return send_message(settings, "Тест Sheets Hub — уведомления работают.")
+
+            def done(result):
+                ok, err = result
+                if ok:
+                    status_var.set("Тестовое сообщение отправлено в Telegram.")
+                else:
+                    status_var.set(f"Telegram: {err.split(chr(10))[0]}")
+
+            def work_safe():
+                try:
+                    return ("ok", work())
+                except Exception as exc:
+                    return ("err", exc)
+
+            def done_safe(payload):
+                kind, data = payload
+                if kind == "err":
+                    status_var.set(str(data).split("\n")[0])
+                    messagebox.showerror("Telegram", str(data), parent=dialog)
+                    return
+                done(data)
+
+            self._run_bg(work_safe, done_safe, alert=False)
+
+        self._outline_button(tg_box, "Тест", test_telegram, 80).grid(
+            row=3, column=2, rowspan=2, padx=(4, 12), pady=(0, 10)
+        )
+
         editor = _RefList(
             dialog,
             "Рабочие таблицы (общие)",
@@ -2643,11 +2863,11 @@ class SheetsHubApp(ctk.CTk):
             "Таблица",
             subtitle="Этот список одинаковый на всех ПК. Добавили здесь — появится везде после сохранения.",
         )
-        editor.frame.grid(row=2, column=0, sticky="nsew", padx=16, pady=(0, 8))
+        editor.frame.grid(row=3, column=0, sticky="nsew", padx=16, pady=(0, 8))
 
         status_var = tk.StringVar(value="")
         ctk.CTkLabel(dialog, textvariable=status_var, text_color=MUTED, font=ctk.CTkFont(size=11)).grid(
-            row=3, column=0, sticky="w", padx=20, pady=(0, 4)
+            row=4, column=0, sticky="w", padx=20, pady=(0, 4)
         )
 
         def close_dialog() -> None:
@@ -2728,6 +2948,9 @@ class SheetsHubApp(ctk.CTk):
             self.config_data.destinations = list(refs)
             self.config_data.registry_spreadsheet_id = registry_id
             self.config_data.registry_sheet = registry_sheet
+            self.config_data.telegram.enabled = bool(tg_enabled_var.get())
+            self.config_data.telegram.bot_token = tg_token_var.get().strip()
+            self.config_data.telegram.chat_id = tg_chat_var.get().strip()
             save_config(self.config_data)
             status_var.set("Сохраняю общий список в облако…")
 
@@ -2756,7 +2979,7 @@ class SheetsHubApp(ctk.CTk):
             self._run_bg(work_safe, done_safe, alert=False)
 
         buttons = ctk.CTkFrame(dialog, fg_color="transparent")
-        buttons.grid(row=4, column=0, pady=(0, 14))
+        buttons.grid(row=5, column=0, pady=(0, 14))
         self._outline_button(buttons, "Загрузить из облака", load_from_cloud, 180).pack(
             side="left", padx=(0, 8)
         )
