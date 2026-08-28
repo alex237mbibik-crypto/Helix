@@ -155,6 +155,7 @@ class SheetRef:
     sheet: str = "Лист1"
     map: dict[str, str] = field(default_factory=dict)
     service: str = ""
+    city: str = ""
     address: str = ""
     kind: str = KIND_RECORDS
 
@@ -165,19 +166,28 @@ class SheetRef:
         text = (self.spreadsheet_id or "").strip()
         return not text or text.upper().startswith("PASTE_")
 
-    def city(self) -> str:
+    def resolved_city(self) -> str:
+        explicit = (self.city or "").strip()
+        if explicit:
+            return explicit
         return extract_city(self.address)
 
     def label(self) -> str:
         parts = [self.name]
         if self.service:
             parts.append(self.service)
+        city = self.resolved_city()
+        if city:
+            parts.append(city)
         if self.address:
             parts.append(self.address)
         return " · ".join(parts)
 
     def dest_key(self) -> str:
-        return f"{self.name}|{self.spreadsheet_id}|{self.sheet}|{self.service}|{self.address}"
+        return (
+            f"{self.name}|{self.spreadsheet_id}|{self.sheet}|"
+            f"{self.service}|{self.city}|{self.address}"
+        )
 
 
 def extract_city(address: str) -> str:
@@ -326,7 +336,10 @@ def merge_tables(sources: list[SheetRef], destinations: list[SheetRef]) -> list[
     for ref in [*usable_refs(sources), *usable_refs(destinations)]:
         key = _ref_identity(ref)
         existing = merged.get(key)
-        if existing is None or ((ref.service or ref.address) and not (existing.service or existing.address)):
+        if existing is None or (
+            (ref.service or ref.city or ref.address)
+            and not (existing.service or existing.city or existing.address)
+        ):
             merged[key] = ref
     return list(merged.values())
 
@@ -334,6 +347,10 @@ def merge_tables(sources: list[SheetRef], destinations: list[SheetRef]) -> list[
 def _load_refs(items: Any) -> list[SheetRef]:
     refs: list[SheetRef] = []
     for item in items or []:
+        address = str(item.get("address") or item.get("адрес") or "")
+        city = str(item.get("city") or item.get("город") or "").strip()
+        if not city:
+            city = extract_city(address)
         refs.append(
             SheetRef(
                 name=str(item.get("name") or "Без имени"),
@@ -341,7 +358,8 @@ def _load_refs(items: Any) -> list[SheetRef]:
                 sheet=str(item.get("sheet") or ""),
                 map={str(k): str(v) for k, v in (item.get("map") or {}).items()},
                 service=str(item.get("service") or item.get("услуга") or ""),
-                address=str(item.get("address") or item.get("адрес") or ""),
+                city=city,
+                address=address,
                 kind=normalize_kind(str(item.get("kind") or item.get("тип") or KIND_RECORDS)),
             )
         )
@@ -358,6 +376,8 @@ def _dump_ref(ref: SheetRef) -> dict[str, Any]:
         payload["map"] = ref.map
     if ref.service:
         payload["service"] = ref.service
+    if ref.city:
+        payload["city"] = ref.city
     if ref.address:
         payload["address"] = ref.address
     if normalize_kind(ref.kind) == KIND_INFO:

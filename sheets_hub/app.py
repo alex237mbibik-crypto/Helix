@@ -901,7 +901,7 @@ class SheetsHubApp(ctk.CTk):
         for ref in items:
             if service and self._norm_filter(ref.service) != service:
                 continue
-            if city and self._norm_filter(ref.city()) != city:
+            if city and self._norm_filter(ref.resolved_city()) != city:
                 continue
             if address and self._norm_filter(ref.address) != address:
                 continue
@@ -942,7 +942,7 @@ class SheetsHubApp(ctk.CTk):
                 if not service or self._norm_filter(ref.service) == service
             ]
             cities = sorted(
-                {ref.city() for ref in after_service if ref.city()},
+                {ref.resolved_city() for ref in after_service if ref.resolved_city()},
                 key=str.lower,
             )
             self._set_combo_values(self.city_filter, self.city_filter_var, cities)
@@ -951,7 +951,7 @@ class SheetsHubApp(ctk.CTk):
             after_city = [
                 ref
                 for ref in after_service
-                if not city or self._norm_filter(ref.city()) == city
+                if not city or self._norm_filter(ref.resolved_city()) == city
             ]
             addresses = sorted(
                 {ref.address.strip() for ref in after_city if ref.address.strip()},
@@ -2806,8 +2806,8 @@ class SheetsHubApp(ctk.CTk):
         self._run_bg(work, done)
 
     def _open_tables_dialog(self) -> None:
-        dialog = self._dialog("Таблицы", "960x700")
-        dialog.minsize(780, 520)
+        dialog = self._dialog("Таблицы", "1040x720")
+        dialog.minsize(860, 540)
         dialog.grid_columnconfigure(0, weight=1)
         dialog.grid_rowconfigure(3, weight=1, minsize=180)
         self._tables_dialog_open = True
@@ -3005,7 +3005,7 @@ class SheetsHubApp(ctk.CTk):
             "Рабочие таблицы (общие)",
             self._tables(),
             "Таблица",
-            subtitle="Этот список одинаковый на всех ПК. В адресе указывайте город: «г. Минск, пр-т …».",
+            subtitle="Заполните название, услугу, город и адрес — по ним работает фильтр сверху.",
         )
         editor.frame.grid(row=3, column=0, sticky="nsew", padx=16, pady=(0, 8))
 
@@ -3181,7 +3181,7 @@ class _RefList:
         colnames = ctk.CTkFrame(self.frame, fg_color="transparent")
         colnames.grid(row=1, column=0, sticky="ew", padx=10, pady=(4, 0))
         self._layout_columns(colnames)
-        for col, text in enumerate(["Название", "Ссылка", "Лист", "Услуга", "Адрес"]):
+        for col, text in enumerate(["Название", "Ссылка", "Лист", "Услуга", "Город", "Адрес"]):
             ctk.CTkLabel(
                 colnames,
                 text=text,
@@ -3227,12 +3227,13 @@ class _RefList:
             self.add_empty()
 
     def _layout_columns(self, widget) -> None:
-        widget.grid_columnconfigure(0, weight=0, minsize=108)
-        widget.grid_columnconfigure(1, weight=1, minsize=220)
-        widget.grid_columnconfigure(2, weight=0, minsize=100)
-        widget.grid_columnconfigure(3, weight=0, minsize=108)
-        widget.grid_columnconfigure(4, weight=0, minsize=120)
-        widget.grid_columnconfigure(5, weight=0, minsize=36)
+        widget.grid_columnconfigure(0, weight=0, minsize=100)
+        widget.grid_columnconfigure(1, weight=1, minsize=180)
+        widget.grid_columnconfigure(2, weight=0, minsize=72)
+        widget.grid_columnconfigure(3, weight=0, minsize=100)
+        widget.grid_columnconfigure(4, weight=0, minsize=90)
+        widget.grid_columnconfigure(5, weight=0, minsize=120)
+        widget.grid_columnconfigure(6, weight=0, minsize=36)
 
     def add_empty(self) -> None:
         self._add_row(SheetRef(name=self.placeholder, spreadsheet_id="", sheet="все"))
@@ -3265,6 +3266,7 @@ class _RefList:
         url_var = tk.StringVar(value="" if ref.is_placeholder() else ref.spreadsheet_id)
         sheet_var = tk.StringVar(value=ref.sheet or "все")
         service_var = tk.StringVar(value=ref.service)
+        city_var = tk.StringVar(value=ref.city or ref.resolved_city())
         address_var = tk.StringVar(value=ref.address)
 
         row_frame = ctk.CTkFrame(self.body, fg_color="transparent")
@@ -3272,11 +3274,12 @@ class _RefList:
         self._layout_columns(row_frame)
 
         fields = [
-            (name_var, "Гинеколог", 108),
+            (name_var, "Гинеколог Партизанский", 100),
             (url_var, "https://docs.google.com/spreadsheets/d/...", None),
-            (sheet_var, "все", 100),
-            (service_var, "Гинеколог", 108),
-            (address_var, "ул. Ленина", 120),
+            (sheet_var, "все", 72),
+            (service_var, "Гинеколог", 100),
+            (city_var, "Минск", 90),
+            (address_var, "пр-т Партизанский, 56", 120),
         ]
         for col, (var, placeholder, width) in enumerate(fields):
             kwargs: dict = {"height": 28, "textvariable": var}
@@ -3291,6 +3294,7 @@ class _RefList:
             "url": url_var,
             "sheet": sheet_var,
             "service": service_var,
+            "city": city_var,
             "address": address_var,
             "kind": ref.kind,
             "map": dict(ref.map),
@@ -3318,7 +3322,7 @@ class _RefList:
             border_color=LINE,
             text_color=DANGER,
             command=remove,
-        ).grid(row=0, column=5, padx=(2, 4))
+        ).grid(row=0, column=6, padx=(2, 4))
         self.rows.append(row_data)
 
     def collect(self) -> list[SheetRef]:
@@ -3327,6 +3331,8 @@ class _RefList:
             url = re.sub(r"\s+", "", row["url"].get().strip())
             if not url:
                 continue
+            address = row["address"].get().strip()
+            city = row["city"].get().strip()
             out.append(
                 SheetRef(
                     name=row["name"].get().strip() or self.placeholder,
@@ -3334,7 +3340,8 @@ class _RefList:
                     sheet=row["sheet"].get().strip() or "все",
                     map=row["map"],
                     service=row["service"].get().strip(),
-                    address=row["address"].get().strip(),
+                    city=city,
+                    address=address,
                     kind=row["kind"] or KIND_RECORDS,
                 )
             )

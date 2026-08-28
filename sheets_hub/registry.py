@@ -3,13 +3,21 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from sheets_hub.config import KIND_INFO, KIND_RECORDS, SheetRef, normalize_kind, usable_refs
+from sheets_hub.config import (
+    KIND_INFO,
+    KIND_RECORDS,
+    SheetRef,
+    extract_city,
+    normalize_kind,
+    usable_refs,
+)
 
 REGISTRY_HEADERS = [
     "name",
     "spreadsheet_id",
     "sheet",
     "service",
+    "city",
     "address",
     "kind",
     "map_json",
@@ -30,6 +38,7 @@ def tables_signature(refs: list[SheetRef]) -> tuple:
                 sid,
                 (ref.sheet or "").strip().lower(),
                 (ref.service or "").strip(),
+                (ref.city or "").strip() or ref.resolved_city(),
                 (ref.address or "").strip(),
                 normalize_kind(ref.kind),
                 tuple(sorted((str(k), str(v)) for k, v in (ref.map or {}).items())),
@@ -71,13 +80,16 @@ def refs_from_registry_rows(rows: list[list[Any]]) -> list[SheetRef]:
                     mapping = {str(k): str(v) for k, v in parsed.items()}
             except Exception:
                 mapping = {}
+        address = cell(row, "address") or cell(row, "адрес")
+        city = cell(row, "city") or cell(row, "город") or extract_city(address)
         out.append(
             SheetRef(
                 name=cell(row, "name") or cell(row, "название") or "Таблица",
                 spreadsheet_id=sid,
                 sheet=cell(row, "sheet") or cell(row, "лист") or "все",
                 service=cell(row, "service") or cell(row, "услуга"),
-                address=cell(row, "address") or cell(row, "адрес"),
+                city=city,
+                address=address,
                 kind=normalize_kind(cell(row, "kind") or cell(row, "тип") or KIND_RECORDS),
                 map=mapping,
             )
@@ -96,6 +108,7 @@ def refs_to_registry_rows(refs: list[SheetRef]) -> list[list[str]]:
                 ref.spreadsheet_id or "",
                 ref.sheet or "все",
                 ref.service or "",
+                ref.city or ref.resolved_city() or "",
                 ref.address or "",
                 kind if kind == KIND_INFO else "",
                 map_json,
