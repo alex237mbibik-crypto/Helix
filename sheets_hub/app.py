@@ -198,6 +198,10 @@ class SheetsHubApp(ctk.CTk):
         self._info_fp: tuple | None = None
         self._info_struct_fp: tuple | None = None
         self._info_cards: list[tk.Label] = []
+        self._info_expanded = False
+        self._info_panel_h = 200
+        self._info_has_content = False
+        self._info_resize_start: tuple[int, int] | None = None
         self._rendering = False
         self._connecting = False
         self._cal_draw_after_id: str | None = None
@@ -548,21 +552,123 @@ class SheetsHubApp(ctk.CTk):
         )
         self.info_wrap.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(
-            self.info_wrap,
-            text="Общая информация",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            text_color=MUTED,
+        self.info_header = ctk.CTkFrame(self.info_wrap, fg_color="transparent", height=34)
+        self.info_header.pack(fill="x", padx=4, pady=(4, 2))
+        self.info_header.pack_propagate(False)
+        self.info_toggle_btn = ctk.CTkButton(
+            self.info_header,
+            text="▶ Общая информация",
+            command=self._toggle_info_panel,
+            height=28,
+            corner_radius=6,
+            fg_color="transparent",
+            hover_color="#d7eedc",
+            text_color=TEXT,
+            font=ctk.CTkFont(size=13, weight="bold"),
             anchor="w",
-        ).pack(fill="x", padx=10, pady=(6, 0))
+        )
+        self.info_toggle_btn.pack(fill="x", padx=4, pady=2)
 
-        # Обычный блок без скролла; при переполнении подменим на scrollable.
-        self.info_body = ctk.CTkFrame(self.info_wrap, fg_color="transparent")
-        self.info_body.pack(fill="x", padx=6, pady=(4, 8))
+        # Полоска для изменения высоты панели.
+        self.info_sash = tk.Frame(
+            self.info_wrap,
+            bg="#a8dab5",
+            height=7,
+            cursor="sb_v_double_arrow",
+            highlightthickness=0,
+            bd=0,
+        )
+        self.info_sash.bind("<ButtonPress-1>", self._on_info_sash_press)
+        self.info_sash.bind("<B1-Motion>", self._on_info_sash_motion)
+        self.info_sash.bind("<ButtonRelease-1>", self._on_info_sash_release)
+
+        self.info_content = ctk.CTkFrame(
+            self.info_wrap,
+            fg_color="transparent",
+            height=self._info_panel_h,
+        )
+        self.info_content.pack_propagate(False)
+        self.info_content.grid_columnconfigure(0, weight=1)
+        self.info_content.grid_rowconfigure(0, weight=1)
+
+        self.info_body = ctk.CTkFrame(self.info_content, fg_color="transparent")
+        self.info_body.pack(fill="both", expand=True, padx=6, pady=(0, 8))
         self.info_body.grid_columnconfigure(0, weight=1)
         self._info_scroll = None
-        self._info_max_h = 220
+        self._info_max_h = self._info_panel_h
         self.info_wrap.grid_remove()
+
+    def _info_toggle_label(self, count: int = 0) -> str:
+        arrow = "▼" if self._info_expanded else "▶"
+        if count > 0:
+            return f"{arrow} Общая информация ({count})"
+        return f"{arrow} Общая информация"
+
+    def _toggle_info_panel(self) -> None:
+        if not self._info_has_content:
+            return
+        self._info_expanded = not self._info_expanded
+        self._apply_info_panel_layout()
+        if self._info_expanded:
+            self._info_fp = None
+            self._render_info()
+        self.after_idle(self._refresh_cal_scroll)
+
+    def _apply_info_panel_layout(self) -> None:
+        if not hasattr(self, "info_wrap"):
+            return
+        count = len(self._filtered_info()) if self._info_has_content else 0
+        try:
+            self.info_toggle_btn.configure(text=self._info_toggle_label(count))
+        except Exception:
+            pass
+        if not self._info_has_content:
+            self.info_wrap.grid_remove()
+            return
+        self.info_wrap.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 8))
+        if self._info_expanded:
+            try:
+                self.info_sash.pack(fill="x", padx=8, pady=(0, 2))
+            except tk.TclError:
+                pass
+            try:
+                self.info_content.configure(height=max(80, self._info_panel_h))
+                self.info_content.pack(fill="x", padx=0, pady=(0, 4))
+            except tk.TclError:
+                pass
+        else:
+            try:
+                self.info_sash.pack_forget()
+            except Exception:
+                pass
+            try:
+                self.info_content.pack_forget()
+            except Exception:
+                pass
+
+    def _on_info_sash_press(self, event) -> None:
+        self._info_resize_start = (event.y_root, self._info_panel_h)
+
+    def _on_info_sash_motion(self, event) -> None:
+        if not self._info_resize_start:
+            return
+        start_y, start_h = self._info_resize_start
+        delta = event.y_root - start_y
+        new_h = max(90, min(520, start_h + delta))
+        if abs(new_h - self._info_panel_h) < 2:
+            return
+        self._info_panel_h = new_h
+        self._info_max_h = new_h
+        try:
+            self.info_content.configure(height=new_h)
+            if self._info_scroll is not None:
+                self._info_scroll.configure(height=max(60, new_h - 12))
+        except Exception:
+            pass
+
+    def _on_info_sash_release(self, _event=None) -> None:
+        self._info_resize_start = None
+        self.after_idle(self._refresh_cal_scroll)
 
     def _style_treeview(self) -> None:
         style = ttk.Style(self)
@@ -2157,6 +2263,19 @@ class SheetsHubApp(ctk.CTk):
         records = self._filtered_info()
         fp = self._info_fingerprint()
         struct = self._info_structure_fp(records)
+        has_records = bool(records)
+        if not has_records:
+            if self._info_has_content or self._info_fp is not None:
+                self._info_fp = fp
+                self._render_info()
+            return
+        # Свёрнуто: только обновить заголовок со счётчиком, без перерисовки календаря.
+        if not self._info_expanded:
+            self._info_has_content = True
+            self._info_fp = fp
+            self._info_struct_fp = struct
+            self._apply_info_panel_layout()
+            return
         if fp == self._info_fp and self._info_has_cards():
             return
         payloads = self._info_card_payloads(records)
@@ -2167,6 +2286,10 @@ class SheetsHubApp(ctk.CTk):
             and self._patch_info_cards(payloads)
         ):
             self._info_fp = fp
+            try:
+                self.info_toggle_btn.configure(text=self._info_toggle_label(len(payloads)))
+            except Exception:
+                pass
             return
         self._info_fp = fp
         self._info_struct_fp = struct
@@ -2244,26 +2367,31 @@ class SheetsHubApp(ctk.CTk):
     def _reset_info_host(self, *, scrollable: bool) -> ctk.CTkFrame:
         self._info_cards = []
         if self._info_scroll is not None:
-            self._info_scroll.destroy()
+            try:
+                self._info_scroll.destroy()
+            except Exception:
+                pass
             self._info_scroll = None
         for child in self.info_body.winfo_children():
             child.destroy()
+        content_h = max(60, self._info_panel_h - 12)
+        self._info_max_h = self._info_panel_h
         if scrollable:
             self.info_body.pack_forget()
             try:
                 self._info_scroll = ctk.CTkScrollableFrame(
-                    self.info_wrap,
+                    self.info_content,
                     fg_color="transparent",
-                    height=self._info_max_h,
+                    height=content_h,
                     orientation="vertical",
                 )
             except TypeError:
                 self._info_scroll = ctk.CTkScrollableFrame(
-                    self.info_wrap,
+                    self.info_content,
                     fg_color="transparent",
-                    height=self._info_max_h,
+                    height=content_h,
                 )
-            self._info_scroll.pack(fill="x", padx=6, pady=(4, 8))
+            self._info_scroll.pack(fill="both", expand=True, padx=6, pady=(0, 8))
             self._info_scroll.grid_columnconfigure(0, weight=1)
             for name in ("_scrollbar_horizontal", "horizontal_scrollbar", "_parent_scrollbar"):
                 bar = getattr(self._info_scroll, name, None)
@@ -2277,7 +2405,7 @@ class SheetsHubApp(ctk.CTk):
                             pass
             return self._info_scroll
         try:
-            self.info_body.pack(fill="x", padx=6, pady=(4, 8))
+            self.info_body.pack(fill="both", expand=True, padx=6, pady=(0, 8))
         except tk.TclError:
             pass
         self.info_body.grid_columnconfigure(0, weight=1)
@@ -2286,22 +2414,31 @@ class SheetsHubApp(ctk.CTk):
     def _render_info(self) -> None:
         records = self._filtered_info()
         if not records:
+            self._info_has_content = False
+            self._info_expanded = False
             self._reset_info_host(scrollable=False)
             self._info_cards = []
             self._info_struct_fp = None
-            self.info_wrap.grid_remove()
+            self._apply_info_panel_layout()
             return
-        self.info_wrap.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 8))
 
-        # Сначала рисуем без скролла; если не влезает — перерисуем со скроллом.
+        self._info_has_content = True
+        self._apply_info_panel_layout()
+        # В свёрнутом виде только заголовок — календарь занимает всё свободное место.
+        if not self._info_expanded:
+            self._info_cards = []
+            self._info_struct_fp = self._info_structure_fp(records)
+            return
+
         host = self._reset_info_host(scrollable=False)
         cards = self._fill_info_cards(host, records)
         if not cards:
-            self.info_wrap.grid_remove()
+            self._info_has_content = False
             self._info_cards = []
+            self._apply_info_panel_layout()
             return
         self.update_idletasks()
-        need_scroll = host.winfo_reqheight() > self._info_max_h
+        need_scroll = host.winfo_reqheight() > max(60, self._info_panel_h - 20)
         if need_scroll:
             host = self._reset_info_host(scrollable=True)
             cards = self._fill_info_cards(host, records)
