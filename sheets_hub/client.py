@@ -1728,9 +1728,13 @@ class SheetsClient:
                         worksheet = ws
                         break
             if worksheet is None:
+                # Листа ещё нет — это пустой реестр, не ошибка.
                 return []
-            values = self._sheet_values(worksheet)
-            return refs_from_registry_rows(values)
+            # Не используем _sheet_values (лимит календаря 38 строк) — список таблиц длиннее.
+            values = self._call(
+                lambda: worksheet.get("A1:H500", value_render_option="FORMATTED_VALUE")
+            )
+            return refs_from_registry_rows(values or [])
         except Exception as exc:
             errors.append(str(_friendly_error(exc)))
 

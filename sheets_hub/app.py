@@ -47,7 +47,8 @@ SLOT_TIME = "#f1f3f4"
 SLOT_OUTLINE = "#dadce0"
 AUTO_REFRESH_MS = 30_000
 # Полный sync списка таблиц не на каждое автообновление — иначе тормозит календарь.
-REGISTRY_EVERY_N_REFRESH = 5
+# Раз в N автообновлений тянем общий список таблиц (30с × N).
+REGISTRY_EVERY_N_REFRESH = 2
 CAL_TIME_W = 72
 CAL_DATE_W = 176
 CAL_ROW_H = 72
@@ -1393,22 +1394,25 @@ class SheetsHubApp(ctk.CTk):
         return True
 
     def _sync_registry_work(self) -> tuple[str, object]:
-        """Облако — единственный источник списка таблиц для всех ПК."""
+        """Облако — единственный источник списка таблиц для всех ПК.
+
+        Важно: при пустом облаке НЕ заливаем локальный кэш автоматически.
+        Иначе второй ПК со старым списком может затереть свежий список из облака
+        (гонка clear/write или сбой чтения). Запись в облако — только через
+        «Сохранить для всех ПК».
+        """
         if not self.client or not self._registry_configured():
             return ("skip", None)
         registry_id = self.config_data.registry_spreadsheet_id
         sheet = self.config_data.registry_sheet or DEFAULT_REGISTRY_SHEET
         remote = self.client.pull_table_registry(registry_id, sheet)
         local = usable_refs(merge_tables(self.config_data.sources, self.config_data.destinations))
-        # Пустой облачный список + есть локальный кэш → один раз заливаем в облако.
-        if not remote and local:
-            self.client.push_table_registry(registry_id, local, sheet)
-            return ("seeded", len(local))
-        # Облако главное: всегда подтягиваем, даже если локально что-то другое.
         if remote:
             if tables_signature(remote) != tables_signature(local):
                 return ("pull", remote)
             return ("ok", len(remote))
+        if local:
+            return ("cloud_empty", len(local))
         return ("ok", 0)
 
     def _sync_registry_async(self, *, then_reload: bool = False) -> None:
@@ -1451,8 +1455,11 @@ class SheetsHubApp(ctk.CTk):
                     else:
                         self._set_status("В общем списке нет таблиц.")
                 return
-            if action == "seeded":
-                self._set_status(f"Общий список таблиц создан в облаке ({data})")
+            if action == "cloud_empty":
+                self._set_status(
+                    f"В облаке нет общего списка (локально {data}). "
+                    "Откройте «Таблицы» → «Сохранить для всех ПК»."
+                )
             if then_reload:
                 if self._valid_sources():
                     self.reload_all()
@@ -3298,9 +3305,9 @@ class SheetsHubApp(ctk.CTk):
                     self.client.push_table_registry(registry_id, refs, registry_sheet)
                     # Сразу читаем обратно — подтверждение, что в облаке реально лежит список.
                     remote = self.client.pull_table_registry(registry_id, registry_sheet)
-                    return ("ok", len(refs), len(remote))
+                    return ("ok", refs, remote)
                 except Exception as exc:
-                    return ("err", exc, 0)
+                    return ("err", exc, None)
 
             def done_safe(payload) -> None:
                 save_busy["ok"] = False
@@ -3322,7 +3329,9 @@ class SheetsHubApp(ctk.CTk):
                         parent=dialog,
                     )
                     return
-                saved_n, remote_n = payload[1], payload[2]
+                saved_refs, remote = payload[1], payload[2]
+                saved_n = len(usable_refs(saved_refs))
+                remote_n = len(remote or [])
                 if remote_n < 1:
                     status_var.set("Облако пустое после записи — проверьте доступ")
                     messagebox.showerror(
@@ -3332,12 +3341,24 @@ class SheetsHubApp(ctk.CTk):
                         parent=dialog,
                     )
                     return
+                if tables_signature(saved_refs) != tables_signature(remote or []):
+                    status_var.set(
+                        f"В облаке {remote_n} таблиц, ожидали {saved_n} — проверьте служебную таблицу"
+                    )
+                    messagebox.showwarning(
+                        "Список записан, но не совпал",
+                        f"Отправили {saved_n}, в облаке сейчас {remote_n}.\n"
+                        "Откройте служебную Google-таблицу (лист SheetsHub) и проверьте строки.\n"
+                        "На других ПК нажмите «Загрузить из облака».",
+                        parent=dialog,
+                    )
+                    return
                 self._set_status(f"Общий список сохранён: {saved_n} таблиц — виден на всех ПК")
                 messagebox.showinfo(
                     "Сохранено для всех ПК",
-                    f"В облако записано {saved_n} таблиц (в служебной таблице сейчас {remote_n}).\n\n"
-                    "На другом компьютере: откройте «Таблицы» → «Загрузить из облака» "
-                    "или перезапустите программу.",
+                    f"В облако записано {saved_n} таблиц.\n\n"
+                    "На другом компьютере: та же ссылка служебной таблицы → "
+                    "«Таблицы» → «Загрузить из облака» или перезапуск (подтянется за ~1 мин).",
                     parent=dialog,
                 )
                 close_dialog()
@@ -3358,6 +3379,8 @@ class SheetsHubApp(ctk.CTk):
         # При открытии сразу тянем общий список, если ссылка уже есть.
         if self._registry_configured() and self.client:
             dialog.after(200, lambda: load_from_cloud(auto=True))
+
+
 class _RefList:
     def __init__(
         self,
