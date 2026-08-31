@@ -552,6 +552,19 @@ class SheetsHubApp(ctk.CTk):
         )
         self.info_wrap.grid_columnconfigure(0, weight=1)
 
+        # Полоска между календарём и справкой: вверх — больше справки, вниз — меньше.
+        self.info_sash = tk.Frame(
+            self.info_wrap,
+            bg="#a8dab5",
+            height=7,
+            cursor="sb_v_double_arrow",
+            highlightthickness=0,
+            bd=0,
+        )
+        self.info_sash.bind("<ButtonPress-1>", self._on_info_sash_press)
+        self.info_sash.bind("<B1-Motion>", self._on_info_sash_motion)
+        self.info_sash.bind("<ButtonRelease-1>", self._on_info_sash_release)
+
         self.info_header = ctk.CTkFrame(self.info_wrap, fg_color="transparent", height=34)
         self.info_header.pack(fill="x", padx=4, pady=(4, 2))
         self.info_header.pack_propagate(False)
@@ -568,19 +581,6 @@ class SheetsHubApp(ctk.CTk):
             anchor="w",
         )
         self.info_toggle_btn.pack(fill="x", padx=4, pady=2)
-
-        # Полоска для изменения высоты панели.
-        self.info_sash = tk.Frame(
-            self.info_wrap,
-            bg="#a8dab5",
-            height=7,
-            cursor="sb_v_double_arrow",
-            highlightthickness=0,
-            bd=0,
-        )
-        self.info_sash.bind("<ButtonPress-1>", self._on_info_sash_press)
-        self.info_sash.bind("<B1-Motion>", self._on_info_sash_motion)
-        self.info_sash.bind("<ButtonRelease-1>", self._on_info_sash_release)
 
         self.info_content = ctk.CTkFrame(
             self.info_wrap,
@@ -628,9 +628,14 @@ class SheetsHubApp(ctk.CTk):
         self.info_wrap.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 8))
         if self._info_expanded:
             try:
-                self.info_sash.pack(fill="x", padx=8, pady=(0, 2))
+                # Сначала полоска сверху (граница с календарём), потом заголовок и текст.
+                self.info_sash.pack(fill="x", padx=8, pady=(2, 0), before=self.info_header)
             except tk.TclError:
-                pass
+                try:
+                    self.info_sash.pack(fill="x", padx=8, pady=(2, 0))
+                    self.info_header.pack(fill="x", padx=4, pady=(4, 2))
+                except tk.TclError:
+                    pass
             try:
                 self.info_content.configure(height=max(80, self._info_panel_h))
                 self.info_content.pack(fill="x", padx=0, pady=(0, 4))
@@ -645,6 +650,11 @@ class SheetsHubApp(ctk.CTk):
                 self.info_content.pack_forget()
             except Exception:
                 pass
+            # В свёрнутом виде остаётся только кнопка-заголовок.
+            try:
+                self.info_header.pack(fill="x", padx=4, pady=(4, 2))
+            except tk.TclError:
+                pass
 
     def _on_info_sash_press(self, event) -> None:
         self._info_resize_start = (event.y_root, self._info_panel_h)
@@ -653,8 +663,9 @@ class SheetsHubApp(ctk.CTk):
         if not self._info_resize_start:
             return
         start_y, start_h = self._info_resize_start
+        # Панель снизу: тянем границу вверх → выше, вниз → ниже.
         delta = event.y_root - start_y
-        new_h = max(90, min(520, start_h + delta))
+        new_h = max(90, min(520, start_h - delta))
         if abs(new_h - self._info_panel_h) < 2:
             return
         self._info_panel_h = new_h
