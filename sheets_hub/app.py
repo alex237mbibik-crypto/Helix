@@ -3091,6 +3091,9 @@ class SheetsHubApp(ctk.CTk):
         )
 
         status_var = tk.StringVar(value="")
+        cloud_op_gen = {"n": 0}  # отмена устаревших load/save колбэков
+        dialog_alive = {"ok": True}
+        save_busy = {"ok": False}
 
         def apply_telegram_settings(*, persist: bool = True) -> None:
             self.config_data.telegram.enabled = bool(tg_enabled_var.get())
@@ -3171,12 +3174,15 @@ class SheetsHubApp(ctk.CTk):
             subtitle="Заполните название, услугу, город и адрес — по ним работает фильтр сверху.",
         )
         editor.frame.grid(row=3, column=0, sticky="nsew", padx=16, pady=(0, 8))
+        opened_sig = tables_signature(editor.collect())
 
         ctk.CTkLabel(dialog, textvariable=status_var, text_color=MUTED, font=ctk.CTkFont(size=11)).grid(
             row=4, column=0, sticky="w", padx=20, pady=(0, 4)
         )
 
         def close_dialog() -> None:
+            cloud_op_gen["n"] += 1
+            dialog_alive["ok"] = False
             apply_telegram_settings(persist=True)
             self._tables_dialog_open = False
             try:
@@ -3184,29 +3190,42 @@ class SheetsHubApp(ctk.CTk):
             except Exception:
                 pass
 
-        def load_from_cloud() -> None:
+        def load_from_cloud(*, auto: bool = False) -> None:
+            if save_busy["ok"]:
+                return
             registry_id = registry_var.get().strip()
             registry_sheet = sheet_var.get().strip() or DEFAULT_REGISTRY_SHEET
             if not registry_id or registry_id.upper().startswith("PASTE_"):
-                status_var.set("Сначала вставьте ссылку на служебную таблицу.")
+                if not auto:
+                    status_var.set("Сначала вставьте ссылку на служебную таблицу.")
                 return
             if not self.client:
-                status_var.set("Нет подключения к Google — проверьте JSON ключа.")
+                if not auto:
+                    status_var.set("Нет подключения к Google — проверьте JSON ключа.")
                 return
+            cloud_op_gen["n"] += 1
+            op_id = cloud_op_gen["n"]
             status_var.set("Загружаю общий список…")
 
             def work():
                 return self.client.pull_table_registry(registry_id, registry_sheet)
 
             def done(refs) -> None:
+                if not dialog_alive["ok"] or op_id != cloud_op_gen["n"] or save_busy["ok"]:
+                    return
                 self.config_data.registry_spreadsheet_id = registry_id
                 self.config_data.registry_sheet = registry_sheet
                 if refs:
+                    if auto and tables_signature(editor.collect()) != opened_sig:
+                        status_var.set(
+                            "В облаке есть список — ваши правки не затираю. "
+                            "Нажмите «Загрузить из облака», если нужен облачный список."
+                        )
+                        return
                     editor.replace_refs(refs)
                     self._apply_remote_tables(refs)
                     status_var.set(f"Загружено из облака: {len(refs)} таблиц")
                 else:
-                    # Не затираем локальный список пустой загрузкой — иначе «+ Добавить» сразу сбрасывается.
                     status_var.set("В облаке пока пусто — добавьте таблицы и сохраните.")
 
             def work_safe():
@@ -3216,21 +3235,26 @@ class SheetsHubApp(ctk.CTk):
                     return ("err", exc)
 
             def done_safe(payload) -> None:
+                if not dialog_alive["ok"] or op_id != cloud_op_gen["n"]:
+                    return
                 kind, data = payload
                 if kind == "err":
                     status_var.set(str(data).split("\n")[0])
-                    messagebox.showerror(
-                        "Не удалось загрузить",
-                        str(data)
-                        + "\n\nОткройте служебную таблицу для сервисного аккаунта (Редактор).",
-                        parent=dialog,
-                    )
+                    if not auto:
+                        messagebox.showerror(
+                            "Не удалось загрузить",
+                            str(data)
+                            + "\n\nОткройте служебную таблицу для сервисного аккаунта (Редактор).",
+                            parent=dialog,
+                        )
                     return
                 done(data)
 
             self._run_bg(work_safe, done_safe, alert=False)
 
         def save() -> None:
+            if save_busy["ok"]:
+                return
             refs = editor.collect()
             registry_id = registry_var.get().strip()
             registry_sheet = sheet_var.get().strip() or DEFAULT_REGISTRY_SHEET
@@ -3252,6 +3276,11 @@ class SheetsHubApp(ctk.CTk):
                 messagebox.showerror("Нет подключения", "Сначала нужен рабочий credentials.json.", parent=dialog)
                 return
 
+            # Отменяем любую текущую загрузку из облака — она не должна затереть сохранение.
+            cloud_op_gen["n"] += 1
+            op_id = cloud_op_gen["n"]
+            save_busy["ok"] = True
+
             self.config_data.sources = refs
             self.config_data.destinations = list(refs)
             self.config_data.registry_spreadsheet_id = registry_id
@@ -3259,25 +3288,58 @@ class SheetsHubApp(ctk.CTk):
             apply_telegram_settings(persist=False)
             save_config(self.config_data)
             status_var.set("Сохраняю общий список в облако…")
+            try:
+                save_btn.configure(state="disabled")
+            except Exception:
+                pass
 
             def work_safe():
                 try:
                     self.client.push_table_registry(registry_id, refs, registry_sheet)
-                    return ("ok", len(refs))
+                    # Сразу читаем обратно — подтверждение, что в облаке реально лежит список.
+                    remote = self.client.pull_table_registry(registry_id, registry_sheet)
+                    return ("ok", len(refs), len(remote))
                 except Exception as exc:
-                    return ("err", exc)
+                    return ("err", exc, 0)
 
             def done_safe(payload) -> None:
-                kind, data = payload
+                save_busy["ok"] = False
+                try:
+                    save_btn.configure(state="normal")
+                except Exception:
+                    pass
+                if not dialog_alive["ok"] or op_id != cloud_op_gen["n"]:
+                    return
+                kind = payload[0]
                 if kind == "err":
+                    err = payload[1]
+                    status_var.set("Не сохранено в облако")
                     messagebox.showerror(
                         "Не удалось сохранить в облако",
-                        str(data)
-                        + "\n\nСлужебная таблица должна быть открыта для сервисного аккаунта (Редактор).",
+                        str(err)
+                        + "\n\nСлужебная таблица должна быть открыта для сервисного аккаунта (Редактор).\n"
+                        "Локально список уже записан, но другие ПК его не увидят, пока сохранение не пройдёт.",
                         parent=dialog,
                     )
                     return
-                self._set_status(f"Общий список сохранён: {data} таблиц — виден на всех ПК")
+                saved_n, remote_n = payload[1], payload[2]
+                if remote_n < 1:
+                    status_var.set("Облако пустое после записи — проверьте доступ")
+                    messagebox.showerror(
+                        "Сохранение не подтвердилось",
+                        "Запись прошла без ошибки, но в служебной таблице список пуст.\n"
+                        "Проверьте лист «SheetsHub» и права Редактор у сервисного аккаунта.",
+                        parent=dialog,
+                    )
+                    return
+                self._set_status(f"Общий список сохранён: {saved_n} таблиц — виден на всех ПК")
+                messagebox.showinfo(
+                    "Сохранено для всех ПК",
+                    f"В облако записано {saved_n} таблиц (в служебной таблице сейчас {remote_n}).\n\n"
+                    "На другом компьютере: откройте «Таблицы» → «Загрузить из облака» "
+                    "или перезапустите программу.",
+                    parent=dialog,
+                )
                 close_dialog()
                 self.client = None
                 self._try_connect()
@@ -3286,16 +3348,16 @@ class SheetsHubApp(ctk.CTk):
 
         buttons = ctk.CTkFrame(dialog, fg_color="transparent")
         buttons.grid(row=5, column=0, pady=(0, 14))
-        self._outline_button(buttons, "Загрузить из облака", load_from_cloud, 180).pack(
+        self._outline_button(buttons, "Загрузить из облака", lambda: load_from_cloud(auto=False), 180).pack(
             side="left", padx=(0, 8)
         )
-        self._primary_button(buttons, "Сохранить для всех ПК", save, 200).pack(side="left")
+        save_btn = self._primary_button(buttons, "Сохранить для всех ПК", save, 200)
+        save_btn.pack(side="left")
         dialog.protocol("WM_DELETE_WINDOW", close_dialog)
 
         # При открытии сразу тянем общий список, если ссылка уже есть.
         if self._registry_configured() and self.client:
-            dialog.after(200, load_from_cloud)
-
+            dialog.after(200, lambda: load_from_cloud(auto=True))
 class _RefList:
     def __init__(
         self,

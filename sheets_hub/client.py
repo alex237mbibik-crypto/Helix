@@ -789,6 +789,97 @@ def _update_cell_via_powershell(
             pass
 
 
+def _registry_a1(sheet_title: str, cell_range: str = "A1:H500") -> str:
+    safe = (sheet_title or DEFAULT_REGISTRY_SHEET).replace("'", "''")
+    return f"'{safe}'!{cell_range}"
+
+
+def _registry_sheet_titles_via_curl(credentials_path: Path, spreadsheet_id: str) -> list[str]:
+    token = _access_token(credentials_path)
+    url = (
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}"
+        f"?fields={quote('sheets.properties.title', safe='')}"
+    )
+    data = _curl_json("GET", url, headers={"Authorization": f"Bearer {token}"})
+    titles: list[str] = []
+    for sheet in data.get("sheets") or []:
+        props = sheet.get("properties") or {}
+        name = str(props.get("title") or "").strip()
+        if name:
+            titles.append(name)
+    return titles
+
+
+def _ensure_registry_sheet_via_curl(
+    credentials_path: Path, spreadsheet_id: str, sheet_title: str
+) -> str:
+    wanted = (sheet_title or DEFAULT_REGISTRY_SHEET).strip() or DEFAULT_REGISTRY_SHEET
+    titles = _registry_sheet_titles_via_curl(credentials_path, spreadsheet_id)
+    for name in titles:
+        if name.lower() == wanted.lower():
+            return name
+    token = _access_token(credentials_path)
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}:batchUpdate"
+    _curl_json(
+        "POST",
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+        body={"requests": [{"addSheet": {"properties": {"title": wanted, "gridProperties": {"rowCount": 200, "columnCount": 12}}}}]},
+    )
+    return wanted
+
+
+def _pull_registry_via_curl(
+    credentials_path: Path, spreadsheet_id: str, sheet_title: str
+) -> list[SheetRef]:
+    wanted = (sheet_title or DEFAULT_REGISTRY_SHEET).strip() or DEFAULT_REGISTRY_SHEET
+    titles = _registry_sheet_titles_via_curl(credentials_path, spreadsheet_id)
+    actual = None
+    for name in titles:
+        if name.lower() == wanted.lower():
+            actual = name
+            break
+    if actual is None:
+        return []
+    token = _access_token(credentials_path)
+    cell_range = _registry_a1(actual)
+    url = (
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/"
+        f"{quote(cell_range, safe='')}"
+    )
+    data = _curl_json("GET", url, headers={"Authorization": f"Bearer {token}"})
+    values = data.get("values") or []
+    return refs_from_registry_rows(values)
+
+
+def _push_registry_via_curl(
+    credentials_path: Path,
+    spreadsheet_id: str,
+    tables: list[SheetRef],
+    sheet_title: str,
+) -> None:
+    actual = _ensure_registry_sheet_via_curl(credentials_path, spreadsheet_id, sheet_title)
+    token = _access_token(credentials_path)
+    rows = refs_to_registry_rows(tables)
+    clear_range = _registry_a1(actual, "A1:Z1000")
+    clear_url = (
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/"
+        f"{quote(clear_range, safe='')}:clear"
+    )
+    _curl_json("POST", clear_url, headers={"Authorization": f"Bearer {token}"}, body={})
+    write_range = _registry_a1(actual, "A1")
+    write_url = (
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/"
+        f"{quote(write_range, safe='')}?valueInputOption=RAW"
+    )
+    _curl_json(
+        "PUT",
+        write_url,
+        headers={"Authorization": f"Bearer {token}"},
+        body={"range": write_range, "majorDimension": "ROWS", "values": rows},
+    )
+
+
 def _update_cell_via_curl(
     credentials_path: Path,
     spreadsheet_id: str,
@@ -1622,21 +1713,35 @@ class SheetsClient:
             _PREFERRED_CALENDAR_SHEET.pop(sid, None)
 
     def pull_table_registry(self, spreadsheet_id: str, sheet_title: str = "") -> list[SheetRef]:
-        """Читает общий список таблиц из Google Sheets."""
+        """Читает общий список таблиц из Google Sheets (gspread, иначе curl -k)."""
         sid = parse_spreadsheet_id(spreadsheet_id)
         title = (sheet_title or DEFAULT_REGISTRY_SHEET).strip() or DEFAULT_REGISTRY_SHEET
-        spreadsheet = self._call(lambda: self._gc.open_by_key(sid))
-        available = {ws.title: ws for ws in spreadsheet.worksheets()}
-        worksheet = available.get(title)
-        if worksheet is None:
-            for name, ws in available.items():
-                if name.lower() == title.lower():
-                    worksheet = ws
-                    break
-        if worksheet is None:
-            return []
-        values = self._sheet_values(worksheet)
-        return refs_from_registry_rows(values)
+        errors: list[str] = []
+
+        try:
+            spreadsheet = self._call(lambda: self._gc.open_by_key(sid))
+            available = {ws.title: ws for ws in spreadsheet.worksheets()}
+            worksheet = available.get(title)
+            if worksheet is None:
+                for name, ws in available.items():
+                    if name.lower() == title.lower():
+                        worksheet = ws
+                        break
+            if worksheet is None:
+                return []
+            values = self._sheet_values(worksheet)
+            return refs_from_registry_rows(values)
+        except Exception as exc:
+            errors.append(str(_friendly_error(exc)))
+
+        try:
+            return _pull_registry_via_curl(self._credentials_path, sid, title)
+        except Exception as exc:
+            errors.append(str(exc))
+
+        raise SheetsError(
+            "Не удалось загрузить общий список таблиц.\n" + "\n".join(errors[:3])
+        )
 
     def push_table_registry(
         self,
@@ -1649,26 +1754,44 @@ class SheetsClient:
 
         title = (sheet_title or DEFAULT_REGISTRY_SHEET).strip() or DEFAULT_REGISTRY_SHEET
         sid = parse_spreadsheet_id(spreadsheet_id)
-        spreadsheet = self._call(lambda: self._gc.open_by_key(sid))
-        available = {ws.title: ws for ws in spreadsheet.worksheets()}
-        worksheet = available.get(title)
-        if worksheet is None:
-            for name, ws in available.items():
-                if name.lower() == title.lower():
-                    worksheet = ws
-                    break
-        if worksheet is None:
-            worksheet = self._call(
-                lambda: spreadsheet.add_worksheet(title=title, rows=200, cols=len(REGISTRY_HEADERS))
+        errors: list[str] = []
+
+        try:
+            spreadsheet = self._call(lambda: self._gc.open_by_key(sid))
+            available = {ws.title: ws for ws in spreadsheet.worksheets()}
+            worksheet = available.get(title)
+            if worksheet is None:
+                for name, ws in available.items():
+                    if name.lower() == title.lower():
+                        worksheet = ws
+                        break
+            if worksheet is None:
+                worksheet = self._call(
+                    lambda: spreadsheet.add_worksheet(title=title, rows=200, cols=len(REGISTRY_HEADERS))
+                )
+            rows = refs_to_registry_rows(tables)
+            self._call(lambda: worksheet.clear())
+            self._call(
+                lambda: worksheet.update(
+                    "A1",
+                    rows,
+                    value_input_option="RAW",
+                )
             )
-        rows = refs_to_registry_rows(tables)
-        self._call(lambda: worksheet.clear())
-        self._call(
-            lambda: worksheet.update(
-                "A1",
-                rows,
-                value_input_option="RAW",
-            )
+            return
+        except Exception as exc:
+            errors.append(str(_friendly_error(exc)))
+
+        try:
+            _push_registry_via_curl(self._credentials_path, sid, tables, title)
+            return
+        except Exception as exc:
+            errors.append(str(exc))
+
+        raise SheetsError(
+            "Не удалось сохранить общий список таблиц в облако.\n"
+            + "\n".join(errors[:3])
+            + f"\n\nОткройте служебную таблицу для {self.service_email} как Редактор."
         )
 
 
