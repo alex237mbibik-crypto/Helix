@@ -13,6 +13,11 @@ SheetsHub — как запустить
    тогда список таблиц синхронизируется между всеми компьютерами.
 5. Запускайте SheetsHub.exe (или start_SheetsHub.bat).
 
+Защита окна «Таблицы» (в config.yaml рядом с exe):
+  ui:
+    show_tables_button: false   # кнопка скрыта; открыть: Ctrl+Shift+T
+    tables_password: ""         # пусто = без пароля; иначе спросит перед открытием
+
 Если ошибка «Could not load PyInstaller's embedded PKG archive»:
 - скачайте архив заново из GitHub Actions;
 - не копируйте один только .exe — копируйте всю папку;

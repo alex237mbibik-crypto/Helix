@@ -305,7 +305,12 @@ class SheetsHubApp(ctk.CTk):
 
         self.refresh_btn = self._primary_button(toolbar, "Обновить", self.reload_all, 120)
         self.refresh_btn.pack(side="left", padx=(0, 8))
-        self._outline_button(toolbar, "Таблицы", self._open_tables_dialog, 110).pack(side="left")
+        self.tables_btn = self._outline_button(toolbar, "Таблицы", self._request_tables_dialog, 110)
+        if self.config_data.ui.show_tables_button:
+            self.tables_btn.pack(side="left")
+        # Скрытая кнопка: Ctrl+Shift+T (и пароль, если задан в config.yaml).
+        self.bind_all("<Control-Shift-T>", lambda _e: self._request_tables_dialog())
+        self.bind_all("<Control-Shift-t>", lambda _e: self._request_tables_dialog())
 
         self.account_label = ctk.CTkLabel(
             header,
@@ -1371,7 +1376,7 @@ class SheetsHubApp(ctk.CTk):
                 ):
                     self._sync_registry_async(then_reload=True)
                 elif self._valid_sources():
-                    self.reload_all()
+                    self.reload_all(fast=True)
         finally:
             self._schedule_auto_refresh()
 
@@ -1468,7 +1473,7 @@ class SheetsHubApp(ctk.CTk):
 
         self._run_bg(work_safe, done_safe, alert=False)
 
-    def reload_all(self) -> None:
+    def reload_all(self, *, fast: bool = False) -> None:
         if not self.client:
             self._try_connect()
             if not self.client:
@@ -1493,13 +1498,26 @@ class SheetsHubApp(ctk.CTk):
         else:
             self._set_status(f"Обновляю «{selected_name}»…")
 
+        sid = ""
+        try:
+            sid = sources[0].normalized_id()
+        except ValueError:
+            sid = ""
+        cached_titles = list(self._sheet_titles_by_sid.get(sid) or []) if sid else []
+
         def work():
-            records, errors = self.client.fetch_all(sources)
-            sheet_titles: list[str] = []
-            try:
-                sheet_titles = self.client.list_calendar_sheet_titles(sources[0].normalized_id())
-            except Exception:
-                sheet_titles = []
+            # Автообновление: без цветов (дорого) и без повторного списка вкладок.
+            records, errors = self.client.fetch_all(
+                sources,
+                include_colors=not fast,
+                fast=fast,
+            )
+            sheet_titles: list[str] = list(cached_titles) if fast and cached_titles else []
+            if not sheet_titles:
+                try:
+                    sheet_titles = self.client.list_calendar_sheet_titles(sources[0].normalized_id())
+                except Exception:
+                    sheet_titles = []
             return records, errors, sheet_titles
 
         def done(result):
@@ -1516,6 +1534,8 @@ class SheetsHubApp(ctk.CTk):
             extra = f" · {len(errors)} ошибок" if errors else ""
             if getattr(self.client, "read_only_public", False):
                 extra += " · чтение CSV"
+            if fast:
+                extra += " · быстро"
             booked = sum(1 for item in self.records if item.layout == "calendar" and item.values.get("Статус") == "Занято")
             slots = sum(1 for item in self.records if item.layout == "calendar")
             sheet_name = self._current_calendar_sheet()
@@ -1533,7 +1553,7 @@ class SheetsHubApp(ctk.CTk):
                     f"{selected_name}{sheet_note}: строк {raw_count}{split_note}{info_note}{extra}"
                 )
             self._schedule_render(immediate=True)
-            if errors:
+            if errors and not fast:
                 messagebox.showwarning("Таблица не загрузилась", "\n\n".join(errors[:8]))
 
         def work_safe():
@@ -2974,6 +2994,20 @@ class SheetsHubApp(ctk.CTk):
             self.reload_all()
 
         self._run_bg(work, done)
+
+    def _request_tables_dialog(self) -> None:
+        """Открыть «Таблицы» с проверкой пароля, если он задан в config."""
+        if self._tables_dialog_open:
+            return
+        expected = (self.config_data.ui.tables_password or "").strip()
+        if expected:
+            prompt = ctk.CTkInputDialog(text="Пароль для окна «Таблицы»:", title="Доступ")
+            entered = (prompt.get_input() or "").strip()
+            if entered != expected:
+                if entered:
+                    messagebox.showerror("Доступ запрещён", "Неверный пароль.")
+                return
+        self._open_tables_dialog()
 
     def _open_tables_dialog(self) -> None:
         dialog = self._dialog("Таблицы", "1040x720")

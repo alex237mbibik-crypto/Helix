@@ -309,6 +309,14 @@ class TelegramConfig:
 
 
 @dataclass
+class UiConfig:
+    """Защита окна «Таблицы» на рабочих ПК."""
+
+    show_tables_button: bool = True
+    tables_password: str = ""
+
+
+@dataclass
 class AppConfig:
     credentials: Path
     sources: list[SheetRef]
@@ -316,6 +324,7 @@ class AppConfig:
     registry_spreadsheet_id: str = ""
     registry_sheet: str = "SheetsHub"
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
+    ui: UiConfig = field(default_factory=UiConfig)
 
 
 def usable_refs(refs: list[SheetRef]) -> list[SheetRef]:
@@ -423,6 +432,22 @@ def load_config(path: Path | None = None) -> AppConfig:
         bot_token=str(tg_raw.get("bot_token") or "").strip(),
         chat_id=str(tg_raw.get("chat_id") or "").strip(),
     )
+    ui_raw = raw.get("ui") or {}
+    # Поддержка плоских ключей из старых конфигов / ручного редактирования.
+    show_tables = ui_raw.get("show_tables_button")
+    if show_tables is None:
+        show_tables = raw.get("show_tables_button")
+    if show_tables is None:
+        show_tables = True
+    tables_password = str(
+        ui_raw.get("tables_password")
+        or raw.get("tables_password")
+        or ""
+    ).strip()
+    ui = UiConfig(
+        show_tables_button=bool(show_tables),
+        tables_password=tables_password,
+    )
     return AppConfig(
         credentials=creds,
         sources=tables,
@@ -430,6 +455,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         registry_spreadsheet_id=registry_id,
         registry_sheet=registry_sheet,
         telegram=telegram,
+        ui=ui,
     )
 
 
@@ -458,6 +484,10 @@ def save_config(config: AppConfig, path: Path | None = None) -> None:
         "enabled": bool(config.telegram.enabled),
         "bot_token": config.telegram.bot_token,
         "chat_id": config.telegram.chat_id,
+    }
+    payload["ui"] = {
+        "show_tables_button": bool(config.ui.show_tables_button),
+        "tables_password": config.ui.tables_password or "",
     }
     config_path.write_text(
         yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),

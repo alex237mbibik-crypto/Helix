@@ -29,3 +29,9 @@ telegram:
   enabled: false
   bot_token: ""
   chat_id: ""
+
+# Кнопка «Таблицы» скрыта — открыть окно: Ctrl+Shift+T
+# (пароль не нужен; при желании задайте tables_password)
+ui:
+  show_tables_button: false
+  tables_password: ""

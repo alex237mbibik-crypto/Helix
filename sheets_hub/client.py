@@ -1239,10 +1239,47 @@ class SheetsClient:
             )
         return _is_network_error(exc)
 
-    def _load_source_public(self, source: SheetRef) -> list[Record]:
+    def _load_source_public(
+        self,
+        source: SheetRef,
+        *,
+        include_colors: bool = True,
+        fast: bool = False,
+    ) -> list[Record]:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         sid = source.normalized_id()
+        preferred = (_PREFERRED_CALENDAR_SHEET.get(sid, "") or "").strip()
+        if not preferred:
+            wanted = (source.sheet or "").strip()
+            if wanted and wanted.lower() not in ("все", "all", "*"):
+                preferred = wanted
+
+        # Быстрый путь автообновления: уже знаем лист месяца — не ходим в htmlview.
+        if fast and preferred:
+            try:
+                loaded = self._fetch_source_public(replace(source, sheet=preferred))
+                cached = _SHEET_LIST_CACHE.get(sid)
+                available_fast = [t for t, _g in (cached[1] if cached else [])]
+                info_parts = [
+                    replace(source, sheet=info_title, kind=KIND_INFO)
+                    for info_title in companion_info_titles(available_fast, preferred)
+                ]
+                if info_parts:
+                    with ThreadPoolExecutor(max_workers=min(4, len(info_parts))) as pool:
+                        for fut in as_completed(
+                            [pool.submit(self._fetch_source_public, p) for p in info_parts]
+                        ):
+                            try:
+                                loaded.extend(fut.result())
+                            except Exception:
+                                pass
+                if include_colors:
+                    self._attach_sheet_colors(loaded)
+                return loaded
+            except Exception:
+                pass
+
         available: list[str] = []
         try:
             available = _list_public_sheet_titles(sid)
@@ -1250,7 +1287,6 @@ class SheetsClient:
             available = []
         # Не зовём Sheets API list_sheets здесь — на Windows это часто зависает
         # и весь UI остаётся на «Обновляю…».
-        preferred = _PREFERRED_CALENDAR_SHEET.get(sid, "")
         if preferred and available and preferred in available:
             parts = _parts_for_source(replace(source, sheet=preferred), available or None)
         else:
@@ -1322,7 +1358,8 @@ class SheetsClient:
                     break
 
         if loaded:
-            self._attach_sheet_colors(loaded)
+            if include_colors:
+                self._attach_sheet_colors(loaded)
             return loaded
         if errors:
             raise errors[0]
@@ -1370,7 +1407,13 @@ class SheetsClient:
         if note not in self.read_notes:
             self.read_notes.append(note)
 
-    def fetch_all(self, sources: list[SheetRef]) -> tuple[list[Record], list[str]]:
+    def fetch_all(
+        self,
+        sources: list[SheetRef],
+        *,
+        include_colors: bool = True,
+        fast: bool = False,
+    ) -> tuple[list[Record], list[str]]:
         records: list[Record] = []
         errors: list[str] = []
         self.read_only_public = False
@@ -1382,7 +1425,11 @@ class SheetsClient:
             # Всегда сначала один лист через CSV — быстрее и без SSL-зависаний.
             if _can_try_public_read(source):
                 try:
-                    records.extend(self._load_source_public(source))
+                    records.extend(
+                        self._load_source_public(
+                            source, include_colors=include_colors, fast=fast
+                        )
+                    )
                     self._mark_public_read(source.name, source.normalized_id())
                     continue
                 except Exception:
@@ -1392,12 +1439,17 @@ class SheetsClient:
                 batch: list[Record] = []
                 for part in self.expand_source(source):
                     batch.extend(self.fetch_source(part))
-                self._attach_sheet_colors(batch)
+                if include_colors:
+                    self._attach_sheet_colors(batch)
                 records.extend(batch)
             except Exception as exc:
                 if _can_try_public_read(source) and self._should_try_public_read(exc):
                     try:
-                        records.extend(self._load_source_public(source))
+                        records.extend(
+                            self._load_source_public(
+                                source, include_colors=include_colors, fast=fast
+                            )
+                        )
                         self._mark_public_read(source.name, source.normalized_id())
                     except Exception as pub_exc:
                         msg = str(pub_exc) if isinstance(pub_exc, SheetsError) else str(_friendly_error(pub_exc))
