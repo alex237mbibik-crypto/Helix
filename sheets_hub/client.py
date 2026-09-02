@@ -48,6 +48,7 @@ from sheets_hub.registry import (
     DEFAULT_REGISTRY_SHEET,
     refs_from_registry_rows,
     refs_to_registry_rows,
+    row_looks_like_registry_header,
 )
 from sheets_hub.split import address_key, service_key
 from sheets_hub.ssl_setup import ca_bundle_path, configure_tls, session_verify_target
@@ -789,9 +790,24 @@ def _update_cell_via_powershell(
             pass
 
 
-def _registry_a1(sheet_title: str, cell_range: str = "A1:H500") -> str:
+def _registry_a1(sheet_title: str, cell_range: str = "A1:Z500") -> str:
     safe = (sheet_title or DEFAULT_REGISTRY_SHEET).replace("'", "''")
     return f"'{safe}'!{cell_range}"
+
+
+def _pick_registry_title(wanted: str, titles: list[str], header_by_title: dict[str, list] | None = None) -> str | None:
+    """Ищет лист реестра: точное имя → лист с заголовками name/spreadsheet_id → первый."""
+    want = (wanted or DEFAULT_REGISTRY_SHEET).strip() or DEFAULT_REGISTRY_SHEET
+    for name in titles:
+        if name.lower() == want.lower():
+            return name
+    headers = header_by_title or {}
+    for name in titles:
+        if row_looks_like_registry_header(headers.get(name)):
+            return name
+    if len(titles) == 1:
+        return titles[0]
+    return None
 
 
 def _registry_sheet_titles_via_curl(credentials_path: Path, spreadsheet_id: str) -> list[str]:
@@ -810,21 +826,55 @@ def _registry_sheet_titles_via_curl(credentials_path: Path, spreadsheet_id: str)
     return titles
 
 
+def _registry_headers_via_curl(
+    credentials_path: Path, spreadsheet_id: str, titles: list[str]
+) -> dict[str, list]:
+    """Первая строка каждого листа — чтобы найти уже существующий реестр."""
+    token = _access_token(credentials_path)
+    out: dict[str, list] = {}
+    for title in titles[:8]:
+        cell_range = _registry_a1(title, "A1:Z1")
+        url = (
+            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/"
+            f"{quote(cell_range, safe='')}"
+        )
+        try:
+            data = _curl_json("GET", url, headers={"Authorization": f"Bearer {token}"})
+            values = data.get("values") or []
+            if values:
+                out[title] = values[0]
+        except Exception:
+            continue
+    return out
+
+
 def _ensure_registry_sheet_via_curl(
     credentials_path: Path, spreadsheet_id: str, sheet_title: str
 ) -> str:
     wanted = (sheet_title or DEFAULT_REGISTRY_SHEET).strip() or DEFAULT_REGISTRY_SHEET
     titles = _registry_sheet_titles_via_curl(credentials_path, spreadsheet_id)
-    for name in titles:
-        if name.lower() == wanted.lower():
-            return name
+    headers = _registry_headers_via_curl(credentials_path, spreadsheet_id, titles)
+    found = _pick_registry_title(wanted, titles, headers)
+    if found:
+        return found
     token = _access_token(credentials_path)
     url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}:batchUpdate"
     _curl_json(
         "POST",
         url,
         headers={"Authorization": f"Bearer {token}"},
-        body={"requests": [{"addSheet": {"properties": {"title": wanted, "gridProperties": {"rowCount": 200, "columnCount": 12}}}}]},
+        body={
+            "requests": [
+                {
+                    "addSheet": {
+                        "properties": {
+                            "title": wanted,
+                            "gridProperties": {"rowCount": 200, "columnCount": 12},
+                        }
+                    }
+                }
+            ]
+        },
     )
     return wanted
 
@@ -834,11 +884,8 @@ def _pull_registry_via_curl(
 ) -> list[SheetRef]:
     wanted = (sheet_title or DEFAULT_REGISTRY_SHEET).strip() or DEFAULT_REGISTRY_SHEET
     titles = _registry_sheet_titles_via_curl(credentials_path, spreadsheet_id)
-    actual = None
-    for name in titles:
-        if name.lower() == wanted.lower():
-            actual = name
-            break
+    headers = _registry_headers_via_curl(credentials_path, spreadsheet_id, titles)
+    actual = _pick_registry_title(wanted, titles, headers)
     if actual is None:
         return []
     token = _access_token(credentials_path)
@@ -857,7 +904,7 @@ def _push_registry_via_curl(
     spreadsheet_id: str,
     tables: list[SheetRef],
     sheet_title: str,
-) -> None:
+) -> str:
     actual = _ensure_registry_sheet_via_curl(credentials_path, spreadsheet_id, sheet_title)
     token = _access_token(credentials_path)
     rows = refs_to_registry_rows(tables)
@@ -878,6 +925,7 @@ def _push_registry_via_curl(
         headers={"Authorization": f"Bearer {token}"},
         body={"range": write_range, "majorDimension": "ROWS", "values": rows},
     )
+    return actual
 
 
 def _update_cell_via_curl(
@@ -1772,19 +1820,23 @@ class SheetsClient:
 
         try:
             spreadsheet = self._call(lambda: self._gc.open_by_key(sid))
-            available = {ws.title: ws for ws in spreadsheet.worksheets()}
-            worksheet = available.get(title)
-            if worksheet is None:
-                for name, ws in available.items():
-                    if name.lower() == title.lower():
-                        worksheet = ws
-                        break
-            if worksheet is None:
-                # Листа ещё нет — это пустой реестр, не ошибка.
+            worksheets = list(spreadsheet.worksheets())
+            available = {ws.title: ws for ws in worksheets}
+            header_by_title: dict[str, list] = {}
+            for ws in worksheets[:8]:
+                try:
+                    first = self._call(lambda w=ws: w.row_values(1))
+                    if first:
+                        header_by_title[ws.title] = first
+                except Exception:
+                    continue
+            actual = _pick_registry_title(title, list(available.keys()), header_by_title)
+            if actual is None:
                 return []
+            worksheet = available[actual]
             # Не используем _sheet_values (лимит календаря 38 строк) — список таблиц длиннее.
             values = self._call(
-                lambda: worksheet.get("A1:H500", value_render_option="FORMATTED_VALUE")
+                lambda: worksheet.get("A1:Z500", value_render_option="FORMATTED_VALUE")
             )
             return refs_from_registry_rows(values or [])
         except Exception as exc:
@@ -1804,8 +1856,8 @@ class SheetsClient:
         spreadsheet_id: str,
         tables: list[SheetRef],
         sheet_title: str = "",
-    ) -> None:
-        """Записывает общий список таблиц в Google Sheets (полная замена листа)."""
+    ) -> str:
+        """Записывает общий список таблиц. Возвращает имя листа, куда записали."""
         from sheets_hub.registry import REGISTRY_HEADERS
 
         title = (sheet_title or DEFAULT_REGISTRY_SHEET).strip() or DEFAULT_REGISTRY_SHEET
@@ -1814,17 +1866,26 @@ class SheetsClient:
 
         try:
             spreadsheet = self._call(lambda: self._gc.open_by_key(sid))
-            available = {ws.title: ws for ws in spreadsheet.worksheets()}
-            worksheet = available.get(title)
-            if worksheet is None:
-                for name, ws in available.items():
-                    if name.lower() == title.lower():
-                        worksheet = ws
-                        break
-            if worksheet is None:
+            worksheets = list(spreadsheet.worksheets())
+            available = {ws.title: ws for ws in worksheets}
+            header_by_title: dict[str, list] = {}
+            for ws in worksheets[:8]:
+                try:
+                    first = self._call(lambda w=ws: w.row_values(1))
+                    if first:
+                        header_by_title[ws.title] = first
+                except Exception:
+                    continue
+            actual = _pick_registry_title(title, list(available.keys()), header_by_title)
+            if actual is None:
                 worksheet = self._call(
-                    lambda: spreadsheet.add_worksheet(title=title, rows=200, cols=len(REGISTRY_HEADERS))
+                    lambda: spreadsheet.add_worksheet(
+                        title=title, rows=200, cols=len(REGISTRY_HEADERS)
+                    )
                 )
+                actual = worksheet.title
+            else:
+                worksheet = available[actual]
             rows = refs_to_registry_rows(tables)
             self._call(lambda: worksheet.clear())
             self._call(
@@ -1834,13 +1895,12 @@ class SheetsClient:
                     value_input_option="RAW",
                 )
             )
-            return
+            return actual
         except Exception as exc:
             errors.append(str(_friendly_error(exc)))
 
         try:
-            _push_registry_via_curl(self._credentials_path, sid, tables, title)
-            return
+            return _push_registry_via_curl(self._credentials_path, sid, tables, title)
         except Exception as exc:
             errors.append(str(exc))
 

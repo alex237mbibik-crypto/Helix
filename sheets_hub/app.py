@@ -3587,12 +3587,14 @@ class SheetsHubApp(ctk.CTk):
 
             def work_safe():
                 try:
-                    self.client.push_table_registry(registry_id, refs, registry_sheet)
+                    written_sheet = self.client.push_table_registry(
+                        registry_id, refs, registry_sheet
+                    )
                     # Сразу читаем обратно — подтверждение, что в облаке реально лежит список.
-                    remote = self.client.pull_table_registry(registry_id, registry_sheet)
-                    return ("ok", refs, remote)
+                    remote = self.client.pull_table_registry(registry_id, written_sheet or registry_sheet)
+                    return ("ok", refs, remote, written_sheet or registry_sheet)
                 except Exception as exc:
-                    return ("err", exc, None)
+                    return ("err", exc, None, "")
 
             def done_safe(payload) -> None:
                 save_busy["ok"] = False
@@ -3614,7 +3616,14 @@ class SheetsHubApp(ctk.CTk):
                         parent=dialog,
                     )
                     return
-                saved_refs, remote = payload[1], payload[2]
+                saved_refs, remote, written_sheet = payload[1], payload[2], payload[3]
+                if written_sheet:
+                    sheet_var.set(written_sheet)
+                    self.config_data.registry_sheet = written_sheet
+                    try:
+                        save_config(self.config_data)
+                    except Exception:
+                        pass
                 saved_n = len(usable_refs(saved_refs))
                 remote_n = len(remote or [])
                 if remote_n < 1:
@@ -3622,20 +3631,20 @@ class SheetsHubApp(ctk.CTk):
                     messagebox.showerror(
                         "Сохранение не подтвердилось",
                         "Запись прошла без ошибки, но в служебной таблице список пуст.\n"
-                        "Проверьте лист «SheetsHub» и права Редактор у сервисного аккаунта.",
+                        f"Проверьте лист «{written_sheet or registry_sheet}» и права Редактор у сервисного аккаунта.",
                         parent=dialog,
                     )
                     return
+                sheet_note = written_sheet or registry_sheet or "SheetsHub"
                 if tables_signature(saved_refs) != tables_signature(remote or []):
                     # Часто отличается только формат ссылки/город — если число совпало, считаем ок.
                     if remote_n == saved_n:
-                        status_var.set(f"Сохранено в облако: {saved_n} таблиц")
+                        status_var.set(f"Сохранено в облако: {saved_n} таблиц → лист {sheet_note}")
                         cloud_saved_sig["sig"] = tables_signature(saved_refs)
                         messagebox.showinfo(
                             "Сохранено для всех ПК",
-                            f"В облако записано {saved_n} таблиц.\n"
-                            "Откройте служебную таблицу (лист SheetsHub) — должны быть колонки "
-                            "name … city … address и ваши строки.\n\n"
+                            f"В облако записано {saved_n} таблиц на лист «{sheet_note}».\n\n"
+                            "Откройте именно этот лист внизу Google-таблицы (не другой вкладкой).\n"
                             "На других ПК: «Загрузить из облака» или перезапуск.",
                             parent=dialog,
                         )
@@ -3649,7 +3658,7 @@ class SheetsHubApp(ctk.CTk):
                     messagebox.showwarning(
                         "Список записан, но не совпал",
                         f"Отправили {saved_n}, в облаке сейчас {remote_n}.\n"
-                        "Откройте служебную Google-таблицу (лист SheetsHub) и проверьте строки.\n"
+                        f"Смотрите лист «{sheet_note}» в служебной Google-таблице.\n"
                         "На других ПК нажмите «Загрузить из облака».",
                         parent=dialog,
                     )
@@ -3658,11 +3667,11 @@ class SheetsHubApp(ctk.CTk):
                 self._set_status(f"Общий список сохранён: {saved_n} таблиц — виден на всех ПК")
                 messagebox.showinfo(
                     "Сохранено для всех ПК",
-                    f"В облако записано {saved_n} таблиц.\n\n"
-                    "Проверка: в служебной таблице на листе SheetsHub должна появиться "
-                    "колонка city и все ваши строки.\n\n"
+                    f"В облако записано {saved_n} таблиц на лист «{sheet_note}».\n\n"
+                    "В Google Таблице откройте этот лист внизу окна — там должны быть "
+                    "колонки name, city, address и все ваши строки.\n\n"
                     "На другом компьютере: та же ссылка служебной таблицы → "
-                    "«Таблицы» → «Загрузить из облака» или перезапуск (подтянется за ~1 мин).",
+                    "Ctrl+Shift+T → «Загрузить из облака» или перезапуск.",
                     parent=dialog,
                 )
                 close_dialog(force=True)

@@ -25,6 +25,13 @@ REGISTRY_HEADERS = [
 DEFAULT_REGISTRY_SHEET = "SheetsHub"
 
 
+def row_looks_like_registry_header(row: list[Any] | None) -> bool:
+    if not row:
+        return False
+    cells = {str(cell or "").strip().lower() for cell in row}
+    return "spreadsheet_id" in cells or ("name" in cells and ("sheet" in cells or "лист" in cells))
+
+
 def tables_signature(refs: list[SheetRef]) -> tuple:
     rows: list[tuple] = []
     for ref in usable_refs(refs):
