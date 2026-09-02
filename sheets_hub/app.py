@@ -147,7 +147,240 @@ def _styled_entry(parent, placeholder: str, **kwargs) -> ctk.CTkEntry:
         "placeholder_text_color": "#9aa0a6",
     }
     options.update(kwargs)
-    return ctk.CTkEntry(parent, **options)
+    entry = ctk.CTkEntry(parent, **options)
+    _wire_entry_clipboard(entry)
+    return entry
+
+
+def _entry_tk(widget) -> tk.Misc | None:
+    """Внутренний tk Entry у CTkEntry, либо сам виджет."""
+    if widget is None:
+        return None
+    inner = getattr(widget, "_entry", None)
+    if inner is not None:
+        return inner
+    try:
+        if widget.winfo_class() in {"Entry", "TEntry", "Text", "TCombobox"}:
+            return widget
+    except Exception:
+        pass
+    return None
+
+
+def _clipboard_paste(widget) -> str:
+    target = _entry_tk(widget) or widget
+    try:
+        data = str(target.clipboard_get())
+    except tk.TclError:
+        return "break"
+    if not data:
+        return "break"
+    try:
+        if target.selection_present():
+            target.delete("sel.first", "sel.last")
+    except Exception:
+        pass
+    try:
+        target.insert("insert", data)
+    except Exception:
+        try:
+            # CTkEntry API
+            widget.insert("insert", data)
+        except Exception:
+            pass
+    return "break"
+
+
+def _clipboard_copy(widget) -> str:
+    target = _entry_tk(widget) or widget
+    try:
+        if not target.selection_present():
+            return "break"
+        text = target.selection_get()
+    except Exception:
+        return "break"
+    try:
+        target.clipboard_clear()
+        target.clipboard_append(text)
+    except Exception:
+        pass
+    return "break"
+
+
+def _clipboard_cut(widget) -> str:
+    _clipboard_copy(widget)
+    target = _entry_tk(widget) or widget
+    try:
+        if target.selection_present():
+            target.delete("sel.first", "sel.last")
+    except Exception:
+        pass
+    return "break"
+
+
+def _clipboard_select_all(widget) -> str:
+    target = _entry_tk(widget) or widget
+    try:
+        target.select_range(0, "end")
+        target.icursor("end")
+    except Exception:
+        try:
+            target.tag_add("sel", "1.0", "end")
+        except Exception:
+            pass
+    return "break"
+
+
+def _wire_entry_clipboard(entry: ctk.CTkEntry) -> None:
+    """Ctrl+C/V/X/A работают и при русской раскладке; ПКМ — меню."""
+    targets = [entry]
+    inner = getattr(entry, "_entry", None)
+    if inner is not None:
+        targets.append(inner)
+
+    def on_paste(_event=None, w=entry):
+        return _clipboard_paste(w)
+
+    def on_copy(_event=None, w=entry):
+        return _clipboard_copy(w)
+
+    def on_cut(_event=None, w=entry):
+        return _clipboard_cut(w)
+
+    def on_select_all(_event=None, w=entry):
+        return _clipboard_select_all(w)
+
+    # Латиница + Shift+Insert (на RU Windows работает всегда).
+    # Кириллица ловится глобально по keycode в _install_layout_independent_hotkeys.
+    paste_keys = (
+        "<Control-v>",
+        "<Control-V>",
+        "<Command-v>",
+        "<Command-V>",
+        "<Shift-Insert>",
+    )
+    copy_keys = (
+        "<Control-c>",
+        "<Control-C>",
+        "<Command-c>",
+        "<Command-C>",
+    )
+    cut_keys = (
+        "<Control-x>",
+        "<Control-X>",
+        "<Command-x>",
+        "<Command-X>",
+        "<Shift-Delete>",
+    )
+    select_keys = (
+        "<Control-a>",
+        "<Control-A>",
+        "<Command-a>",
+        "<Command-A>",
+    )
+    for w in targets:
+        for seq in paste_keys:
+            try:
+                w.bind(seq, on_paste)
+            except Exception:
+                pass
+        for seq in copy_keys:
+            try:
+                w.bind(seq, on_copy)
+            except Exception:
+                pass
+        for seq in cut_keys:
+            try:
+                w.bind(seq, on_cut)
+            except Exception:
+                pass
+        for seq in select_keys:
+            try:
+                w.bind(seq, on_select_all)
+            except Exception:
+                pass
+
+    menu = tk.Menu(entry, tearoff=0)
+    menu.add_command(label="Вырезать", command=lambda: _clipboard_cut(entry))
+    menu.add_command(label="Копировать", command=lambda: _clipboard_copy(entry))
+    menu.add_command(label="Вставить", command=lambda: _clipboard_paste(entry))
+    menu.add_separator()
+    menu.add_command(label="Выделить всё", command=lambda: _clipboard_select_all(entry))
+
+    def show_menu(event):
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
+    for w in targets:
+        w.bind("<Button-3>", show_menu)
+        if sys.platform == "darwin":
+            w.bind("<Button-2>", show_menu)
+            w.bind("<Control-Button-1>", show_menu)
+
+
+def _install_layout_independent_hotkeys(root: tk.Misc) -> None:
+    """Ctrl+C/V/X/A и Ctrl+Shift+T работают и при русской раскладке (по keycode)."""
+
+    def open_tables(_event=None):
+        opener = getattr(root, "_request_tables_dialog", None)
+        if callable(opener):
+            opener()
+        return "break"
+
+    for seq in (
+        "<Control-Shift-T>",
+        "<Control-Shift-t>",
+        "<Control-Shift-е>",  # та же клавиша T на ЙЦУКЕН
+        "<Control-Shift-Е>",
+        "<Control-Shift-Cyrillic_ie>",
+        "<Command-Shift-T>",
+        "<Command-Shift-t>",
+    ):
+        try:
+            root.bind_all(seq, open_tables)
+        except Exception:
+            pass
+
+    def on_key(event):
+        ctrl = bool(event.state & 0x4)
+        cmd = sys.platform == "darwin" and bool(event.state & (0x8 | 0x10))
+        if not (ctrl or cmd):
+            return
+        shift = bool(event.state & 0x1)
+        code = int(getattr(event, "keycode", 0) or 0)
+        keysym = (event.keysym or "").lower()
+
+        # Ctrl+Shift+T — окно «Таблицы» (T=84), независимо от языка.
+        if shift and code == 84 and keysym not in {"t"}:
+            return open_tables()
+
+        # Уже латинский Ctrl+V/C/X/A — штатный обработчик справится.
+        if keysym in {"v", "c", "x", "a", "t"}:
+            return
+        widget = event.widget
+        try:
+            cls = widget.winfo_class()
+        except Exception:
+            return
+        if cls not in {"Entry", "TEntry", "Text", "TCombobox"}:
+            return
+        # Windows virtual-key: A=65 C=67 V=86 X=88
+        if code == 86:
+            return _clipboard_paste(widget)
+        if code == 67:
+            return _clipboard_copy(widget)
+        if code == 88:
+            return _clipboard_cut(widget)
+        if code == 65:
+            return _clipboard_select_all(widget)
+
+    try:
+        root.bind_all("<KeyPress>", on_key, add="+")
+    except Exception:
+        pass
 
 
 def _status_tag(value: str) -> str | None:
@@ -180,6 +413,7 @@ class SheetsHubApp(ctk.CTk):
         self._sort_desc = False
         self._picked: Record | None = None
         self._last_error_message = ""
+        _install_layout_independent_hotkeys(self)
         self.source_filter_var = tk.StringVar(value="")
         self.name_filter_var = tk.StringVar(value="")
         self.service_filter_var = tk.StringVar(value="")
@@ -308,9 +542,8 @@ class SheetsHubApp(ctk.CTk):
         self.tables_btn = self._outline_button(toolbar, "Таблицы", self._request_tables_dialog, 110)
         if self.config_data.ui.show_tables_button:
             self.tables_btn.pack(side="left")
-        # Скрытая кнопка: Ctrl+Shift+T (и пароль, если задан в config.yaml).
-        self.bind_all("<Control-Shift-T>", lambda _e: self._request_tables_dialog())
-        self.bind_all("<Control-Shift-t>", lambda _e: self._request_tables_dialog())
+        # Горячая клавиша Ctrl+Shift+T ставится в _install_layout_independent_hotkeys
+        # (работает и при русской раскладке).
 
         self.account_label = ctk.CTkLabel(
             header,
