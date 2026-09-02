@@ -3445,16 +3445,31 @@ class SheetsHubApp(ctk.CTk):
             "Рабочие таблицы (общие)",
             self._tables(),
             "Таблица",
-            subtitle="Заполните название, услугу, город и адрес — по ним работает фильтр сверху.",
+            subtitle="Заполните название, услугу, город и адрес — по ним работает фильтр сверху. "
+            "После правок обязательно нажмите «Сохранить для всех ПК».",
+            on_change=lambda: status_var.set(
+                "Есть несохранённые правки — нажмите «Сохранить для всех ПК»."
+            ),
         )
         editor.frame.grid(row=3, column=0, sticky="nsew", padx=16, pady=(0, 8))
         opened_sig = tables_signature(editor.collect())
+        cloud_saved_sig = {"sig": opened_sig}
 
         ctk.CTkLabel(dialog, textvariable=status_var, text_color=MUTED, font=ctk.CTkFont(size=11)).grid(
             row=4, column=0, sticky="w", padx=20, pady=(0, 4)
         )
 
-        def close_dialog() -> None:
+        def close_dialog(*, force: bool = False) -> None:
+            if not force:
+                current = tables_signature(editor.collect())
+                if current != cloud_saved_sig["sig"]:
+                    if not messagebox.askyesno(
+                        "Не сохранено в облако",
+                        "Список таблиц изменён, но «Сохранить для всех ПК» не нажималось.\n\n"
+                        "Закрыть без сохранения? Другие компьютеры новый список не увидят.",
+                        parent=dialog,
+                    ):
+                        return
             cloud_op_gen["n"] += 1
             dialog_alive["ok"] = False
             apply_telegram_settings(persist=True)
@@ -3485,6 +3500,7 @@ class SheetsHubApp(ctk.CTk):
                 return self.client.pull_table_registry(registry_id, registry_sheet)
 
             def done(refs) -> None:
+                nonlocal opened_sig
                 if not dialog_alive["ok"] or op_id != cloud_op_gen["n"] or save_busy["ok"]:
                     return
                 self.config_data.registry_spreadsheet_id = registry_id
@@ -3498,6 +3514,8 @@ class SheetsHubApp(ctk.CTk):
                         return
                     editor.replace_refs(refs)
                     self._apply_remote_tables(refs)
+                    opened_sig = tables_signature(editor.collect())
+                    cloud_saved_sig["sig"] = opened_sig
                     status_var.set(f"Загружено из облака: {len(refs)} таблиц")
                 else:
                     status_var.set("В облаке пока пусто — добавьте таблицы и сохраните.")
@@ -3609,6 +3627,22 @@ class SheetsHubApp(ctk.CTk):
                     )
                     return
                 if tables_signature(saved_refs) != tables_signature(remote or []):
+                    # Часто отличается только формат ссылки/город — если число совпало, считаем ок.
+                    if remote_n == saved_n:
+                        status_var.set(f"Сохранено в облако: {saved_n} таблиц")
+                        cloud_saved_sig["sig"] = tables_signature(saved_refs)
+                        messagebox.showinfo(
+                            "Сохранено для всех ПК",
+                            f"В облако записано {saved_n} таблиц.\n"
+                            "Откройте служебную таблицу (лист SheetsHub) — должны быть колонки "
+                            "name … city … address и ваши строки.\n\n"
+                            "На других ПК: «Загрузить из облака» или перезапуск.",
+                            parent=dialog,
+                        )
+                        close_dialog(force=True)
+                        self.client = None
+                        self._try_connect()
+                        return
                     status_var.set(
                         f"В облаке {remote_n} таблиц, ожидали {saved_n} — проверьте служебную таблицу"
                     )
@@ -3620,15 +3654,18 @@ class SheetsHubApp(ctk.CTk):
                         parent=dialog,
                     )
                     return
+                cloud_saved_sig["sig"] = tables_signature(saved_refs)
                 self._set_status(f"Общий список сохранён: {saved_n} таблиц — виден на всех ПК")
                 messagebox.showinfo(
                     "Сохранено для всех ПК",
                     f"В облако записано {saved_n} таблиц.\n\n"
+                    "Проверка: в служебной таблице на листе SheetsHub должна появиться "
+                    "колонка city и все ваши строки.\n\n"
                     "На другом компьютере: та же ссылка служебной таблицы → "
                     "«Таблицы» → «Загрузить из облака» или перезапуск (подтянется за ~1 мин).",
                     parent=dialog,
                 )
-                close_dialog()
+                close_dialog(force=True)
                 self.client = None
                 self._try_connect()
 
@@ -3657,8 +3694,10 @@ class _RefList:
         placeholder: str,
         *,
         subtitle: str = "Одна ссылка: читаем и пишем сюда же. Лист — все или АВГУСТ 2026.",
+        on_change=None,
     ) -> None:
         self.placeholder = placeholder
+        self.on_change = on_change
         self.rows: list[dict] = []
         self.frame = ctk.CTkFrame(parent, fg_color=BG, corner_radius=10, border_width=1, border_color=LINE)
         self.frame.grid_columnconfigure(0, weight=1)
@@ -3752,10 +3791,18 @@ class _RefList:
 
     def add_empty(self) -> None:
         self._add_row(SheetRef(name=self.placeholder, spreadsheet_id="", sheet="все"))
+        self._notify_change()
         try:
             self.body.after(40, self._scroll_to_end)
         except Exception:
             pass
+
+    def _notify_change(self) -> None:
+        if callable(getattr(self, "on_change", None)):
+            try:
+                self.on_change()
+            except Exception:
+                pass
 
     def _scroll_to_end(self) -> None:
         try:
@@ -3783,6 +3830,8 @@ class _RefList:
         service_var = tk.StringVar(value=ref.service)
         city_var = tk.StringVar(value=ref.city or ref.resolved_city())
         address_var = tk.StringVar(value=ref.address)
+        for var in (name_var, url_var, sheet_var, service_var, city_var, address_var):
+            var.trace_add("write", lambda *_args: self._notify_change())
 
         row_frame = ctk.CTkFrame(self.body, fg_color="transparent")
         row_frame.grid(row=index, column=0, sticky="ew", pady=2)
@@ -3824,6 +3873,7 @@ class _RefList:
             if row_data in self.rows:
                 self.rows.remove(row_data)
             self._reindex_rows()
+            self._notify_change()
 
         ctk.CTkButton(
             row_frame,

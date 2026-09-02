@@ -102,10 +102,14 @@ def refs_to_registry_rows(refs: list[SheetRef]) -> list[list[str]]:
     for ref in usable_refs(refs):
         map_json = json.dumps(ref.map, ensure_ascii=False) if ref.map else ""
         kind = normalize_kind(ref.kind)
+        try:
+            sid = ref.normalized_id()
+        except ValueError:
+            sid = (ref.spreadsheet_id or "").strip()
         rows.append(
             [
                 ref.name or "",
-                ref.spreadsheet_id or "",
+                sid,
                 ref.sheet or "все",
                 ref.service or "",
                 ref.city or ref.resolved_city() or "",
