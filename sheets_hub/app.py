@@ -3545,140 +3545,179 @@ class SheetsHubApp(ctk.CTk):
             self._run_bg(work_safe, done_safe, alert=False)
 
         def save() -> None:
-            if save_busy["ok"]:
-                return
-            refs = editor.collect()
-            registry_id = registry_var.get().strip()
-            registry_sheet = sheet_var.get().strip() or DEFAULT_REGISTRY_SHEET
-            if not registry_id or registry_id.upper().startswith("PASTE_"):
-                messagebox.showwarning(
-                    "Нужна служебная таблица",
-                    "Список таблиц общий для всех ПК.\n\n"
-                    "1) Создайте пустую Google-таблицу\n"
-                    "2) Откройте её для сервисного аккаунта как Редактор\n"
-                    "3) Вставьте ссылку в поле «Служебная таблица»\n"
-                    "4) Сохраните снова",
-                    parent=dialog,
-                )
-                return
-            if not refs:
-                messagebox.showwarning("Нет таблиц", "Добавьте хотя бы одну рабочую таблицу.", parent=dialog)
-                return
-            if not self.client:
-                messagebox.showerror("Нет подключения", "Сначала нужен рабочий credentials.json.", parent=dialog)
-                return
-
-            # Отменяем любую текущую загрузку из облака — она не должна затереть сохранение.
-            cloud_op_gen["n"] += 1
-            op_id = cloud_op_gen["n"]
-            save_busy["ok"] = True
-
-            self.config_data.sources = refs
-            self.config_data.destinations = list(refs)
-            self.config_data.registry_spreadsheet_id = registry_id
-            self.config_data.registry_sheet = registry_sheet
-            apply_telegram_settings(persist=False)
-            save_config(self.config_data)
-            status_var.set("Сохраняю общий список в облако…")
             try:
-                save_btn.configure(state="disabled")
-            except Exception:
-                pass
-
-            def work_safe():
-                try:
-                    written_sheet = self.client.push_table_registry(
-                        registry_id, refs, registry_sheet
+                if save_busy["ok"]:
+                    messagebox.showinfo(
+                        "Сохранение",
+                        "Сохранение уже выполняется. Подождите несколько секунд.",
+                        parent=dialog,
                     )
-                    # Сразу читаем обратно — подтверждение, что в облаке реально лежит список.
-                    remote = self.client.pull_table_registry(registry_id, written_sheet or registry_sheet)
-                    return ("ok", refs, remote, written_sheet or registry_sheet)
-                except Exception as exc:
-                    return ("err", exc, None, "")
+                    return
+                refs = editor.collect()
+                registry_id = registry_var.get().strip()
+                registry_sheet = sheet_var.get().strip() or DEFAULT_REGISTRY_SHEET
+                if not registry_id or registry_id.upper().startswith("PASTE_"):
+                    messagebox.showwarning(
+                        "Нужна служебная таблица",
+                        "Список таблиц общий для всех ПК.\n\n"
+                        "1) Создайте пустую Google-таблицу\n"
+                        "2) Откройте её для сервисного аккаунта как Редактор\n"
+                        "3) Вставьте ссылку в поле «Служебная таблица»\n"
+                        "4) Сохраните снова",
+                        parent=dialog,
+                    )
+                    return
+                if not refs:
+                    messagebox.showwarning(
+                        "Нет таблиц",
+                        "Добавьте хотя бы одну рабочую таблицу со ссылкой.\n"
+                        "Пустые строки без ссылки не сохраняются.",
+                        parent=dialog,
+                    )
+                    return
+                if not self.client:
+                    messagebox.showerror(
+                        "Нет подключения",
+                        "Сначала нужен рабочий credentials.json.",
+                        parent=dialog,
+                    )
+                    return
 
-            def done_safe(payload) -> None:
-                save_busy["ok"] = False
+                # Отменяем любую текущую загрузку из облака — она не должна затереть сохранение.
+                cloud_op_gen["n"] += 1
+                op_id = cloud_op_gen["n"]
+                save_busy["ok"] = True
+
+                self.config_data.sources = refs
+                self.config_data.destinations = list(refs)
+                self.config_data.registry_spreadsheet_id = registry_id
+                self.config_data.registry_sheet = registry_sheet
+                apply_telegram_settings(persist=False)
                 try:
-                    save_btn.configure(state="normal")
+                    save_config(self.config_data)
+                except Exception as cfg_exc:
+                    # Нельзя ронять сохранение в облако из‑за прав на config.yaml (Program Files).
+                    status_var.set(f"Локальный config не записался: {cfg_exc}")
+
+                status_var.set(f"Сохраняю в облако {len(refs)} таблиц…")
+                self._set_status(f"Сохраняю общий список в облако ({len(refs)})…")
+                try:
+                    save_btn.configure(state="disabled", text="Сохраняю…")
+                    dialog.update_idletasks()
                 except Exception:
                     pass
-                if not dialog_alive["ok"] or op_id != cloud_op_gen["n"]:
-                    return
-                kind = payload[0]
-                if kind == "err":
-                    err = payload[1]
-                    status_var.set("Не сохранено в облако")
-                    messagebox.showerror(
-                        "Не удалось сохранить в облако",
-                        str(err)
-                        + "\n\nСлужебная таблица должна быть открыта для сервисного аккаунта (Редактор).\n"
-                        "Локально список уже записан, но другие ПК его не увидят, пока сохранение не пройдёт.",
-                        parent=dialog,
-                    )
-                    return
-                saved_refs, remote, written_sheet = payload[1], payload[2], payload[3]
-                if written_sheet:
-                    sheet_var.set(written_sheet)
-                    self.config_data.registry_sheet = written_sheet
+
+                def work_safe():
                     try:
-                        save_config(self.config_data)
+                        written_sheet = self.client.push_table_registry(
+                            registry_id, refs, registry_sheet
+                        )
+                        remote = self.client.pull_table_registry(
+                            registry_id, written_sheet or registry_sheet
+                        )
+                        return ("ok", refs, remote, written_sheet or registry_sheet)
+                    except Exception as exc:
+                        return ("err", exc, None, "")
+
+                def finish_save(payload) -> None:
+                    save_busy["ok"] = False
+                    try:
+                        save_btn.configure(state="normal", text="Сохранить для всех ПК")
                     except Exception:
                         pass
-                saved_n = len(usable_refs(saved_refs))
-                remote_n = len(remote or [])
-                if remote_n < 1:
-                    status_var.set("Облако пустое после записи — проверьте доступ")
-                    messagebox.showerror(
-                        "Сохранение не подтвердилось",
-                        "Запись прошла без ошибки, но в служебной таблице список пуст.\n"
-                        f"Проверьте лист «{written_sheet or registry_sheet}» и права Редактор у сервисного аккаунта.",
-                        parent=dialog,
-                    )
-                    return
-                sheet_note = written_sheet or registry_sheet or "SheetsHub"
-                if tables_signature(saved_refs) != tables_signature(remote or []):
-                    # Часто отличается только формат ссылки/город — если число совпало, считаем ок.
-                    if remote_n == saved_n:
-                        status_var.set(f"Сохранено в облако: {saved_n} таблиц → лист {sheet_note}")
-                        cloud_saved_sig["sig"] = tables_signature(saved_refs)
-                        messagebox.showinfo(
-                            "Сохранено для всех ПК",
-                            f"В облако записано {saved_n} таблиц на лист «{sheet_note}».\n\n"
-                            "Откройте именно этот лист внизу Google-таблицы (не другой вкладкой).\n"
-                            "На других ПК: «Загрузить из облака» или перезапуск.",
+                    if not dialog_alive["ok"] or op_id != cloud_op_gen["n"]:
+                        return
+                    kind = payload[0]
+                    if kind == "err":
+                        err = payload[1]
+                        status_var.set("Не сохранено в облако")
+                        self._set_status(f"Сохранение списка: ошибка")
+                        messagebox.showerror(
+                            "Не удалось сохранить в облако",
+                            str(err)
+                            + "\n\nСлужебная таблица должна быть открыта для сервисного аккаунта (Редактор).\n"
+                            "Локально список уже записан, но другие ПК его не увидят, пока сохранение не пройдёт.",
                             parent=dialog,
                         )
-                        close_dialog(force=True)
-                        self.client = None
-                        self._try_connect()
                         return
-                    status_var.set(
-                        f"В облаке {remote_n} таблиц, ожидали {saved_n} — проверьте служебную таблицу"
+                    saved_refs, remote, written_sheet = payload[1], payload[2], payload[3]
+                    if written_sheet:
+                        sheet_var.set(written_sheet)
+                        self.config_data.registry_sheet = written_sheet
+                        try:
+                            save_config(self.config_data)
+                        except Exception:
+                            pass
+                    saved_n = len(usable_refs(saved_refs))
+                    remote_n = len(remote or [])
+                    sheet_note = written_sheet or registry_sheet or "SheetsHub"
+                    if remote_n < 1:
+                        status_var.set("Облако пустое после записи — проверьте доступ")
+                        messagebox.showerror(
+                            "Сохранение не подтвердилось",
+                            "Запись прошла без ошибки, но в служебной таблице список пуст.\n"
+                            f"Проверьте лист «{sheet_note}» и права Редактор у сервисного аккаунта.",
+                            parent=dialog,
+                        )
+                        return
+                    cloud_saved_sig["sig"] = tables_signature(saved_refs)
+                    status_var.set(f"Сохранено: {saved_n} → лист «{sheet_note}»")
+                    self._set_status(
+                        f"Общий список сохранён: {saved_n} таблиц (лист «{sheet_note}»)"
                     )
-                    messagebox.showwarning(
-                        "Список записан, но не совпал",
-                        f"Отправили {saved_n}, в облаке сейчас {remote_n}.\n"
-                        f"Смотрите лист «{sheet_note}» в служебной Google-таблице.\n"
-                        "На других ПК нажмите «Загрузить из облака».",
+                    messagebox.showinfo(
+                        "Сохранено для всех ПК",
+                        f"В облако записано {saved_n} таблиц на лист «{sheet_note}».\n\n"
+                        "В Google Таблице откройте именно этот лист внизу окна.\n"
+                        "На другом ПК: Ctrl+Shift+T → «Загрузить из облака» или перезапуск.",
                         parent=dialog,
                     )
-                    return
-                cloud_saved_sig["sig"] = tables_signature(saved_refs)
-                self._set_status(f"Общий список сохранён: {saved_n} таблиц — виден на всех ПК")
-                messagebox.showinfo(
-                    "Сохранено для всех ПК",
-                    f"В облако записано {saved_n} таблиц на лист «{sheet_note}».\n\n"
-                    "В Google Таблице откройте этот лист внизу окна — там должны быть "
-                    "колонки name, city, address и все ваши строки.\n\n"
-                    "На другом компьютере: та же ссылка служебной таблицы → "
-                    "Ctrl+Shift+T → «Загрузить из облака» или перезапуск.",
-                    parent=dialog,
-                )
-                close_dialog(force=True)
-                self.client = None
-                self._try_connect()
+                    close_dialog(force=True)
+                    self.client = None
+                    self._try_connect()
 
-            self._run_bg(work_safe, done_safe, alert=False)
+                def done_safe(payload) -> None:
+                    try:
+                        finish_save(payload)
+                    except Exception as done_exc:
+                        save_busy["ok"] = False
+                        try:
+                            save_btn.configure(state="normal", text="Сохранить для всех ПК")
+                        except Exception:
+                            pass
+                        messagebox.showerror(
+                            "Ошибка после сохранения",
+                            str(done_exc),
+                            parent=dialog,
+                        )
+
+                def watchdog() -> None:
+                    if not save_busy["ok"] or op_id != cloud_op_gen["n"]:
+                        return
+                    save_busy["ok"] = False
+                    try:
+                        save_btn.configure(state="normal", text="Сохранить для всех ПК")
+                    except Exception:
+                        pass
+                    status_var.set("Сохранение слишком долго — попробуйте ещё раз")
+                    messagebox.showerror(
+                        "Таймаут сохранения",
+                        "Запись в облако зависла (часто из‑за сети/SSL).\n\n"
+                        "Проверьте интернет, VPN и что служебная таблица открыта "
+                        "для сервисного аккаунта как Редактор.\n"
+                        "Нажмите «Сохранить для всех ПК» ещё раз.",
+                        parent=dialog,
+                    )
+
+                self._run_bg(work_safe, done_safe, alert=False)
+                dialog.after(40_000, watchdog)
+            except Exception as exc:
+                save_busy["ok"] = False
+                try:
+                    save_btn.configure(state="normal", text="Сохранить для всех ПК")
+                except Exception:
+                    pass
+                messagebox.showerror("Ошибка сохранения", str(exc), parent=dialog)
 
         buttons = ctk.CTkFrame(dialog, fg_color="transparent")
         buttons.grid(row=5, column=0, pady=(0, 14))

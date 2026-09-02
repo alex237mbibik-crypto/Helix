@@ -1813,10 +1813,17 @@ class SheetsClient:
             _PREFERRED_CALENDAR_SHEET.pop(sid, None)
 
     def pull_table_registry(self, spreadsheet_id: str, sheet_title: str = "") -> list[SheetRef]:
-        """Читает общий список таблиц из Google Sheets (gspread, иначе curl -k)."""
+        """Читает общий список таблиц из Google Sheets (на Windows сначала curl -k)."""
         sid = parse_spreadsheet_id(spreadsheet_id)
         title = (sheet_title or DEFAULT_REGISTRY_SHEET).strip() or DEFAULT_REGISTRY_SHEET
         errors: list[str] = []
+
+        # Windows: gspread/SSL часто зависает — curl первым.
+        if sys.platform == "win32":
+            try:
+                return _pull_registry_via_curl(self._credentials_path, sid, title)
+            except Exception as exc:
+                errors.append(str(exc))
 
         try:
             spreadsheet = self._call(lambda: self._gc.open_by_key(sid))
@@ -1834,7 +1841,6 @@ class SheetsClient:
             if actual is None:
                 return []
             worksheet = available[actual]
-            # Не используем _sheet_values (лимит календаря 38 строк) — список таблиц длиннее.
             values = self._call(
                 lambda: worksheet.get("A1:Z500", value_render_option="FORMATTED_VALUE")
             )
@@ -1842,10 +1848,11 @@ class SheetsClient:
         except Exception as exc:
             errors.append(str(_friendly_error(exc)))
 
-        try:
-            return _pull_registry_via_curl(self._credentials_path, sid, title)
-        except Exception as exc:
-            errors.append(str(exc))
+        if sys.platform != "win32":
+            try:
+                return _pull_registry_via_curl(self._credentials_path, sid, title)
+            except Exception as exc:
+                errors.append(str(exc))
 
         raise SheetsError(
             "Не удалось загрузить общий список таблиц.\n" + "\n".join(errors[:3])
@@ -1858,34 +1865,49 @@ class SheetsClient:
         sheet_title: str = "",
     ) -> str:
         """Записывает общий список таблиц. Возвращает имя листа, куда записали."""
-        from sheets_hub.registry import REGISTRY_HEADERS
-
         title = (sheet_title or DEFAULT_REGISTRY_SHEET).strip() or DEFAULT_REGISTRY_SHEET
         sid = parse_spreadsheet_id(spreadsheet_id)
         errors: list[str] = []
 
+        # Windows: сразу curl — иначе кнопка «Сохранить» выглядит мёртвой (SSL hang).
+        if sys.platform == "win32":
+            try:
+                return _push_registry_via_curl(self._credentials_path, sid, tables, title)
+            except Exception as exc:
+                errors.append(str(exc))
+
         try:
+            from sheets_hub.registry import REGISTRY_HEADERS
+
             spreadsheet = self._call(lambda: self._gc.open_by_key(sid))
             worksheets = list(spreadsheet.worksheets())
             available = {ws.title: ws for ws in worksheets}
-            header_by_title: dict[str, list] = {}
-            for ws in worksheets[:8]:
-                try:
-                    first = self._call(lambda w=ws: w.row_values(1))
-                    if first:
-                        header_by_title[ws.title] = first
-                except Exception:
-                    continue
-            actual = _pick_registry_title(title, list(available.keys()), header_by_title)
+            # Сначала точное имя — без чтения всех листов (быстрее, меньше зависаний).
+            actual = None
+            for name, ws in available.items():
+                if name.lower() == title.lower():
+                    actual = name
+                    worksheet = ws
+                    break
             if actual is None:
-                worksheet = self._call(
-                    lambda: spreadsheet.add_worksheet(
-                        title=title, rows=200, cols=len(REGISTRY_HEADERS)
+                header_by_title: dict[str, list] = {}
+                for ws in worksheets[:8]:
+                    try:
+                        first = self._call(lambda w=ws: w.row_values(1))
+                        if first:
+                            header_by_title[ws.title] = first
+                    except Exception:
+                        continue
+                actual = _pick_registry_title(title, list(available.keys()), header_by_title)
+                if actual is None:
+                    worksheet = self._call(
+                        lambda: spreadsheet.add_worksheet(
+                            title=title, rows=200, cols=len(REGISTRY_HEADERS)
+                        )
                     )
-                )
-                actual = worksheet.title
-            else:
-                worksheet = available[actual]
+                    actual = worksheet.title
+                else:
+                    worksheet = available[actual]
             rows = refs_to_registry_rows(tables)
             self._call(lambda: worksheet.clear())
             self._call(
@@ -1899,10 +1921,11 @@ class SheetsClient:
         except Exception as exc:
             errors.append(str(_friendly_error(exc)))
 
-        try:
-            return _push_registry_via_curl(self._credentials_path, sid, tables, title)
-        except Exception as exc:
-            errors.append(str(exc))
+        if sys.platform != "win32":
+            try:
+                return _push_registry_via_curl(self._credentials_path, sid, tables, title)
+            except Exception as exc:
+                errors.append(str(exc))
 
         raise SheetsError(
             "Не удалось сохранить общий список таблиц в облако.\n"
