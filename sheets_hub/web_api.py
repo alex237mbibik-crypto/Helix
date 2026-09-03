@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import threading
@@ -65,6 +66,32 @@ def _lighten_hex(bg_hex: str, amount: float = 0.2) -> str:
     g = int(round(g + (255 - g) * amount))
     b = int(round(b + (255 - b) * amount))
     return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _mark_color(key: str) -> tuple[str, str]:
+    """Быстрый стабильный цвет смены — без Google Sheets API."""
+    from sheets_hub.client import contrast_fg
+
+    raw = " ".join((key or "").strip().lower().split())
+    if not raw:
+        return "", ""
+    digest = hashlib.md5(raw.encode("utf-8")).digest()
+    channels = [
+        150 + digest[0] % 85,
+        150 + digest[1] % 85,
+        150 + digest[2] % 85,
+    ]
+    channels[digest[3] % 3] = 110 + digest[4] % 55
+    bg = _lighten_hex(f"#{channels[0]:02x}{channels[1]:02x}{channels[2]:02x}", 0.12)
+    return bg, contrast_fg(bg)
+
+
+def _info_title_line(text: str) -> str:
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if line:
+            return line
+    return (text or "").strip()
 
 
 def _ui_cache_path() -> Path:
@@ -133,7 +160,6 @@ class HelixApi:
         self._lock = threading.RLock()
         self._auto_tick = 0
         self._preferred_cache: dict[str, str] = {}
-        self._color_thread: threading.Thread | None = None
         self._active_lock: dict[str, Any] | None = None
         self._restore_ui_cache()
 
@@ -350,9 +376,12 @@ class HelixApi:
             out.append(record)
         return out
 
-    def _slot_payload(self, record: Record) -> dict[str, Any]:
-        from sheets_hub.client import contrast_fg, soften_fill
-
+    def _slot_payload(
+        self,
+        record: Record,
+        *,
+        day_colors: dict[str, tuple[str, str]] | None = None,
+    ) -> dict[str, Any]:
         status = record.values.get("Статус", "")
         client = record.values.get("Клиент", "").strip()
         phone = record.values.get("Телефон", "").strip()
@@ -369,11 +398,11 @@ class HelixApi:
         else:
             label, css = "запись", "free"
             bg, fg = "", ""
-        raw_bg = str(record.values.get("_bg") or "").strip()
-        if raw_bg and css not in {"blocked", "lock"}:
-            soft = soften_fill(raw_bg, fallback="#2e7d32")
-            bg = _lighten_hex(soft, 0.22)
-            fg = contrast_fg(bg)
+        if css not in {"blocked", "lock"}:
+            date = str(record.values.get("Дата") or "").strip()
+            mark = (day_colors or {}).get(date)
+            if mark and mark[0]:
+                bg, fg = mark
         return {
             "time": record.values.get("Время", ""),
             "date": record.values.get("Дата", ""),
@@ -390,14 +419,114 @@ class HelixApi:
             "editable": css in {"free", "occupied"},
         }
 
+    def _shift_mark_colors(
+        self, cal: list[Record], info_records: list[Record]
+    ) -> tuple[dict[str, tuple[str, str]], dict[int, tuple[str, str]]]:
+        """
+        Одинаковые пометки для дня в календаре и блока в «Общей информации».
+        Без Google color API: кэш заливки (если уже был) или стабильный цвет по врачу/тексту.
+        """
+        from sheets_hub.client import contrast_fg, soften_fill
+
+        date_doctor: dict[str, str] = {}
+        date_cached_bg: dict[str, str] = {}
+        date_bg_counts: dict[str, dict[str, int]] = {}
+        for record in cal:
+            date = str(record.values.get("Дата") or "").strip()
+            if not date:
+                continue
+            doc = str(record.values.get("_doctor") or "").strip()
+            if doc and date not in date_doctor:
+                date_doctor[date] = doc
+            raw_bg = str(record.values.get("_bg") or "").strip()
+            if raw_bg:
+                counts = date_bg_counts.setdefault(date, {})
+                counts[raw_bg] = counts.get(raw_bg, 0) + 1
+        for date, counts in date_bg_counts.items():
+            date_cached_bg[date] = max(counts.items(), key=lambda item: item[1])[0]
+
+        doctor_color: dict[str, tuple[str, str]] = {}
+        for date, doc in date_doctor.items():
+            key = doc.strip().lower()
+            if key in doctor_color:
+                continue
+            cached = date_cached_bg.get(date, "")
+            if cached:
+                soft = soften_fill(cached, fallback="#2e7d32")
+                doctor_color[key] = (_lighten_hex(soft, 0.22), contrast_fg(_lighten_hex(soft, 0.22)))
+            else:
+                doctor_color[key] = _mark_color(doc)
+
+        # Дни без ФИО, но с кэшированной заливкой Google.
+        day_colors: dict[str, tuple[str, str]] = {}
+        for date in {*(date_doctor.keys()), *date_cached_bg.keys()}:
+            doc = date_doctor.get(date, "")
+            if doc and doc.strip().lower() in doctor_color:
+                day_colors[date] = doctor_color[doc.strip().lower()]
+                continue
+            cached = date_cached_bg.get(date, "")
+            if cached:
+                soft = soften_fill(cached, fallback="#2e7d32")
+                bg = _lighten_hex(soft, 0.22)
+                day_colors[date] = (bg, contrast_fg(bg))
+            elif doc:
+                day_colors[date] = _mark_color(doc)
+
+        # Инфо: сначала тот же цвет, что у врача/дня, иначе свой стабильный.
+        doctors_sorted = sorted(doctor_color.keys(), key=len, reverse=True)
+        info_colors: dict[int, tuple[str, str]] = {}
+        for record in info_records:
+            text = str(record.values.get("Текст") or "").strip()
+            if not text:
+                text = "\n".join(
+                    str(v).strip()
+                    for k, v in record.values.items()
+                    if str(v).strip() and not str(k).startswith("_")
+                )
+            if not text:
+                continue
+            blob = text.lower()
+            matched = ""
+            for doc_key in doctors_sorted:
+                if doc_key and doc_key in blob:
+                    matched = doc_key
+                    break
+            raw_bg = str(record.values.get("_bg") or "").strip()
+            if matched and matched in doctor_color:
+                info_colors[id(record)] = doctor_color[matched]
+            elif raw_bg:
+                soft = soften_fill(raw_bg, fallback="#2e7d32")
+                bg = _lighten_hex(soft, 0.22)
+                info_colors[id(record)] = (bg, contrast_fg(bg))
+                # Если инфо с кэш-цветом, а день с тем же цветом без врача — уже ок.
+            else:
+                # Привязка: если ровно один день без врача — не угадываем;
+                # даём стабильный цвет по заголовку блока (справка всё равно читаема).
+                info_colors[id(record)] = _mark_color(_info_title_line(text))
+
+            # Дни без врача, но с тем же Google _bg что у инфо — уже совпадут через cache.
+            if raw_bg:
+                soft = soften_fill(raw_bg, fallback="#2e7d32")
+                bg = _lighten_hex(soft, 0.22)
+                fg = contrast_fg(bg)
+                for date, cached in date_cached_bg.items():
+                    if cached == raw_bg and date not in day_colors:
+                        day_colors[date] = (bg, fg)
+
+        return day_colors, info_colors
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             cal = self._calendar_records()
             dates = list(dict.fromkeys(r.values.get("Дата", "") for r in cal if r.values.get("Дата")))
             times = list(dict.fromkeys(r.values.get("Время", "") for r in cal if r.values.get("Время")))
             times.sort(key=_time_sort_key)
+            infos = self._info_records()
+            day_colors, info_colors = self._shift_mark_colors(cal, infos)
             cell_map = {
-                f"{r.values.get('Время','')}|{r.values.get('Дата','')}": self._slot_payload(r)
+                f"{r.values.get('Время','')}|{r.values.get('Дата','')}": self._slot_payload(
+                    r, day_colors=day_colors
+                )
                 for r in cal
             }
             sample = cal[0] if cal else None
@@ -411,9 +540,7 @@ class HelixApi:
             title = " · ".join(p for p in title_parts if p)
             booked = sum(1 for r in cal if r.values.get("Статус") == "Занято")
             info = []
-            from sheets_hub.client import contrast_fg, soften_fill
-
-            for record in self._info_records():
+            for record in infos:
                 text = str(record.values.get("Текст") or "").strip()
                 if not text:
                     text = "\n".join(
@@ -423,13 +550,7 @@ class HelixApi:
                     )
                 if not text:
                     continue
-                raw_bg = str(record.values.get("_bg") or "").strip()
-                bg = ""
-                fg = ""
-                if raw_bg:
-                    soft = soften_fill(raw_bg, fallback="#2e7d32")
-                    bg = _lighten_hex(soft, 0.22)
-                    fg = contrast_fg(bg)
+                bg, fg = info_colors.get(id(record), ("", ""))
                 info.append(
                     {
                         "text": text,
@@ -446,6 +567,16 @@ class HelixApi:
                 reg = ""
             tg = self.config.telegram
             opts = self._cascade_options()
+            day_doctors = [
+                {
+                    "date": date,
+                    "doctor": "",
+                    "bg": day_colors.get(date, ("", ""))[0],
+                    "fg": day_colors.get(date, ("", ""))[1],
+                }
+                for date in dates
+                if day_colors.get(date, ("", ""))[0]
+            ]
             return {
                 "ok": True,
                 "status": self.status,
@@ -460,6 +591,7 @@ class HelixApi:
                     "cells": cell_map,
                     "slots": len(cal),
                     "booked": booked,
+                    "day_doctors": day_doctors,
                 },
                 "info": info,
                 "registry": {
@@ -559,17 +691,17 @@ class HelixApi:
 
     def reload(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         data = payload if isinstance(payload, dict) else {}
-        # По умолчанию быстрый CSV; полный путь только по явному запросу.
         fast = bool(data.get("fast", True))
         sync_registry = bool(data.get("sync_registry", False))
-        colors_mode = str(data.get("colors") or ("cache" if fast else "fetch")).strip().lower()
-        if colors_mode not in {"skip", "cache", "fetch"}:
+        # Цвета ячеек больше не качаем с Google API — из‑за них UI зависал.
+        # Подпись врача по дням берём из строки листа / кэша (см. day_doctors).
+        colors_mode = str(data.get("colors") or "cache").strip().lower()
+        if colors_mode not in {"skip", "cache"}:
             colors_mode = "cache"
         refresh_sheets = bool(data.get("refresh_sheets", False))
         if not self.client:
             self.status = "Нет подключения — укажите credentials.json"
             return self.snapshot()
-        # Фоновые тяжёлые обновления не ждут и не блокируют UI.
         if data.get("background"):
             got_lock = self._lock.acquire(blocking=False)
         else:
@@ -580,7 +712,6 @@ class HelixApi:
                 return self.snapshot()
             self.status = "Обновление ещё идёт…"
             return self.snapshot()
-        fetch_colors_later = False
         try:
             sources = self._selected_sources()
             if not sources:
@@ -640,12 +771,11 @@ class HelixApi:
                 if key not in seen:
                     self.records.append(item)
                     seen.add(key)
-            if colors_mode in {"cache", "fetch"}:
+            if colors_mode == "cache":
                 try:
                     self.client.apply_cached_colors(self.records)
                 except Exception:
                     pass
-            fetch_colors_later = colors_mode == "fetch"
             self._sync_sheet_filter(sheet_titles)
             if errors:
                 self.status = "; ".join(errors[:2])
@@ -664,36 +794,7 @@ class HelixApi:
             self.status = str(exc).split("\n")[0]
         finally:
             self._lock.release()
-        if fetch_colors_later:
-            self._schedule_color_refresh()
         return self.snapshot()
-
-    def _schedule_color_refresh(self) -> None:
-        if self._color_thread and self._color_thread.is_alive():
-            return
-
-        def work() -> None:
-            if not self.client:
-                return
-            if not self._lock.acquire(blocking=False):
-                return
-            try:
-                self.client._attach_sheet_colors(list(self.records))
-            except Exception:
-                pass
-            finally:
-                self._lock.release()
-            if self._window is None:
-                return
-            try:
-                self._window.evaluate_js(
-                    "window.Helix && window.Helix.pull && window.Helix.pull()"
-                )
-            except Exception:
-                pass
-
-        self._color_thread = threading.Thread(target=work, daemon=True)
-        self._color_thread.start()
 
     def begin_slot(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Открытие слота: защита «не записывать» + маркер «записывают» для чужих ПК."""

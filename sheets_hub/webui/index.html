@@ -425,10 +425,15 @@
   }
 
   function renderCalendar(cal) {
+    const doctorByDate = {};
+    (cal.day_doctors || []).forEach((item) => {
+      if (item && item.date && item.bg) doctorByDate[item.date] = item;
+    });
     const sig = JSON.stringify({
       d: cal.dates,
       t: cal.times_raw,
       c: cal.cells,
+      docs: cal.day_doctors,
     });
     if (sig === state.lastCalSig) return;
     state.lastCalSig = sig;
@@ -439,6 +444,11 @@
     (cal.dates || []).forEach((d) => {
       const th = document.createElement("th");
       th.textContent = d;
+      const mark = doctorByDate[d];
+      if (mark && mark.bg) {
+        th.style.background = mark.bg;
+        if (mark.fg) th.style.color = mark.fg;
+      }
       thead.appendChild(th);
     });
     tbody.innerHTML = "";
@@ -458,16 +468,16 @@
           td.className = "slot";
           if (cell.css === "blocked") td.classList.add("blocked");
           if (cell.css === "lock") td.classList.add("lock");
-          if (cell.bg) {
+          if (cell.bg && cell.css !== "blocked" && cell.css !== "lock") {
             td.classList.add("has-fill");
             td.style.background = cell.bg;
           }
           const span = document.createElement("span");
           span.className = "status-record " + (cell.css || "free");
           span.textContent = cell.label || "запись";
-          if (cell.bg && cell.fg) {
+          if (cell.bg && cell.fg && cell.css !== "blocked" && cell.css !== "lock") {
             span.style.color = cell.fg;
-            span.style.fontWeight = cell.css === "occupied" || cell.css === "lock" ? "600" : "500";
+            span.style.fontWeight = cell.css === "occupied" ? "600" : "500";
           }
           td.appendChild(span);
           td.addEventListener("click", () => openBook(cell));
@@ -651,7 +661,7 @@
       await call("reload", {
         fast: true,
         sync_registry: false,
-        colors: full ? "fetch" : "cache",
+        colors: "cache",
         refresh_sheets: false,
       });
     } finally {
@@ -912,11 +922,6 @@
   window.addEventListener("pywebviewready", async () => {
     await call("connect");
     await refresh(false);
-    setTimeout(() => {
-      if (!document.getElementById("bookModal").classList.contains("open")) {
-        call("reload", { fast: true, sync_registry: false, colors: "fetch", background: true });
-      }
-    }, 800);
     let tick = 0;
     setInterval(() => {
       if (document.getElementById("bookModal").classList.contains("open")) return;
@@ -926,14 +931,7 @@
         call("reload", {
           fast: true,
           sync_registry: true,
-          colors: "fetch",
-          background: true,
-        });
-      } else if (tick % 5 === 0) {
-        call("reload", {
-          fast: true,
-          sync_registry: false,
-          colors: "fetch",
+          colors: "cache",
           background: true,
         });
       } else {

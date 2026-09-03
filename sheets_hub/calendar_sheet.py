@@ -342,6 +342,59 @@ def _extract_sidebar_info(
     return records
 
 
+def _looks_like_doctor_label(text: str) -> bool:
+    raw = (text or "").strip()
+    if not raw or len(raw) > 48:
+        return False
+    if is_time(raw) or is_date_header(raw):
+        return False
+    low = _norm(raw)
+    if low in _FREE_MARKERS or low in _BLOCKED_MARKERS or low.startswith("не запис"):
+        return False
+    if is_lock_text(raw):
+        return False
+    # Длинные записи клиентов обычно с телефоном.
+    if _PHONE_RE.search(raw) and len(raw) > 18:
+        return False
+    return True
+
+
+def _find_day_doctors(
+    rows: list[list[str]],
+    header_idx: int,
+    time_col: int,
+    date_cols: list[int],
+    header: list[str],
+) -> dict[str, str]:
+    """Строка с ФИО врача по колонкам дат (над/под шапкой календаря)."""
+    best: dict[str, str] = {}
+    best_hits = 0
+    start = max(0, header_idx - 4)
+    stop = min(len(rows), header_idx + 5)
+    for row_idx in range(start, stop):
+        if row_idx == header_idx:
+            continue
+        row = rows[row_idx]
+        if time_col < len(row) and is_time(row[time_col] if row else ""):
+            continue
+        mapping: dict[str, str] = {}
+        hits = 0
+        for col in date_cols:
+            date = header[col] if col < len(header) else ""
+            if not date:
+                continue
+            cell = (row[col] if col < len(row) else "") or ""
+            cell = cell.strip()
+            if _looks_like_doctor_label(cell):
+                mapping[date] = cell
+                hits += 1
+        need = max(2, (len(date_cols) + 2) // 3)
+        if hits >= need and hits > best_hits:
+            best_hits = hits
+            best = mapping
+    return best
+
+
 def parse_calendar_rows(
     rows: list[list[str]],
     source: SheetRef,
@@ -352,6 +405,7 @@ def parse_calendar_rows(
         return []
     header_idx, time_col, date_cols = layout
     header = [(cell or "").strip() for cell in rows[header_idx]]
+    day_doctors = _find_day_doctors(rows, header_idx, time_col, date_cols, header)
     corner = ""
     for row in rows[: header_idx + 1]:
         if time_col < len(row) and (row[time_col] or "").strip() and not is_time(row[time_col]):
@@ -389,15 +443,17 @@ def parse_calendar_rows(
             name, phone = extract_phone(display) if status == "Занято" else (display, "")
             if status in {"Свободно", "Записывают"}:
                 name, phone = "", ""
+            date_label = header[col_idx] if col_idx < len(header) else ""
             values = _with_tags(
                 {
-                    "Дата": header[col_idx] if col_idx < len(header) else "",
+                    "Дата": date_label,
                     "Время": time_text,
                     "Клиент": name or display,
                     "Телефон": phone,
                     "Статус": status,
                     "Адрес": address,
                     "Тип услуги": service,
+                    "_doctor": day_doctors.get(date_label, ""),
                 },
                 source,
             )
