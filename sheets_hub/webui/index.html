@@ -149,6 +149,10 @@
       background: #f0f8f4; border-radius: 24px; padding: 1rem 1.6rem; margin: 0.8rem 0;
       border-left: 4px solid #2a7d5a; white-space: pre-wrap;
     }
+    .info-block.has-fill {
+      border-left-color: transparent;
+      font-weight: 500;
+    }
     .text-muted { color: #4e6d8a; }
     .fw-500 { font-weight: 500; }
     .mt-1 { margin-top: 0.6rem; }
@@ -488,6 +492,11 @@
       const div = document.createElement("div");
       div.className = "info-block";
       div.textContent = item.text || "";
+      if (item.bg) {
+        div.classList.add("has-fill");
+        div.style.background = item.bg;
+        if (item.fg) div.style.color = item.fg;
+      }
       frag.appendChild(div);
     });
     host.appendChild(frag);

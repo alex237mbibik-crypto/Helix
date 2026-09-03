@@ -407,6 +407,8 @@ class HelixApi:
             title = " · ".join(p for p in title_parts if p)
             booked = sum(1 for r in cal if r.values.get("Статус") == "Занято")
             info = []
+            from sheets_hub.client import contrast_fg, soften_fill
+
             for record in self._info_records():
                 text = str(record.values.get("Текст") or "").strip()
                 if not text:
@@ -415,8 +417,23 @@ class HelixApi:
                         for k, v in record.values.items()
                         if str(v).strip() and not str(k).startswith("_")
                     )
-                if text:
-                    info.append({"text": text, "tone": str(record.values.get("_tone") or "info")})
+                if not text:
+                    continue
+                raw_bg = str(record.values.get("_bg") or "").strip()
+                bg = ""
+                fg = ""
+                if raw_bg:
+                    soft = soften_fill(raw_bg, fallback="#2e7d32")
+                    bg = _lighten_hex(soft, 0.22)
+                    fg = contrast_fg(bg)
+                info.append(
+                    {
+                        "text": text,
+                        "tone": str(record.values.get("_tone") or "info"),
+                        "bg": bg,
+                        "fg": fg,
+                    }
+                )
             email = ""
             if self.client:
                 email = getattr(self.client, "service_email", "") or ""
