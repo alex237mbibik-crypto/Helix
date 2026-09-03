@@ -1280,6 +1280,29 @@ class SheetsHubApp(ctk.CTk):
     def _norm_filter(self, value: str) -> str:
         return (value or "").strip().lower()
 
+    def _is_gynecology_record(self, record: Record) -> bool:
+        """Вопрос про беременность нужен только у гинеколога."""
+        parts = [
+            record.source_name,
+            str(record.values.get("Тип услуги") or ""),
+            str(record.values.get("Услуга") or ""),
+            self.service_filter_var.get() if hasattr(self, "service_filter_var") else "",
+            self.name_filter_var.get() if hasattr(self, "name_filter_var") else "",
+            self.source_filter_var.get() if hasattr(self, "source_filter_var") else "",
+        ]
+        for ref in self._tables():
+            try:
+                if ref.spreadsheet_id != record.spreadsheet_id:
+                    continue
+                if ref.sheet and ref.sheet != record.sheet:
+                    continue
+                parts.append(ref.name)
+                parts.append(ref.service)
+            except Exception:
+                continue
+        blob = " ".join(parts).lower().replace("ё", "е")
+        return "гинекол" in blob
+
     def _filter_tables_by_params(self, tables: list[SheetRef] | None = None) -> list[SheetRef]:
         items = [ref for ref in (tables if tables is not None else self._tables()) if not ref.is_placeholder()]
         name = self._norm_filter(self.name_filter_var.get())
@@ -2864,10 +2887,11 @@ class SheetsHubApp(ctk.CTk):
         lock_state: dict | None = None,
     ) -> None:
         calendar = record.layout == "calendar" and field == "Клиент"
+        ask_pregnancy = calendar and self._is_gynecology_record(record)
         when = f"{record.values.get('Дата', '')} · {record.values.get('Время', '')}".strip(" ·")
         dialog = self._dialog(
             "Запись" if calendar else "Изменить ячейку",
-            "520x420" if calendar else "480x240",
+            "520x420" if ask_pregnancy else ("480x280" if calendar else "480x240"),
         )
         if calendar and (lock_state is not None or lock_text):
             self._booking_open += 1
@@ -2919,7 +2943,7 @@ class SheetsHubApp(ctk.CTk):
 
         pregnant_var = tk.StringVar(value="")
         warn_label = None
-        if calendar:
+        if ask_pregnancy:
             preg_box = ctk.CTkFrame(dialog, fg_color=BG, corner_radius=10, border_width=1, border_color=LINE)
             preg_box.pack(fill="x", padx=16, pady=(0, 8))
             ctk.CTkLabel(
@@ -3064,7 +3088,7 @@ class SheetsHubApp(ctk.CTk):
             if calendar and not freeing:
                 typed = value.strip()
                 booking = typed and typed.lower() != "запись" and "не запис" not in typed.lower()
-                if booking and pregnant_var.get() not in {"yes", "no"}:
+                if ask_pregnancy and booking and pregnant_var.get() not in {"yes", "no"}:
                     messagebox.showwarning(
                         "Беременность",
                         "Выберите: беременна или не беременна.",
@@ -3398,7 +3422,28 @@ class SheetsHubApp(ctk.CTk):
         dialog_alive = {"ok": True}
         save_busy = {"ok": False}
 
+        def apply_registry_settings(*, persist: bool = False) -> None:
+            registry_id = registry_var.get().strip()
+            registry_sheet = sheet_var.get().strip() or DEFAULT_REGISTRY_SHEET
+            saved_id = (self.config_data.registry_spreadsheet_id or "").strip()
+            if saved_id.upper().startswith("PASTE_"):
+                saved_id = ""
+            # Не затираем уже сохранённую ссылку пустым полем (как с токеном Telegram).
+            if (not registry_id or registry_id.upper().startswith("PASTE_")) and saved_id:
+                registry_id = saved_id
+                registry_var.set(registry_id)
+            if registry_id and not registry_id.upper().startswith("PASTE_"):
+                self.config_data.registry_spreadsheet_id = registry_id
+            saved_sheet = (self.config_data.registry_sheet or "").strip() or DEFAULT_REGISTRY_SHEET
+            if not sheet_var.get().strip() and saved_sheet:
+                registry_sheet = saved_sheet
+                sheet_var.set(registry_sheet)
+            self.config_data.registry_sheet = registry_sheet
+            if persist:
+                self._persist_config(quiet=True)
+
         def apply_telegram_settings(*, persist: bool = True, quiet: bool = True) -> bool:
+            apply_registry_settings(persist=False)
             token = tg_token_var.get().strip()
             chat = tg_chat_var.get().strip()
             # Не затираем уже сохранённый токен/chat пустыми полями
@@ -3416,7 +3461,7 @@ class SheetsHubApp(ctk.CTk):
                 return True
             ok = self._persist_config(quiet=quiet)
             if ok and not quiet:
-                status_var.set(f"Telegram сохранён: {resolve_config_path()}")
+                status_var.set(f"Настройки сохранены: {resolve_config_path()}")
             return ok
 
         def test_telegram() -> None:
@@ -3529,6 +3574,7 @@ class SheetsHubApp(ctk.CTk):
         def load_from_cloud(*, auto: bool = False) -> None:
             if save_busy["ok"]:
                 return
+            apply_registry_settings(persist=False)
             registry_id = registry_var.get().strip()
             registry_sheet = sheet_var.get().strip() or DEFAULT_REGISTRY_SHEET
             if not registry_id or registry_id.upper().startswith("PASTE_"):
@@ -3558,6 +3604,7 @@ class SheetsHubApp(ctk.CTk):
                             "В облаке есть список — ваши правки не затираю. "
                             "Нажмите «Загрузить из облака», если нужен облачный список."
                         )
+                        self._persist_config(quiet=True)
                         return
                     editor.replace_refs(refs)
                     self._apply_remote_tables(refs)
@@ -3566,6 +3613,7 @@ class SheetsHubApp(ctk.CTk):
                     status_var.set(f"Загружено из облака: {len(refs)} таблиц")
                 else:
                     status_var.set("В облаке пока пусто — добавьте таблицы и сохраните.")
+                self._persist_config(quiet=True)
 
             def work_safe():
                 try:
@@ -3601,6 +3649,7 @@ class SheetsHubApp(ctk.CTk):
                     )
                     return
                 refs = editor.collect()
+                apply_registry_settings(persist=False)
                 registry_id = registry_var.get().strip()
                 registry_sheet = sheet_var.get().strip() or DEFAULT_REGISTRY_SHEET
                 if not registry_id or registry_id.upper().startswith("PASTE_"):
