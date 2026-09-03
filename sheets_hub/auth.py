@@ -16,7 +16,7 @@ from google.oauth2.credentials import Credentials as UserCredentials
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-from sheets_hub.config import ROOT
+from sheets_hub.config import ROOT, writable_data_dir
 
 SCOPES = [
     "openid",
@@ -116,8 +116,8 @@ def credentials_email(path: Path) -> str:
 
 
 def install_google_credentials(source: Path, dest: Path | None = None) -> Path:
-    """Копирует JSON сервисного аккаунта в credentials.json."""
-    target = dest or (ROOT / "credentials.json")
+    """Копирует JSON сервисного аккаунта в credentials.json (AppData, если Program Files)."""
+    target = dest or (writable_data_dir() / "credentials.json")
     source = source.expanduser().resolve()
     if not source.exists():
         raise FileNotFoundError(source)

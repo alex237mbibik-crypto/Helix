@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import sys
 from dataclasses import dataclass, field, replace
@@ -15,6 +16,77 @@ def app_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def user_data_dir() -> Path:
+    """Папка настроек с правами на запись (для установки в Program Files)."""
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or str(Path.home())
+        path = Path(base) / "SheetsHub"
+    elif sys.platform == "darwin":
+        path = Path.home() / "Library" / "Application Support" / "SheetsHub"
+    else:
+        path = Path.home() / ".config" / "SheetsHub"
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+    except Exception:
+        fallback = Path.home() / "SheetsHub"
+        try:
+            fallback.mkdir(parents=True, exist_ok=True)
+            return fallback
+        except Exception:
+            return app_root()
+
+
+def _dir_is_writable(folder: Path) -> bool:
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        probe = folder / ".sheets_hub_write_test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return True
+    except Exception:
+        return False
+
+
+def writable_data_dir() -> Path:
+    """Куда можно писать config/credentials: рядом с exe, иначе AppData."""
+    root = app_root()
+    if _dir_is_writable(root):
+        return root
+    return user_data_dir()
+
+
+_RESOLVED_CONFIG_PATH: Path | None = None
+
+
+def resolve_config_path() -> Path:
+    """config.yaml: при Program Files — %LOCALAPPDATA%\\SheetsHub\\config.yaml."""
+    global _RESOLVED_CONFIG_PATH
+    if _RESOLVED_CONFIG_PATH is not None:
+        return _RESOLVED_CONFIG_PATH
+
+    root = app_root()
+    root_cfg = root / "config.yaml"
+    user_cfg = user_data_dir() / "config.yaml"
+
+    if user_cfg.exists():
+        _RESOLVED_CONFIG_PATH = user_cfg
+        return _RESOLVED_CONFIG_PATH
+
+    if _dir_is_writable(root):
+        _RESOLVED_CONFIG_PATH = root_cfg
+        return _RESOLVED_CONFIG_PATH
+
+    # Program Files / нет прав: переносим существующий config в AppData.
+    if root_cfg.exists():
+        try:
+            user_cfg.write_text(root_cfg.read_text(encoding="utf-8"), encoding="utf-8")
+        except Exception:
+            pass
+    _RESOLVED_CONFIG_PATH = user_cfg
+    return _RESOLVED_CONFIG_PATH
+
+
 def _example_config_path() -> Path:
     next_to_app = app_root() / "config.example.yaml"
     if next_to_app.exists():
@@ -27,20 +99,26 @@ def _example_config_path() -> Path:
 
 
 ROOT = app_root()
+# Фактический путь может быть в AppData — всегда через resolve_config_path().
 CONFIG_PATH = ROOT / "config.yaml"
 EXAMPLE_CONFIG_PATH = _example_config_path()
 
 
 def find_credentials_file(configured: Path | str | None = None) -> Path | None:
-    """Ищет credentials рядом с программой, даже если в config.yaml старый путь."""
+    """Ищет credentials рядом с программой и в AppData."""
     candidates: list[Path] = []
+    data = writable_data_dir()
     if configured:
         raw = Path(configured)
         candidates.append(raw)
         if not raw.is_absolute():
             candidates.append(ROOT / raw)
+            candidates.append(data / raw)
+    candidates.append(data / "credentials.json")
     candidates.append(ROOT / "credentials.json")
     try:
+        candidates.extend(sorted(data.glob("client_secret*.json")))
+        candidates.extend(sorted(data.glob("*credentials*.json")))
         candidates.extend(sorted(ROOT.glob("client_secret*.json")))
         candidates.extend(sorted(ROOT.glob("*credentials*.json")))
     except Exception:
@@ -395,20 +473,29 @@ def _dump_ref(ref: SheetRef) -> dict[str, Any]:
 
 
 def load_config(path: Path | None = None) -> AppConfig:
-    config_path = path or CONFIG_PATH
+    config_path = path or resolve_config_path()
     if not config_path.exists():
         if EXAMPLE_CONFIG_PATH.exists():
-            config_path.write_text(
-                EXAMPLE_CONFIG_PATH.read_text(encoding="utf-8"),
-                encoding="utf-8",
-            )
+            try:
+                config_path.parent.mkdir(parents=True, exist_ok=True)
+                config_path.write_text(
+                    EXAMPLE_CONFIG_PATH.read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
+            except Exception as exc:
+                raise FileNotFoundError(
+                    f"Нет config.yaml и не удалось создать: {config_path}\n{exc}"
+                ) from exc
         else:
             raise FileNotFoundError("Нет config.yaml и config.example.yaml")
 
     raw: dict[str, Any] = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     configured = Path(raw.get("credentials") or "credentials.json")
     found = find_credentials_file(configured)
-    creds = found or (configured if configured.is_absolute() else ROOT / configured)
+    data_dir = writable_data_dir()
+    creds = found or (
+        configured if configured.is_absolute() else (data_dir / configured)
+    )
 
     destinations = _load_refs(raw.get("destinations") or raw.get("targets"))
     sources = _load_refs(raw.get("sources"))
@@ -460,12 +547,18 @@ def load_config(path: Path | None = None) -> AppConfig:
 
 
 def save_config(config: AppConfig, path: Path | None = None) -> None:
-    config_path = path or CONFIG_PATH
+    config_path = path or resolve_config_path()
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    data_dir = writable_data_dir()
     try:
-        rel_creds = config.credentials.relative_to(ROOT)
+        rel_creds = config.credentials.relative_to(data_dir)
         creds_value = str(rel_creds).replace("\\", "/")
     except ValueError:
-        creds_value = str(config.credentials)
+        try:
+            rel_creds = config.credentials.relative_to(ROOT)
+            creds_value = str(rel_creds).replace("\\", "/")
+        except ValueError:
+            creds_value = str(config.credentials)
 
     tables = merge_tables(config.sources, config.destinations) or config.sources
     dumped = [_dump_ref(item) for item in tables]
@@ -489,10 +582,12 @@ def save_config(config: AppConfig, path: Path | None = None) -> None:
         "show_tables_button": bool(config.ui.show_tables_button),
         "tables_password": config.ui.tables_password or "",
     }
-    config_path.write_text(
+    tmp = config_path.with_suffix(".yaml.tmp")
+    tmp.write_text(
         yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
+    tmp.replace(config_path)
 
 
 def credentials_email(path: Path) -> str:

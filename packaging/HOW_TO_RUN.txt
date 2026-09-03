@@ -1,19 +1,25 @@
 SheetsHub — как запустить
 ========================
 
-1. Распакуйте весь архив SheetsHub-Windows целиком в одну папку.
+1. Распакуйте весь архив SheetsHub-Windows целиком в одну папку
+   (можно в Program Files — настройки всё равно пишутся в AppData).
 2. В папке должны быть рядом:
    - SheetsHub.exe
    - папка _internal   ← без неё программа НЕ запустится
    - config.example.yaml
-3. Положите credentials.json сервисного аккаунта рядом с exe
-   (или он уже будет в архиве, если задан GitHub Secret).
+3. credentials.json — рядом с exe ИЛИ программа сохранит его в:
+   %LOCALAPPDATA%\SheetsHub\credentials.json
+   (кнопка JSON… в окне Таблицы / Ctrl+Shift+T).
    Каждую таблицу откройте для email из этого файла (роль «Редактор»).
 4. В «Таблицы» укажите ссылку на общую Google-таблицу списка (тоже Редактор для SA) —
    тогда список таблиц синхронизируется между всеми компьютерами.
 5. Запускайте SheetsHub.exe (или start_SheetsHub.bat).
 
-Защита окна «Таблицы» (в config.yaml рядом с exe):
+Где хранятся настройки (Telegram, список таблиц, registry):
+  %LOCALAPPDATA%\SheetsHub\config.yaml
+  (если программа в Program Files — только здесь, рядом с exe писать нельзя)
+
+Защита окна «Таблицы» (в config.yaml):
   ui:
     show_tables_button: false   # кнопка скрыта; открыть: Ctrl+Shift+T
     tables_password: ""         # пусто = без пароля; иначе спросит перед открытием

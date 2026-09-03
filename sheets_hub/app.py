@@ -25,8 +25,11 @@ from sheets_hub.config import (
     is_info_title,
     load_config,
     merge_tables,
+    resolve_config_path,
     save_config,
     usable_refs,
+    user_data_dir,
+    writable_data_dir,
 )
 from sheets_hub.models import Record
 from sheets_hub.registry import DEFAULT_REGISTRY_SHEET, tables_signature
@@ -450,8 +453,35 @@ class SheetsHubApp(ctk.CTk):
 
         self._build()
         self._sync_source_filter_from_config()
+        self.protocol("WM_DELETE_WINDOW", self._on_app_close)
         self.after(200, self._try_connect)
         self._schedule_auto_refresh()
+
+    def _persist_config(self, *, quiet: bool = True) -> bool:
+        """Пишет config.yaml (в AppData, если Program Files недоступен для записи)."""
+        try:
+            save_config(self.config_data)
+            return True
+        except Exception as exc:
+            cfg = resolve_config_path()
+            if not quiet:
+                messagebox.showerror(
+                    "Не удалось сохранить настройки",
+                    f"{exc}\n\nОжидаемый файл:\n{cfg}",
+                )
+            else:
+                try:
+                    self._set_status(f"Не сохранился config.yaml: {exc}")
+                except Exception:
+                    pass
+            return False
+
+    def _on_app_close(self) -> None:
+        self._persist_config(quiet=False)
+        try:
+            self.destroy()
+        except Exception:
+            pass
 
     def _fit_to_screen(self) -> None:
         self.update_idletasks()
@@ -1444,7 +1474,7 @@ class SheetsHubApp(ctk.CTk):
     def _try_connect(self, prompt_key: bool = True) -> None:
         path = self._resolve_credentials_path()
         if path is None:
-            expected = ROOT / "credentials.json"
+            expected = writable_data_dir() / "credentials.json"
             self.client = None
             self._set_account_label("")
             self._set_status(f"Нет credentials.json. Нужен файл: {expected}")
@@ -1514,11 +1544,11 @@ class SheetsHubApp(ctk.CTk):
         threading.Thread(target=runner, daemon=True).start()
 
     def _ask_for_credentials(self) -> None:
-        expected = ROOT / "credentials.json"
+        expected = writable_data_dir() / "credentials.json"
         go = messagebox.askokcancel(
             "Нужен ключ сервисного аккаунта",
             "Не найден JSON сервисного аккаунта.\n\n"
-            f"Положите его сюда:\n{expected}\n\n"
+            f"Программа положит его сюда (можно писать даже из Program Files):\n{expected}\n\n"
             "Имя файла лучше: credentials.json\n\n"
             "Сейчас можно выбрать файл вручную.",
         )
@@ -3354,7 +3384,7 @@ class SheetsHubApp(ctk.CTk):
         ctk.CTkLabel(tg_box, text="Токен", text_color=MUTED, font=ctk.CTkFont(size=11)).grid(
             row=1, column=0, sticky="w", padx=12, pady=(0, 8)
         )
-        _styled_entry(tg_box, "123456:ABC…", textvariable=tg_token_var, height=28, show="*").grid(
+        _styled_entry(tg_box, "123456:ABC…", textvariable=tg_token_var, height=28).grid(
             row=1, column=1, sticky="ew", padx=4, pady=(0, 8)
         )
         ctk.CTkLabel(tg_box, text="Chat ID", text_color=MUTED, font=ctk.CTkFont(size=11)).grid(
@@ -3369,26 +3399,38 @@ class SheetsHubApp(ctk.CTk):
         dialog_alive = {"ok": True}
         save_busy = {"ok": False}
 
-        def apply_telegram_settings(*, persist: bool = True) -> None:
+        def apply_telegram_settings(*, persist: bool = True, quiet: bool = True) -> bool:
+            token = tg_token_var.get().strip()
+            chat = tg_chat_var.get().strip()
+            # Не затираем уже сохранённый токен/chat пустыми полями
+            # (гонка при закрытии окна / сбой CTkEntry).
+            if not token and (self.config_data.telegram.bot_token or "").strip():
+                token = self.config_data.telegram.bot_token.strip()
+                tg_token_var.set(token)
+            if not chat and (self.config_data.telegram.chat_id or "").strip():
+                chat = self.config_data.telegram.chat_id.strip()
+                tg_chat_var.set(chat)
             self.config_data.telegram.enabled = bool(tg_enabled_var.get())
-            self.config_data.telegram.bot_token = tg_token_var.get().strip()
-            self.config_data.telegram.chat_id = tg_chat_var.get().strip()
-            if persist:
-                try:
-                    save_config(self.config_data)
-                except Exception:
-                    pass
+            self.config_data.telegram.bot_token = token
+            self.config_data.telegram.chat_id = chat
+            if not persist:
+                return True
+            ok = self._persist_config(quiet=quiet)
+            if ok and not quiet:
+                status_var.set(f"Telegram сохранён: {resolve_config_path()}")
+            return ok
 
         def test_telegram() -> None:
             from sheets_hub.config import TelegramConfig
 
             # Тест включает уведомления и сразу пишет их в config.yaml.
             tg_enabled_var.set(True)
-            apply_telegram_settings(persist=True)
+            if not apply_telegram_settings(persist=True, quiet=False):
+                return
             settings = TelegramConfig(
                 enabled=True,
-                bot_token=tg_token_var.get().strip(),
-                chat_id=tg_chat_var.get().strip(),
+                bot_token=tg_token_var.get().strip() or self.config_data.telegram.bot_token,
+                chat_id=tg_chat_var.get().strip() or self.config_data.telegram.chat_id,
             )
             if not settings.bot_token or not settings.chat_id:
                 messagebox.showwarning(
@@ -3405,10 +3447,16 @@ class SheetsHubApp(ctk.CTk):
             def done(result):
                 ok, err = result
                 if ok:
+                    # Повторно фиксируем на диск после успешного теста.
+                    self.config_data.telegram.enabled = True
+                    self.config_data.telegram.bot_token = settings.bot_token
+                    self.config_data.telegram.chat_id = settings.chat_id
+                    self._persist_config(quiet=False)
                     status_var.set("Тест отправлен. Настройки Telegram сохранены.")
                     messagebox.showinfo(
                         "Telegram",
-                        "Сообщение ушло в чат.\nНастройки сохранены — записи тоже будут слаться.",
+                        "Сообщение ушло в чат.\n"
+                        f"Настройки сохранены:\n{resolve_config_path()}",
                         parent=dialog,
                     )
                 else:
@@ -3472,7 +3520,7 @@ class SheetsHubApp(ctk.CTk):
                         return
             cloud_op_gen["n"] += 1
             dialog_alive["ok"] = False
-            apply_telegram_settings(persist=True)
+            apply_telegram_settings(persist=True, quiet=False)
             self._tables_dialog_open = False
             try:
                 dialog.destroy()
