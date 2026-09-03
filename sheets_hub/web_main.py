@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
+from sheets_hub.config import user_data_dir
 from sheets_hub.ssl_setup import configure_tls
 from sheets_hub.web_api import HelixApi
 
@@ -25,7 +27,27 @@ def _ui_index() -> Path:
     raise FileNotFoundError("Не найден webui/index.html")
 
 
+def _webview_data_dir() -> Path:
+    """Каталог Edge WebView2 — только в AppData (Program Files / Temp недоступны)."""
+    path = user_data_dir() / "webview"
+    path.mkdir(parents=True, exist_ok=True)
+    probe = path / ".write_test"
+    try:
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+    except Exception as exc:
+        raise PermissionError(
+            f"Нет прав на запись в каталог WebView2:\n{path}\n{exc}"
+        ) from exc
+    return path
+
+
 def main() -> None:
+    # Сначала каталог WebView2 и окно — тяжёлый Google-клиент подтянется из JS.
+    data_dir = _webview_data_dir()
+    os.environ["WEBVIEW2_USER_DATA_FOLDER"] = str(data_dir)
+    os.environ.setdefault("PYWEBVIEW_STORAGE_PATH", str(data_dir))
+
     configure_tls()
     try:
         import webview
@@ -49,14 +71,12 @@ def main() -> None:
     )
     api.set_window(window)
 
-    def on_start():
-        api.connect()
-        try:
-            window.evaluate_js("window.Helix && window.Helix.refresh && window.Helix.refresh()")
-        except Exception:
-            pass
-
-    webview.start(on_start, debug=False)
+    # Данные грузит только pywebviewready в index.html (один быстрый проход).
+    webview.start(
+        debug=False,
+        private_mode=False,
+        storage_path=str(data_dir),
+    )
 
 
 if __name__ == "__main__":

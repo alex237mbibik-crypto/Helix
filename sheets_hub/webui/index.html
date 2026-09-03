@@ -4,16 +4,14 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Sheets Hub · календарь</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:opsz@14..32&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" media="print" onload="this.media='all'" />
+  <noscript><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" /></noscript>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html { scroll-behavior: smooth; }
     body {
       background: #f0f4fa;
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      font-family: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
       padding: 2rem 1.5rem;
       color: #142433;
       display: flex;
@@ -56,7 +54,12 @@
     }
     .flex-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem 1.2rem; }
     .flex-between { justify-content: space-between; }
-    .field-label { font-weight: 500; color: #1e3a5a; min-width: 70px; font-size: 0.9rem; }
+    .field-group {
+      display: inline-flex; align-items: center; gap: 0.45rem;
+      flex: 0 1 auto; white-space: nowrap; max-width: 100%;
+    }
+    .field-group select.field-value { max-width: min(240px, 42vw); }
+    .field-label { font-weight: 500; color: #1e3a5a; font-size: 0.9rem; flex-shrink: 0; }
     .field-value, select.field-value, input.field-value {
       background: #f7faf8;
       padding: 0.35rem 1.2rem; border-radius: 60px; border: 1px solid rgba(200, 216, 208, 0.8);
@@ -190,17 +193,27 @@
       </span>
     </div>
 
-    <div class="flex-row">
-      <span class="field-label"><i class="fas fa-tag"></i> Название</span>
-      <select class="field-value" id="fName"></select>
-      <span class="field-label">Услуга</span>
-      <select class="field-value" id="fService"></select>
-      <span class="field-label">Город</span>
-      <select class="field-value" id="fCity"></select>
-      <span class="field-label">Адрес</span>
-      <select class="field-value" id="fAddress"></select>
-      <span class="field-label">Лист</span>
-      <select class="field-value" id="fSheet"></select>
+    <div class="flex-row" id="filtersRow">
+      <div class="field-group">
+        <span class="field-label"><i class="fas fa-tag"></i> Название</span>
+        <select class="field-value" id="fName"></select>
+      </div>
+      <div class="field-group">
+        <span class="field-label">Услуга</span>
+        <select class="field-value" id="fService"></select>
+      </div>
+      <div class="field-group">
+        <span class="field-label">Город</span>
+        <select class="field-value" id="fCity"></select>
+      </div>
+      <div class="field-group">
+        <span class="field-label">Адрес</span>
+        <select class="field-value" id="fAddress"></select>
+      </div>
+      <div class="field-group">
+        <span class="field-label">Лист</span>
+        <select class="field-value" id="fSheet"></select>
+      </div>
       <span class="chip"><i class="far fa-circle"></i> пустое поле не учитывается</span>
     </div>
 
@@ -344,6 +357,7 @@
     data: null,
     settingsOpen: false,
     busy: false,
+    pendingRefresh: null,
     lastCalSig: "",
     lastInfoSig: "",
     lastTablesSig: "",
@@ -551,19 +565,44 @@
   }
 
   async function refresh(full) {
-    if (state.busy) return;
+    if (state.busy) {
+      state.pendingRefresh = full ? "full" : "fast";
+      return;
+    }
     state.busy = true;
+    state.pendingRefresh = null;
+    const btn = document.getElementById("btnRefresh");
+    const status = document.getElementById("statusLine");
     const chip = document.getElementById("cloudStatus");
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> Обновляю…';
+    }
+    if (status) {
+      status.innerHTML =
+        '<i class="fas fa-sync-alt fa-spin" style="color:#2a7d5a;"></i> Обновляю календарь…';
+    }
     if (chip && state.settingsOpen) {
       chip.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> обновляю…';
     }
+    // Полное обновление — всегда перерисовать сетку.
+    if (full) state.lastCalSig = "";
     try {
       if (full) await call("reload", { fast: false, sync_registry: true });
       else await call("reload", { fast: true, sync_registry: false });
     } finally {
       state.busy = false;
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-sync-alt"></i> Обновить';
+      }
       if (chip && state.settingsOpen) {
         chip.innerHTML = '<i class="fas fa-cloud"></i> готово';
+      }
+      if (state.pendingRefresh) {
+        const again = state.pendingRefresh === "full";
+        state.pendingRefresh = null;
+        refresh(again);
       }
     }
   }
@@ -577,7 +616,7 @@
       sheet: document.getElementById("fSheet").value,
       search: document.getElementById("fSearch").value,
     });
-    await refresh(true);
+    await refresh(false);
   }
 
   async function openSettings() {
@@ -730,22 +769,24 @@
 
   window.Helix = {
     refresh: async function () {
-      const a = api();
-      if (!a) return;
-      const snap = await a.get_state();
-      applyState(snap);
+      await refresh(false);
     },
   };
 
   window.addEventListener("pywebviewready", async () => {
+    // Один быстрый проход при старте (без цветов и registry), потом догрузка.
     await call("connect");
-    await refresh(true);
+    await refresh(false);
+    setTimeout(() => {
+      if (!document.getElementById("bookModal").classList.contains("open")) {
+        refresh(true);
+      }
+    }, 1800);
     let tick = 0;
     setInterval(() => {
       if (document.getElementById("bookModal").classList.contains("open")) return;
       if (state.busy) return;
       tick += 1;
-      // Быстрый тихий refresh; раз в ~2.5 мин тянем registry.
       refresh(tick % 5 === 0);
     }, 45000);
   });

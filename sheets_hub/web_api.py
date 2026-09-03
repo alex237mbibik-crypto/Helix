@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import re
 import threading
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sheets_hub.auth import credential_kind
 from sheets_hub.calendar_sheet import classify_slot, extract_phone, is_lock_text
-from sheets_hub.client import SheetsClient
 from sheets_hub.config import (
     KIND_INFO,
     SheetRef,
@@ -22,12 +22,15 @@ from sheets_hub.config import (
     resolve_config_path,
     save_config,
     usable_refs,
+    user_data_dir,
     writable_data_dir,
 )
 from sheets_hub.models import Record
 from sheets_hub.registry import DEFAULT_REGISTRY_SHEET, tables_signature
 from sheets_hub.split import explode_records, write_back_value
-from sheets_hub.telegram import notify_booking_async, notify_free_async, send_message
+
+if TYPE_CHECKING:
+    from sheets_hub.client import SheetsClient
 
 
 def _norm(value: str) -> str:
@@ -46,6 +49,28 @@ def _time_sort_key(text: str) -> tuple[int, int]:
     if not match:
         return (99, 99)
     return int(match.group(1)), int(match.group(2))
+
+
+def _ui_cache_path() -> Path:
+    return user_data_dir() / "ui_cache.json"
+
+
+def _load_ui_cache() -> dict[str, Any]:
+    path = _ui_cache_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_ui_cache(data: dict[str, Any]) -> None:
+    path = _ui_cache_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=0), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def _ref_to_dict(ref: SheetRef) -> dict[str, str]:
@@ -91,11 +116,45 @@ class HelixApi:
         self._window = None
         self._lock = threading.RLock()
         self._auto_tick = 0
+        self._preferred_cache: dict[str, str] = {}
+        self._restore_ui_cache()
 
     def set_window(self, window) -> None:
         self._window = window
 
-    # --- helpers ---
+    def _restore_ui_cache(self) -> None:
+        cache = _load_ui_cache()
+        prefs = cache.get("preferred_sheets")
+        if isinstance(prefs, dict):
+            self._preferred_cache = {
+                str(k): str(v).strip() for k, v in prefs.items() if str(k).strip() and str(v).strip()
+            }
+        saved = cache.get("filters")
+        if isinstance(saved, dict):
+            for key in ("name", "service", "city", "address", "sheet"):
+                val = str(saved.get(key) or "").strip()
+                if val:
+                    self.filters[key] = val
+
+    def _persist_ui_cache(self) -> None:
+        _save_ui_cache(
+            {
+                "preferred_sheets": dict(self._preferred_cache),
+                "filters": {
+                    k: self.filters.get(k, "")
+                    for k in ("name", "service", "city", "address", "sheet")
+                },
+            }
+        )
+
+    def _apply_cached_preferred(self) -> None:
+        if not self.client or not self._preferred_cache:
+            return
+        for sid, title in self._preferred_cache.items():
+            try:
+                self.client.set_preferred_calendar_sheet(sid, title)
+            except Exception:
+                pass
 
     def _tables(self) -> list[SheetRef]:
         tables = merge_tables(self.config.sources, self.config.destinations)
@@ -152,12 +211,19 @@ class HelixApi:
         addresses = sorted({r.address.strip() for r in after_city if r.address.strip()})
         names = sorted({r.name.strip() for r in items if r.name.strip()})
         sheets: list[str] = []
-        if self.client and after_city:
-            sid = after_city[0].spreadsheet_id
-            try:
-                sheets = self.client.list_calendar_sheet_titles(sid)
-            except Exception:
-                sheets = []
+        if after_city:
+            # Сначала из уже загруженных слотов — без лишнего htmlview при каждом snapshot.
+            seen: list[str] = []
+            for record in self.records:
+                if record.layout == "calendar" and record.sheet and record.sheet not in seen:
+                    seen.append(record.sheet)
+            sheets = seen
+            if not sheets and self.client:
+                sid = after_city[0].spreadsheet_id
+                try:
+                    sheets = self.client.list_calendar_sheet_titles(sid)
+                except Exception:
+                    sheets = []
         return {
             "names": names,
             "services": services,
@@ -167,8 +233,60 @@ class HelixApi:
         }
 
     def _selected_sources(self) -> list[SheetRef]:
+        # Как в CTk: одна активная таблица, иначе клиент тянет всё подряд.
         matched = self._filter_tables()
-        return matched or self._tables()
+        if matched:
+            return [matched[0]]
+        tables = [ref for ref in self._tables() if not ref.is_placeholder()]
+        return [tables[0]] if tables else []
+
+    def _active_spreadsheet_id(self) -> str:
+        sources = self._selected_sources()
+        if not sources:
+            return ""
+        try:
+            return sources[0].normalized_id()
+        except ValueError:
+            return ""
+
+    def _apply_preferred_sheet(self) -> None:
+        """Лист месяца из фильтра → preferred в клиенте (иначе CSV тянет не тот лист)."""
+        if not self.client:
+            return
+        sid = self._active_spreadsheet_id()
+        title = (self.filters.get("sheet") or "").strip()
+        if sid and title and title.lower() not in {"лист", "—", "-"}:
+            self.client.set_preferred_calendar_sheet(sid, title)
+            self._preferred_cache[sid] = title
+
+    def _sync_sheet_filter(self, titles: list[str] | None = None) -> None:
+        """После загрузки выставить лист месяца (preferred / первый календарный)."""
+        sid = self._active_spreadsheet_id()
+        values = list(titles or [])
+        if not values and self.client and sid:
+            # Не ходим в сеть повторно на fast-старте — только из уже загруженных записей.
+            for item in self.records:
+                if item.layout == "calendar" and item.sheet and item.sheet not in values:
+                    values.append(item.sheet)
+        if not values:
+            for item in self.records:
+                if item.layout == "calendar" and item.sheet:
+                    values = [item.sheet]
+                    break
+        preferred = ""
+        if self.client and sid:
+            preferred = self.client.preferred_calendar_sheet(sid) or self._preferred_cache.get(sid, "")
+        current = (self.filters.get("sheet") or "").strip()
+        if current and values and current not in values:
+            current = ""
+        if not current:
+            current = preferred or (values[0] if values else "")
+        if current:
+            self.filters["sheet"] = current
+            if self.client and sid:
+                self.client.set_preferred_calendar_sheet(sid, current)
+                self._preferred_cache[sid] = current
+        self._persist_ui_cache()
 
     def _calendar_records(self) -> list[Record]:
         sheet = (self.filters.get("sheet") or "").strip()
@@ -317,7 +435,9 @@ class HelixApi:
     def get_state(self) -> dict[str, Any]:
         return self.snapshot()
 
-    def connect(self) -> dict[str, Any]:
+    def connect(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        data = payload if isinstance(payload, dict) else {}
+        do_reload = bool(data.get("reload"))
         path = find_credentials_file(self.config.credentials)
         if path is None:
             self.client = None
@@ -328,14 +448,18 @@ class HelixApi:
             self.status = "Нужен JSON сервисного аккаунта (type: service_account)."
             return self.snapshot()
         try:
+            from sheets_hub.client import SheetsClient
+
             self.client = SheetsClient(path)
             self.config.credentials = path
+            self._apply_cached_preferred()
             try:
                 self._persist()
             except Exception:
                 pass
             self.status = f"Подключено: {self.client.service_email}"
-            self.reload()
+            if do_reload:
+                return self.reload({"fast": True, "sync_registry": False})
         except Exception as exc:
             self.client = None
             self.status = str(exc).split("\n")[0]
@@ -361,17 +485,27 @@ class HelixApi:
             installed = install_credentials(Path(paths[0]))
             self.config.credentials = installed
             self._persist()
-            return self.connect()
+            return self.connect({"reload": True})
         except Exception as exc:
             self.status = str(exc)
             return self.snapshot()
 
     def set_filters(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         data = payload or {}
+        prev_top = {
+            k: (self.filters.get(k) or "") for k in ("name", "service", "city", "address")
+        }
         for key in ("name", "service", "city", "address", "sheet", "search"):
             if key in data:
                 self.filters[key] = str(data.get(key) or "").strip()
-        # каскад: сброс зависимых при смене верхних
+        top_changed = any(
+            (self.filters.get(k) or "") != prev_top[k] for k in prev_top
+        )
+        # Смена таблицы — сбрасываем лист, reload выставит месяц заново.
+        if top_changed:
+            self.filters["sheet"] = ""
+        self._apply_preferred_sheet()
+        self._persist_ui_cache()
         return self.snapshot()
 
     def reload(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -381,10 +515,16 @@ class HelixApi:
         if not self.client:
             self.status = "Нет подключения — укажите credentials.json"
             return self.snapshot()
-        if not self._lock.acquire(blocking=False):
+        # Ждём предыдущее обновление (кнопка «Обновить» не должна молча игнорироваться).
+        if not self._lock.acquire(blocking=True, timeout=120):
+            self.status = "Обновление ещё идёт — подождите"
             return self.snapshot()
         try:
             sources = self._selected_sources()
+            if not sources:
+                self.records = []
+                self.status = "Нет таблиц. Откройте настройки и загрузите список из облака."
+                return self.snapshot()
             if sync_registry and self._registry_ready():
                 try:
                     remote = self.client.pull_table_registry(
@@ -394,9 +534,34 @@ class HelixApi:
                     if remote:
                         self.config.sources = remote
                         self.config.destinations = list(remote)
-                        sources = self._selected_sources()
+                        sources = self._selected_sources() or sources
                 except Exception:
                     pass
+            self._apply_preferred_sheet()
+            sheet_titles: list[str] = []
+            sid = ""
+            try:
+                sid = sources[0].normalized_id()
+            except ValueError:
+                sid = ""
+            known_sheet = (self.filters.get("sheet") or "").strip()
+            if not known_sheet and sid:
+                known_sheet = (
+                    self.client.preferred_calendar_sheet(sid)
+                    or self._preferred_cache.get(sid, "")
+                ).strip()
+                if known_sheet:
+                    self.filters["sheet"] = known_sheet
+                    self._apply_preferred_sheet()
+            # Список вкладок — дорогой htmlview; на fast при известном листе пропускаем.
+            if (not fast) or (not known_sheet):
+                try:
+                    sheet_titles = self.client.list_calendar_sheet_titles(sid or sources[0].spreadsheet_id)
+                except Exception:
+                    sheet_titles = []
+                if not known_sheet and sheet_titles:
+                    self.filters["sheet"] = sheet_titles[0]
+                    self._apply_preferred_sheet()
             raw, errors = self.client.fetch_all(
                 sources,
                 include_colors=not fast,
@@ -411,6 +576,7 @@ class HelixApi:
                 if key not in seen:
                     self.records.append(item)
                     seen.add(key)
+            self._sync_sheet_filter(sheet_titles)
             if errors:
                 self.status = "; ".join(errors[:2])
             else:
@@ -418,8 +584,10 @@ class HelixApi:
                 booked = sum(
                     1 for r in self._calendar_records() if r.values.get("Статус") == "Занято"
                 )
+                sheet_note = self.filters.get("sheet") or ""
                 self.status = (
-                    f"{self.filters.get('name') or (sources[0].name if sources else 'Календарь')}: "
+                    f"{self.filters.get('name') or sources[0].name}"
+                    f"{(' · ' + sheet_note) if sheet_note else ''}: "
                     f"{cal_n} слотов, занято {booked}"
                 )
         except Exception as exc:
@@ -477,12 +645,16 @@ class HelixApi:
 
         try:
             if freeing or not client_text or client_text.lower() == "запись":
+                from sheets_hub.telegram import notify_free_async
+
                 prev_status = classify_slot(previous)
                 self.client.update_cell(record, "Клиент", "")
                 if prev_status == "Занято":
                     notify_free_async(self.config.telegram, record, previous)
                 self.status = "Слот освобождён"
             else:
+                from sheets_hub.telegram import notify_booking_async
+
                 lock_prev, lock_text = self.client.acquire_calendar_lock(
                     record, previous_hint=previous
                 )
@@ -500,7 +672,7 @@ class HelixApi:
                     raise
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
-        self.reload()
+        self.reload({"fast": True, "sync_registry": False})
         return {"ok": True, **self.snapshot()}
 
     def save_telegram(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -523,6 +695,8 @@ class HelixApi:
             return {"ok": False, "error": str(exc), **self.snapshot()}
 
     def test_telegram(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        from sheets_hub.telegram import send_message
+
         self.save_telegram({**(payload or {}), "enabled": True})
         settings = TelegramConfig(
             enabled=True,
@@ -570,8 +744,8 @@ class HelixApi:
                 self.config.destinations = list(refs)
                 self._persist()
                 self.status = f"Загружено из облака: {len(refs)} таблиц"
-            else:
-                self.status = "В облаке пока пусто"
+                return {"ok": True, **self.reload({"fast": False, "sync_registry": False})}
+            self.status = "В облаке пока пусто"
             return {"ok": True, **self.snapshot()}
         except Exception as exc:
             return {"ok": False, "error": str(exc), **self.snapshot()}
