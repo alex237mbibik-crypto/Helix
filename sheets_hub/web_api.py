@@ -133,6 +133,8 @@ class HelixApi:
         self._lock = threading.RLock()
         self._auto_tick = 0
         self._preferred_cache: dict[str, str] = {}
+        self._color_thread: threading.Thread | None = None
+        self._active_lock: dict[str, Any] | None = None
         self._restore_ui_cache()
 
     def set_window(self, window) -> None:
@@ -356,18 +358,19 @@ class HelixApi:
         phone = record.values.get("Телефон", "").strip()
         if status == "Не записывать":
             label, css = "не записывать", "blocked"
+            bg, fg = "#eef2f6", "#5a6f84"
         elif status == "Записывают":
             label, css = "записывают…", "lock"
+            bg, fg = "#fff3cd", "#3e2723"
         elif status == "Занято":
             label = f"{client}" + (f" {phone}" if phone and phone not in client else "")
             css = "occupied"
+            bg, fg = "", ""
         else:
             label, css = "запись", "free"
+            bg, fg = "", ""
         raw_bg = str(record.values.get("_bg") or "").strip()
-        bg = ""
-        fg = ""
-        if raw_bg:
-            # Чуть ярче, чем в CTk: мягче гасим кислотность и поднимаем яркость.
+        if raw_bg and css not in {"blocked", "lock"}:
             soft = soften_fill(raw_bg, fallback="#2e7d32")
             bg = _lighten_hex(soft, 0.22)
             fg = contrast_fg(bg)
@@ -384,6 +387,7 @@ class HelixApi:
             "spreadsheet_id": record.spreadsheet_id,
             "source_name": record.source_name,
             "ask_pregnancy": self._is_gyn(record),
+            "editable": css in {"free", "occupied"},
         }
 
     def snapshot(self) -> dict[str, Any]:
@@ -555,15 +559,28 @@ class HelixApi:
 
     def reload(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         data = payload if isinstance(payload, dict) else {}
-        fast = bool(data.get("fast"))
-        sync_registry = bool(data.get("sync_registry", not fast))
+        # По умолчанию быстрый CSV; полный путь только по явному запросу.
+        fast = bool(data.get("fast", True))
+        sync_registry = bool(data.get("sync_registry", False))
+        colors_mode = str(data.get("colors") or ("cache" if fast else "fetch")).strip().lower()
+        if colors_mode not in {"skip", "cache", "fetch"}:
+            colors_mode = "cache"
+        refresh_sheets = bool(data.get("refresh_sheets", False))
         if not self.client:
             self.status = "Нет подключения — укажите credentials.json"
             return self.snapshot()
-        # Ждём предыдущее обновление (кнопка «Обновить» не должна молча игнорироваться).
-        if not self._lock.acquire(blocking=True, timeout=120):
-            self.status = "Обновление ещё идёт — подождите"
+        # Фоновые тяжёлые обновления не ждут и не блокируют UI.
+        if data.get("background"):
+            got_lock = self._lock.acquire(blocking=False)
+        else:
+            wait = 3.0 if fast else 20.0
+            got_lock = self._lock.acquire(blocking=True, timeout=wait)
+        if not got_lock:
+            if data.get("background"):
+                return self.snapshot()
+            self.status = "Обновление ещё идёт…"
             return self.snapshot()
+        fetch_colors_later = False
         try:
             sources = self._selected_sources()
             if not sources:
@@ -598,19 +615,21 @@ class HelixApi:
                 if known_sheet:
                     self.filters["sheet"] = known_sheet
                     self._apply_preferred_sheet()
-            # Список вкладок — дорогой htmlview; на fast при известном листе пропускаем.
-            if (not fast) or (not known_sheet):
+            if (not known_sheet) or refresh_sheets:
                 try:
-                    sheet_titles = self.client.list_calendar_sheet_titles(sid or sources[0].spreadsheet_id)
+                    sheet_titles = self.client.list_calendar_sheet_titles(
+                        sid or sources[0].spreadsheet_id
+                    )
                 except Exception:
                     sheet_titles = []
                 if not known_sheet and sheet_titles:
                     self.filters["sheet"] = sheet_titles[0]
                     self._apply_preferred_sheet()
+            # Цвета никогда не качаем на UI-потоке — только кэш или фон.
             raw, errors = self.client.fetch_all(
                 sources,
-                include_colors=not fast,
-                fast=fast,
+                include_colors=False,
+                fast=True,
             )
             booking = [item for item in raw if item.kind != KIND_INFO]
             self.records = explode_records(booking)
@@ -621,6 +640,12 @@ class HelixApi:
                 if key not in seen:
                     self.records.append(item)
                     seen.add(key)
+            if colors_mode in {"cache", "fetch"}:
+                try:
+                    self.client.apply_cached_colors(self.records)
+                except Exception:
+                    pass
+            fetch_colors_later = colors_mode == "fetch"
             self._sync_sheet_filter(sheet_titles)
             if errors:
                 self.status = "; ".join(errors[:2])
@@ -639,7 +664,154 @@ class HelixApi:
             self.status = str(exc).split("\n")[0]
         finally:
             self._lock.release()
+        if fetch_colors_later:
+            self._schedule_color_refresh()
         return self.snapshot()
+
+    def _schedule_color_refresh(self) -> None:
+        if self._color_thread and self._color_thread.is_alive():
+            return
+
+        def work() -> None:
+            if not self.client:
+                return
+            if not self._lock.acquire(blocking=False):
+                return
+            try:
+                self.client._attach_sheet_colors(list(self.records))
+            except Exception:
+                pass
+            finally:
+                self._lock.release()
+            if self._window is None:
+                return
+            try:
+                self._window.evaluate_js(
+                    "window.Helix && window.Helix.pull && window.Helix.pull()"
+                )
+            except Exception:
+                pass
+
+        self._color_thread = threading.Thread(target=work, daemon=True)
+        self._color_thread.start()
+
+    def begin_slot(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Открытие слота: защита «не записывать» + маркер «записывают» для чужих ПК."""
+        data = payload or {}
+        if not self.client:
+            return {"ok": False, "error": "Нет подключения к Google"}
+        record = self._find_record(
+            str(data.get("spreadsheet_id") or ""),
+            str(data.get("sheet") or ""),
+            int(data.get("row") or 0),
+        )
+        if record is None:
+            return {"ok": False, "error": "Слот не найден — обновите календарь"}
+        status = record.values.get("Статус", "")
+        if status == "Не записывать":
+            return {
+                "ok": False,
+                "blocked": True,
+                "error": "В эту ячейку нельзя записывать.",
+            }
+        if status == "Записывают":
+            return {
+                "ok": False,
+                "locked": True,
+                "error": "Этот слот сейчас заполняет другой оператор.\n"
+                "Подождите или нажмите «Обновить».",
+            }
+        if status == "Занято":
+            return {
+                "ok": True,
+                "mode": "edit",
+                "lock_text": "",
+                "lock_prev": str(record.values.get("Клиент") or ""),
+                "ask_pregnancy": self._is_gyn(record),
+            }
+
+        previous = str(record.values.get("Клиент") or "")
+        try:
+            previous = self.client.read_cell(record, "Клиент")
+        except Exception:
+            pass
+        from sheets_hub.calendar_sheet import classify_slot
+
+        live = classify_slot(previous)
+        if live == "Не записывать":
+            record.values["Статус"] = "Не записывать"
+            return {
+                "ok": False,
+                "blocked": True,
+                "error": "В эту ячейку нельзя записывать.",
+            }
+        if live == "Записывают":
+            record.values["Статус"] = "Записывают"
+            return {
+                "ok": False,
+                "locked": True,
+                "error": "Этот слот сейчас заполняет другой оператор.\n"
+                "Подождите или нажмите «Обновить».",
+            }
+        if live == "Занято":
+            record.values["Статус"] = "Занято"
+            record.values["Клиент"] = previous
+            return {
+                "ok": True,
+                "mode": "edit",
+                "lock_text": "",
+                "lock_prev": previous,
+                "ask_pregnancy": self._is_gyn(record),
+            }
+        try:
+            lock_prev, lock_text = self.client.acquire_calendar_lock(
+                record, previous_hint=previous
+            )
+        except Exception as exc:
+            return {"ok": False, "locked": True, "error": str(exc)}
+        record.values["Статус"] = "Записывают"
+        record.values["Клиент"] = lock_text
+        self._active_lock = {
+            "spreadsheet_id": record.spreadsheet_id,
+            "sheet": record.sheet,
+            "row": record.row,
+            "lock_text": lock_text,
+            "lock_prev": lock_prev,
+        }
+        return {
+            "ok": True,
+            "mode": "book",
+            "lock_text": lock_text,
+            "lock_prev": lock_prev,
+            "ask_pregnancy": self._is_gyn(record),
+        }
+
+    def cancel_slot(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Снять маркер «записывают», если окно закрыли без сохранения."""
+        data = payload or {}
+        lock_text = str(data.get("lock_text") or "").strip()
+        lock_prev = data.get("lock_prev")
+        if lock_prev is None and self._active_lock:
+            lock_prev = self._active_lock.get("lock_prev", "")
+        if not lock_text and self._active_lock:
+            lock_text = str(self._active_lock.get("lock_text") or "")
+        record = self._find_record(
+            str(data.get("spreadsheet_id") or (self._active_lock or {}).get("spreadsheet_id") or ""),
+            str(data.get("sheet") or (self._active_lock or {}).get("sheet") or ""),
+            int(data.get("row") or (self._active_lock or {}).get("row") or 0),
+        )
+        self._active_lock = None
+        if not self.client or record is None or not lock_text:
+            return {"ok": True, **self.snapshot()}
+        try:
+            current = self.client.read_cell(record, "Клиент")
+            if current == lock_text:
+                self.client.update_cell(
+                    record, "Клиент", str(lock_prev or ""), confirm=False
+                )
+        except Exception:
+            pass
+        return {"ok": True, **self.reload({"fast": True, "sync_registry": False, "colors": "cache"})}
 
     def unlock_settings(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         data = payload or {}
@@ -674,9 +846,14 @@ class HelixApi:
         )
         if record is None:
             return {"ok": False, "error": "Слот не найден — обновите календарь"}
+        status = record.values.get("Статус", "")
+        if status == "Не записывать":
+            return {"ok": False, "error": "В эту ячейку нельзя записывать.", "blocked": True}
         client_text = str(data.get("client") or "").strip()
         pregnant = str(data.get("pregnant") or "").strip()
         freeing = bool(data.get("freeing"))
+        lock_text = str(data.get("lock_text") or "").strip()
+        lock_prev = data.get("lock_prev")
         if not freeing and self._is_gyn(record):
             if client_text and client_text.lower() != "запись" and "не запис" not in client_text.lower():
                 if pregnant not in {"yes", "no"}:
@@ -688,36 +865,55 @@ class HelixApi:
         except Exception:
             previous = str(record.values.get("Клиент") or "")
 
+        live = classify_slot(previous)
+        if not freeing and live == "Не записывать":
+            return {"ok": False, "error": "В эту ячейку нельзя записывать.", "blocked": True}
+
         try:
             if freeing or not client_text or client_text.lower() == "запись":
                 from sheets_hub.telegram import notify_free_async
 
                 prev_status = classify_slot(previous)
-                self.client.update_cell(record, "Клиент", "")
+                # Снять свой lock или очистить занятый слот.
+                if lock_text and previous == lock_text:
+                    self.client.update_cell(record, "Клиент", str(lock_prev or ""), confirm=False)
+                else:
+                    self.client.update_cell(record, "Клиент", "")
                 if prev_status == "Занято":
                     notify_free_async(self.config.telegram, record, previous)
                 self.status = "Слот освобождён"
             else:
                 from sheets_hub.telegram import notify_booking_async
 
-                lock_prev, lock_text = self.client.acquire_calendar_lock(
-                    record, previous_hint=previous
-                )
-                try:
-                    to_write = write_back_value(record, "Клиент", client_text)
-                    self.client.assert_calendar_lock(record, lock_text)
-                    self.client.update_cell(record, "Клиент", to_write)
-                    notify_booking_async(self.config.telegram, record, client_text)
-                    self.status = "Запись сохранена"
-                except Exception:
+                if lock_text:
                     try:
-                        self.client.update_cell(record, "Клиент", lock_prev, confirm=False)
+                        self.client.assert_calendar_lock(record, lock_text)
+                    except Exception as exc:
+                        return {"ok": False, "error": str(exc), "locked": True}
+                    to_write = write_back_value(record, "Клиент", client_text)
+                    self.client.update_cell(record, "Клиент", to_write)
+                else:
+                    acquired_prev, acquired_lock = self.client.acquire_calendar_lock(
+                        record, previous_hint=previous
+                    )
+                    try:
+                        to_write = write_back_value(record, "Клиент", client_text)
+                        self.client.assert_calendar_lock(record, acquired_lock)
+                        self.client.update_cell(record, "Клиент", to_write)
                     except Exception:
-                        pass
-                    raise
+                        try:
+                            self.client.update_cell(
+                                record, "Клиент", acquired_prev, confirm=False
+                            )
+                        except Exception:
+                            pass
+                        raise
+                notify_booking_async(self.config.telegram, record, client_text)
+                self.status = "Запись сохранена"
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
-        self.reload({"fast": True, "sync_registry": False})
+        self._active_lock = None
+        self.reload({"fast": True, "sync_registry": False, "colors": "cache"})
         return {"ok": True, **self.snapshot()}
 
     def save_telegram(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:

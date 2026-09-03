@@ -105,13 +105,24 @@
       cursor: pointer;
       background: #e8f6ee;
     }
-    .calendar-table tr:nth-child(even) td.slot:not(.has-fill) { background: #dff3e8; }
+    .calendar-table tr:nth-child(even) td.slot:not(.has-fill):not(.blocked):not(.lock) { background: #dff3e8; }
     .calendar-table td.slot:hover { outline: 2px solid #2a7d5a; outline-offset: -2px; }
     .calendar-table td.slot.has-fill { background-clip: padding-box; }
+    .calendar-table td.slot.blocked {
+      cursor: not-allowed;
+      background: #eef2f6 !important;
+      opacity: 0.92;
+    }
+    .calendar-table td.slot.blocked:hover { outline: none; }
+    .calendar-table td.slot.lock {
+      cursor: wait;
+      background: #fff3cd !important;
+    }
+    .calendar-table td.slot.lock:hover { outline: 2px solid #c9a227; outline-offset: -2px; }
     .status-record { color: #1e7a5a; font-weight: 450; }
     .status-record.occupied { color: #b13e3e; }
-    .status-record.blocked { color: #4e6d8a; }
-    .status-record.lock { color: #8a6d1d; }
+    .status-record.blocked { color: #5a6f84; font-weight: 500; }
+    .status-record.lock { color: #3e2723; font-weight: 600; }
     .info-card { padding-top: 1.1rem; padding-bottom: 1.1rem; }
     .info-toggle {
       width: 100%; border: none; background: #e8f2ec; color: #0b1f33;
@@ -375,6 +386,8 @@
 (function () {
   const state = {
     slot: null,
+    lockText: "",
+    lockPrev: "",
     data: null,
     settingsOpen: false,
     infoOpen: false,
@@ -443,6 +456,8 @@
         const cell = (cal.cells || {})[key];
         if (cell) {
           td.className = "slot";
+          if (cell.css === "blocked") td.classList.add("blocked");
+          if (cell.css === "lock") td.classList.add("lock");
           if (cell.bg) {
             td.classList.add("has-fill");
             td.style.background = cell.bg;
@@ -451,9 +466,8 @@
           span.className = "status-record " + (cell.css || "free");
           span.textContent = cell.label || "запись";
           if (cell.bg && cell.fg) {
-            // Цвет врача важнее статусных оттенков текста.
             span.style.color = cell.fg;
-            span.style.fontWeight = cell.css === "occupied" ? "600" : "500";
+            span.style.fontWeight = cell.css === "occupied" || cell.css === "lock" ? "600" : "500";
           }
           td.appendChild(span);
           td.addEventListener("click", () => openBook(cell));
@@ -632,11 +646,14 @@
     if (chip && state.settingsOpen) {
       chip.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> обновляю…';
     }
-    // Полное обновление — всегда перерисовать сетку.
     if (full) state.lastCalSig = "";
     try {
-      if (full) await call("reload", { fast: false, sync_registry: true });
-      else await call("reload", { fast: true, sync_registry: false });
+      await call("reload", {
+        fast: true,
+        sync_registry: false,
+        colors: full ? "fetch" : "cache",
+        refresh_sheets: false,
+      });
     } finally {
       state.busy = false;
       if (btn) {
@@ -653,6 +670,64 @@
       }
     }
   }
+
+  async function openBook(cell) {
+    if (!cell) return;
+    if (cell.css === "blocked") {
+      alert("В эту ячейку нельзя записывать.");
+      return;
+    }
+    if (cell.css === "lock") {
+      alert("Этот слот сейчас заполняет другой оператор.\nПодождите или нажмите «Обновить».");
+      return;
+    }
+    const res = await call("begin_slot", {
+      spreadsheet_id: cell.spreadsheet_id,
+      sheet: cell.sheet,
+      row: cell.row,
+    });
+    if (!res || res.ok === false) {
+      alert((res && res.error) || "Не удалось открыть слот");
+      await refresh(false);
+      return;
+    }
+    state.slot = cell;
+    state.lockText = res.lock_text || "";
+    state.lockPrev = res.lock_prev || "";
+    document.getElementById("bookWhen").textContent =
+      (cell.date || "") + " · " + (cell.time || "");
+    document.getElementById("bookClient").value =
+      res.mode === "edit" ? (cell.label || "") : "";
+    const preg = document.getElementById("pregBlock");
+    const askPreg = res.ask_pregnancy != null ? res.ask_pregnancy : cell.ask_pregnancy;
+    preg.style.display = askPreg ? "block" : "none";
+    document.querySelectorAll('input[name="preg"]').forEach((r) => (r.checked = false));
+    document.getElementById("pregWarn").style.display = "none";
+    document.getElementById("bookFree").style.display =
+      res.mode === "edit" ? "inline-flex" : "none";
+    document.getElementById("bookModal").classList.add("open");
+    document.getElementById("bookClient").focus();
+  }
+
+  async function closeBook() {
+    const slot = state.slot;
+    const lockText = state.lockText;
+    const lockPrev = state.lockPrev;
+    document.getElementById("bookModal").classList.remove("open");
+    state.slot = null;
+    state.lockText = "";
+    state.lockPrev = "";
+    if (slot && lockText) {
+      await call("cancel_slot", {
+        spreadsheet_id: slot.spreadsheet_id,
+        sheet: slot.sheet,
+        row: slot.row,
+        lock_text: lockText,
+        lock_prev: lockPrev,
+      });
+    }
+  }
+
 
   async function pushFilters() {
     await call("set_filters", {
@@ -692,27 +767,6 @@
   function toggleSettings() {
     if (state.settingsOpen) hideSettings();
     else openSettings();
-  }
-
-  function openBook(cell) {
-    state.slot = cell;
-    document.getElementById("bookWhen").textContent =
-      (cell.date || "") + " · " + (cell.time || "");
-    document.getElementById("bookClient").value =
-      cell.css === "occupied" ? (cell.label || "") : "";
-    const preg = document.getElementById("pregBlock");
-    preg.style.display = cell.ask_pregnancy ? "block" : "none";
-    document.querySelectorAll('input[name="preg"]').forEach((r) => (r.checked = false));
-    document.getElementById("pregWarn").style.display = "none";
-    document.getElementById("bookFree").style.display =
-      cell.css === "occupied" ? "inline-flex" : "none";
-    document.getElementById("bookModal").classList.add("open");
-    document.getElementById("bookClient").focus();
-  }
-
-  function closeBook() {
-    document.getElementById("bookModal").classList.remove("open");
-    state.slot = null;
   }
 
   document.querySelectorAll('input[name="preg"]').forEach((r) => {
@@ -783,34 +837,53 @@
     if (res && res.ok === false) alert(res.error || "Ошибка сохранения");
     else alert("Сохранено для всех ПК");
   });
-  document.getElementById("bookCancel").addEventListener("click", closeBook);
+  document.getElementById("bookCancel").addEventListener("click", () => closeBook());
   document.getElementById("bookModal").addEventListener("click", (e) => {
     if (e.target.id === "bookModal") closeBook();
   });
   document.getElementById("bookSave").addEventListener("click", async () => {
     if (!state.slot) return;
     const preg = document.querySelector('input[name="preg"]:checked');
+    const slot = state.slot;
     const res = await call("book_slot", {
-      spreadsheet_id: state.slot.spreadsheet_id,
-      sheet: state.slot.sheet,
-      row: state.slot.row,
+      spreadsheet_id: slot.spreadsheet_id,
+      sheet: slot.sheet,
+      row: slot.row,
       client: document.getElementById("bookClient").value,
       pregnant: preg ? preg.value : "",
       freeing: false,
+      lock_text: state.lockText,
+      lock_prev: state.lockPrev,
     });
-    if (res && res.ok === false) alert(res.error || "Ошибка");
-    else closeBook();
+    if (res && res.ok === false) {
+      alert(res.error || "Ошибка");
+      return;
+    }
+    // Уже сохранено — не снимаем lock через cancel.
+    state.lockText = "";
+    state.lockPrev = "";
+    state.slot = null;
+    document.getElementById("bookModal").classList.remove("open");
   });
   document.getElementById("bookFree").addEventListener("click", async () => {
     if (!state.slot) return;
+    const slot = state.slot;
     const res = await call("book_slot", {
-      spreadsheet_id: state.slot.spreadsheet_id,
-      sheet: state.slot.sheet,
-      row: state.slot.row,
+      spreadsheet_id: slot.spreadsheet_id,
+      sheet: slot.sheet,
+      row: slot.row,
       freeing: true,
+      lock_text: state.lockText,
+      lock_prev: state.lockPrev,
     });
-    if (res && res.ok === false) alert(res.error || "Ошибка");
-    else closeBook();
+    if (res && res.ok === false) {
+      alert(res.error || "Ошибка");
+      return;
+    }
+    state.lockText = "";
+    state.lockPrev = "";
+    state.slot = null;
+    document.getElementById("bookModal").classList.remove("open");
   });
 
   // Ctrl+Shift+T — настройки (и при русской раскладке: keyCode 84 = T).
@@ -820,36 +893,53 @@
       e.preventDefault();
       toggleSettings();
     }
-    if (e.key === "Escape" && state.settingsOpen) hideSettings();
+    if (e.key === "Escape") {
+      if (document.getElementById("bookModal").classList.contains("open")) closeBook();
+      else if (state.settingsOpen) hideSettings();
+    }
   });
 
   window.Helix = {
     refresh: async function () {
       await refresh(false);
     },
+    pull: async function () {
+      const snap = await call("get_state");
+      if (snap) applyState(snap);
+    },
   };
 
   window.addEventListener("pywebviewready", async () => {
-    // Быстрый календарь, затем цвета врачей (без registry), registry чуть позже.
     await call("connect");
     await refresh(false);
     setTimeout(() => {
       if (!document.getElementById("bookModal").classList.contains("open")) {
-        call("reload", { fast: false, sync_registry: false });
+        call("reload", { fast: true, sync_registry: false, colors: "fetch", background: true });
       }
-    }, 900);
-    setTimeout(() => {
-      if (!document.getElementById("bookModal").classList.contains("open") && !state.busy) {
-        refresh(true);
-      }
-    }, 4000);
+    }, 800);
     let tick = 0;
     setInterval(() => {
       if (document.getElementById("bookModal").classList.contains("open")) return;
       if (state.busy) return;
       tick += 1;
-      refresh(tick % 5 === 0);
-    }, 45000);
+      if (tick % 12 === 0) {
+        call("reload", {
+          fast: true,
+          sync_registry: true,
+          colors: "fetch",
+          background: true,
+        });
+      } else if (tick % 5 === 0) {
+        call("reload", {
+          fast: true,
+          sync_registry: false,
+          colors: "fetch",
+          background: true,
+        });
+      } else {
+        refresh(false);
+      }
+    }, 30000);
   });
 })();
 </script>

@@ -76,7 +76,8 @@ _PUBLIC_FETCH_PREF: str = ""
 _PREFERRED_CALENDAR_SHEET: dict[str, str] = {}
 # Цвета заливки: spreadsheet_id|sheet → (ts, {(row, col): "#rrggbb"})
 _COLOR_CACHE: dict[str, tuple[float, dict[tuple[int, int], str]]] = {}
-_COLOR_CACHE_TTL_SEC = 180
+_COLOR_CACHE_TTL_SEC = 900
+_COLOR_CACHE_STALE_SEC = 3600
 
 
 class SheetsError(Exception):
@@ -140,6 +141,7 @@ def _fetch_sheet_colors(
     *,
     max_rows: int = MAX_SHEET_ROWS,
     max_cols: int = 40,
+    allow_stale: bool = False,
 ) -> dict[tuple[int, int], str]:
     """Цвета заливки ячеек через Sheets API includeGridData."""
     title = (sheet or "").strip() or "Sheet1"
@@ -147,6 +149,8 @@ def _fetch_sheet_colors(
     now = time.time()
     cached = _COLOR_CACHE.get(cache_key)
     if cached and (now - cached[0]) < _COLOR_CACHE_TTL_SEC:
+        return cached[1]
+    if allow_stale and cached and (now - cached[0]) < _COLOR_CACHE_STALE_SEC:
         return cached[1]
 
     safe = title.replace("'", "''")
@@ -170,7 +174,7 @@ def _fetch_sheet_colors(
             response = requests.get(
                 url,
                 headers={"Authorization": f"Bearer {token}"},
-                timeout=25,
+                timeout=12,
                 verify=False,
             )
             response.raise_for_status()
@@ -1303,8 +1307,9 @@ class SheetsClient:
             if wanted and wanted.lower() not in ("все", "all", "*"):
                 preferred = wanted
 
-        # Быстрый путь автообновления: уже знаем лист месяца — не ходим в htmlview.
-        if fast and preferred:
+        # Быстрый путь: уже знаем лист месяца — один CSV, без htmlview.
+        # Раньше только при fast=True; из‑за этого «Обновить» было очень медленным.
+        if preferred:
             try:
                 loaded = self._fetch_source_public(replace(source, sheet=preferred))
                 cached = _SHEET_LIST_CACHE.get(sid)
@@ -1443,6 +1448,22 @@ class SheetsClient:
                     fut.result()
                 except Exception:
                     pass
+
+    def apply_cached_colors(self, records: list[Record]) -> None:
+        """Только из кэша — без сетевого запроса к Sheets API."""
+        if not records:
+            return
+        by_sheet: dict[tuple[str, str], list[Record]] = {}
+        for record in records:
+            key = (record.spreadsheet_id, record.sheet or "")
+            by_sheet.setdefault(key, []).append(record)
+        for (sid, title), group in by_sheet.items():
+            if not sid or not title:
+                continue
+            cached = _COLOR_CACHE.get(f"{sid}|{title}")
+            if not cached:
+                continue
+            enrich_records_with_sheet_colors(group, cached[1])
 
     def _mark_public_read(self, source_name: str, spreadsheet_id: str = "") -> None:
         # Не вызываем probe_api здесь: на Windows SSL-запрос может зависнуть
