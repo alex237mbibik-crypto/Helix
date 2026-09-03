@@ -51,6 +51,22 @@ def _time_sort_key(text: str) -> tuple[int, int]:
     return int(match.group(1)), int(match.group(2))
 
 
+def _lighten_hex(bg_hex: str, amount: float = 0.2) -> str:
+    """Смешать цвет с белым — ячейки врача чуть ярче на экране."""
+    raw = (bg_hex or "").lstrip("#")
+    if len(raw) != 6:
+        return bg_hex or ""
+    try:
+        r, g, b = int(raw[0:2], 16), int(raw[2:4], 16), int(raw[4:6], 16)
+    except ValueError:
+        return bg_hex
+    amount = max(0.0, min(0.6, float(amount)))
+    r = int(round(r + (255 - r) * amount))
+    g = int(round(g + (255 - g) * amount))
+    b = int(round(b + (255 - b) * amount))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
 def _ui_cache_path() -> Path:
     return user_data_dir() / "ui_cache.json"
 
@@ -333,6 +349,8 @@ class HelixApi:
         return out
 
     def _slot_payload(self, record: Record) -> dict[str, Any]:
+        from sheets_hub.client import contrast_fg, soften_fill
+
         status = record.values.get("Статус", "")
         client = record.values.get("Клиент", "").strip()
         phone = record.values.get("Телефон", "").strip()
@@ -345,12 +363,22 @@ class HelixApi:
             css = "occupied"
         else:
             label, css = "запись", "free"
+        raw_bg = str(record.values.get("_bg") or "").strip()
+        bg = ""
+        fg = ""
+        if raw_bg:
+            # Чуть ярче, чем в CTk: мягче гасим кислотность и поднимаем яркость.
+            soft = soften_fill(raw_bg, fallback="#2e7d32")
+            bg = _lighten_hex(soft, 0.22)
+            fg = contrast_fg(bg)
         return {
             "time": record.values.get("Время", ""),
             "date": record.values.get("Дата", ""),
             "label": label or "запись",
             "css": css,
             "status": status,
+            "bg": bg,
+            "fg": fg,
             "row": record.row,
             "sheet": record.sheet,
             "spreadsheet_id": record.spreadsheet_id,

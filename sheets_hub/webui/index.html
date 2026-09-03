@@ -100,14 +100,30 @@
     .calendar-table td {
       padding: 0.5rem 0.8rem; border: 1px solid #c8d8d0; color: #0f2a44; background: #ffffff;
     }
-    .calendar-table tr:nth-child(even) td { background: #f4f9f6; }
-    .calendar-table tr:hover td { background: #e6f3ec; }
-    .calendar-table td.slot { cursor: pointer; }
+    .calendar-table tr:nth-child(even) td:not(.slot) { background: #f4f9f6; }
+    .calendar-table td.slot {
+      cursor: pointer;
+      background: #e8f6ee;
+    }
+    .calendar-table tr:nth-child(even) td.slot:not(.has-fill) { background: #dff3e8; }
     .calendar-table td.slot:hover { outline: 2px solid #2a7d5a; outline-offset: -2px; }
+    .calendar-table td.slot.has-fill { background-clip: padding-box; }
     .status-record { color: #1e7a5a; font-weight: 450; }
     .status-record.occupied { color: #b13e3e; }
     .status-record.blocked { color: #4e6d8a; }
     .status-record.lock { color: #8a6d1d; }
+    .info-card { padding-top: 1.1rem; padding-bottom: 1.1rem; }
+    .info-toggle {
+      width: 100%; border: none; background: #e8f2ec; color: #0b1f33;
+      border-radius: 18px; padding: 0.65rem 1.1rem; cursor: pointer;
+      display: flex; align-items: center; gap: 0.7rem; font-family: inherit;
+      font-size: 1.05rem; font-weight: 600; text-align: left;
+      transition: background 0.15s ease;
+    }
+    .info-toggle:hover { background: #dcebe3; }
+    .info-toggle .badge-soft { margin-left: auto; }
+    .info-body { display: none; margin-top: 0.9rem; }
+    .info-body.open { display: block; }
     .btn {
       border: none; background: #f7faf8;
       padding: 0.5rem 1.4rem; border-radius: 60px; font-weight: 500; font-size: 0.85rem;
@@ -248,13 +264,14 @@
     </div>
   </div>
 
-  <div class="card">
-    <div class="card-header">
-      <i class="fas fa-info-circle"></i>
-      <h2>Общая информация</h2>
+  <div class="card info-card" id="infoCard">
+    <button type="button" class="info-toggle" id="infoToggle" aria-expanded="false">
+      <span id="infoToggleLabel">▶ Общая информация</span>
       <span class="badge-soft" id="infoCount">0</span>
+    </button>
+    <div class="info-body" id="infoBody">
+      <div id="infoHost"></div>
     </div>
-    <div id="infoHost"></div>
   </div>
 
   <div class="card hidden" id="settingsCard">
@@ -356,6 +373,7 @@
     slot: null,
     data: null,
     settingsOpen: false,
+    infoOpen: false,
     busy: false,
     pendingRefresh: null,
     lastCalSig: "",
@@ -421,9 +439,18 @@
         const cell = (cal.cells || {})[key];
         if (cell) {
           td.className = "slot";
+          if (cell.bg) {
+            td.classList.add("has-fill");
+            td.style.background = cell.bg;
+          }
           const span = document.createElement("span");
           span.className = "status-record " + (cell.css || "free");
           span.textContent = cell.label || "запись";
+          if (cell.bg && cell.fg) {
+            // Цвет врача важнее статусных оттенков текста.
+            span.style.color = cell.fg;
+            span.style.fontWeight = cell.css === "occupied" ? "600" : "500";
+          }
           td.appendChild(span);
           td.addEventListener("click", () => openBook(cell));
         }
@@ -434,13 +461,24 @@
     tbody.appendChild(frag);
   }
 
+  function updateInfoToggleLabel(count) {
+    const arrow = state.infoOpen ? "▼" : "▶";
+    const n = Number(count) || 0;
+    document.getElementById("infoToggleLabel").textContent =
+      n > 0 ? arrow + " Общая информация (" + n + ")" : arrow + " Общая информация";
+    document.getElementById("infoCount").textContent = String(n);
+  }
+
   function renderInfo(items) {
     const sig = JSON.stringify(items || []);
-    if (sig === state.lastInfoSig) return;
+    if (sig === state.lastInfoSig) {
+      updateInfoToggleLabel((items || []).length);
+      return;
+    }
     state.lastInfoSig = sig;
     const host = document.getElementById("infoHost");
     host.innerHTML = "";
-    document.getElementById("infoCount").textContent = String((items || []).length);
+    updateInfoToggleLabel((items || []).length);
     if (!(items || []).length) {
       host.innerHTML = '<p class="text-muted">Нет справочной информации для выбранной таблицы.</p>';
       return;
@@ -684,6 +722,15 @@
     searchTimer = setTimeout(pushFilters, 450);
   });
   document.getElementById("btnRefresh").addEventListener("click", () => refresh(true));
+  document.getElementById("infoToggle").addEventListener("click", () => {
+    state.infoOpen = !state.infoOpen;
+    const body = document.getElementById("infoBody");
+    const btn = document.getElementById("infoToggle");
+    body.classList.toggle("open", state.infoOpen);
+    btn.setAttribute("aria-expanded", state.infoOpen ? "true" : "false");
+    const count = (state.data && state.data.info && state.data.info.length) || 0;
+    updateInfoToggleLabel(count);
+  });
   document.getElementById("btnHideSettings").addEventListener("click", hideSettings);
   document.getElementById("btnJson").addEventListener("click", () => call("pick_credentials"));
   document.getElementById("btnTgTest").addEventListener("click", async () => {
@@ -774,14 +821,19 @@
   };
 
   window.addEventListener("pywebviewready", async () => {
-    // Один быстрый проход при старте (без цветов и registry), потом догрузка.
+    // Быстрый календарь, затем цвета врачей (без registry), registry чуть позже.
     await call("connect");
     await refresh(false);
     setTimeout(() => {
       if (!document.getElementById("bookModal").classList.contains("open")) {
+        call("reload", { fast: false, sync_registry: false });
+      }
+    }, 900);
+    setTimeout(() => {
+      if (!document.getElementById("bookModal").classList.contains("open") && !state.busy) {
         refresh(true);
       }
-    }, 1800);
+    }, 4000);
     let tick = 0;
     setInterval(() => {
       if (document.getElementById("bookModal").classList.contains("open")) return;
