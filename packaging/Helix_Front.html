@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sheets Hub · календарь</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:opsz@14..32&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" />
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background: #f0f4fa;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      padding: 2rem 1.5rem;
+      color: #142433;
+      display: flex;
+      justify-content: center;
+      line-height: 1.5;
+    }
+
+    .app {
+      max-width: 1100px;
+      width: 100%;
+    }
+
+    .card {
+      background: rgba(255, 255, 255, 0.85);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border-radius: 40px;
+      padding: 1.8rem 2rem;
+      box-shadow: 0 12px 30px -8px rgba(0, 20, 40, 0.08), 0 4px 12px rgba(0, 0, 0, 0.02);
+      border: 1px solid rgba(255, 255, 255, 0.7);
+      margin-bottom: 1.8rem;
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      margin-bottom: 1.2rem;
+      flex-wrap: wrap;
+    }
+
+    .card-header i {
+      font-size: 1.6rem;
+      color: #2a7d5a;
+      background: rgba(42, 125, 90, 0.08);
+      padding: 0.4rem 0.6rem;
+      border-radius: 18px;
+    }
+
+    .card-header h2 {
+      font-weight: 600;
+      font-size: 1.5rem;
+      letter-spacing: -0.02em;
+      color: #0b1f33;
+    }
+
+    .badge-soft {
+      background: #e6f0ea;
+      color: #1d6b4a;
+      padding: 0.2rem 1rem;
+      border-radius: 40px;
+      font-size: 0.75rem;
+      font-weight: 500;
+      margin-left: 0.3rem;
+    }
+
+    .chip {
+      background: rgba(42, 125, 90, 0.06);
+      border: 1px solid rgba(42, 125, 90, 0.12);
+      padding: 0.2rem 1rem;
+      border-radius: 40px;
+      font-size: 0.8rem;
+      color: #1d6b4a;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+    }
+
+    .flex-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.6rem 1.2rem;
+    }
+
+    .flex-between {
+      justify-content: space-between;
+    }
+
+    .field-label {
+      font-weight: 500;
+      color: #1e3a5a;
+      min-width: 70px;
+      font-size: 0.9rem;
+    }
+
+    .field-value {
+      background: rgba(255, 255, 255, 0.6);
+      backdrop-filter: blur(4px);
+      padding: 0.3rem 1.2rem;
+      border-radius: 60px;
+      border: 1px solid rgba(255, 255, 255, 0.6);
+      font-size: 0.9rem;
+      color: #0f2a44;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+
+    .field-value i {
+      color: #2a7d5a;
+      opacity: 0.5;
+      font-size: 0.8rem;
+    }
+
+    .divider-light {
+      height: 1px;
+      background: linear-gradient(to right, #dbe3ed, transparent);
+      margin: 1.2rem 0;
+    }
+
+    /* ===== ТАБЛИЦА КАЛЕНДАРЯ С ЗАЛИВКОЙ ===== */
+    .table-wrap {
+      overflow-x: auto;
+      margin: 0.6rem 0;
+    }
+
+    .calendar-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+      border: 1px solid #dce4ef;
+      border-radius: 12px;
+      overflow: hidden;
+    }
+
+    .calendar-table th {
+      text-align: left;
+      font-weight: 600;
+      color: #1d3a58;
+      padding: 0.7rem 0.8rem;
+      background: #e8f2ec;
+      border: 1px solid #c8d8d0;
+      font-size: 0.85rem;
+    }
+
+    .calendar-table td {
+      padding: 0.5rem 0.8rem;
+      border: 1px solid #c8d8d0;
+      color: #0f2a44;
+      background: #ffffff;
+    }
+
+    .calendar-table tr:nth-child(even) td {
+      background: #f4f9f6;
+    }
+
+    .calendar-table tr:hover td {
+      background: #e6f3ec;
+    }
+
+    .status-record {
+      color: #1e7a5a;
+      font-weight: 450;
+    }
+
+    .status-record.occupied {
+      color: #b13e3e;
+    }
+
+    /* Кнопки */
+    .btn {
+      border: none;
+      background: rgba(255, 255, 255, 0.6);
+      backdrop-filter: blur(4px);
+      padding: 0.5rem 1.4rem;
+      border-radius: 60px;
+      font-weight: 500;
+      font-size: 0.85rem;
+      color: #1d3a58;
+      border: 1px solid rgba(255, 255, 255, 0.6);
+      box-shadow: 0 2px 8px rgba(0, 20, 40, 0.02);
+      transition: all 0.15s ease;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .btn-primary {
+      background: #1d8a5a;
+      border-color: #1d8a5a;
+      color: white;
+      box-shadow: 0 6px 14px -4px rgba(29, 138, 90, 0.25);
+    }
+
+    .btn-primary i {
+      color: white;
+    }
+
+    .btn-primary:hover {
+      background: #156d48;
+      transform: scale(1.01);
+    }
+
+    .btn-outline {
+      background: transparent;
+      border: 1px solid #cbd8e8;
+    }
+
+    .btn-outline:hover {
+      background: rgba(255, 255, 255, 0.3);
+      border-color: #2a7d5a;
+    }
+
+    .btn-sm {
+      padding: 0.25rem 1rem;
+      font-size: 0.8rem;
+    }
+
+    .service-account {
+      background: #eaf0f8;
+      border-radius: 60px;
+      padding: 0.2rem 1.2rem;
+      font-size: 0.8rem;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+
+    .info-block {
+      background: #f0f8f4;
+      border-radius: 24px;
+      padding: 1rem 1.6rem;
+      margin: 0.8rem 0;
+      border-left: 4px solid #2a7d5a;
+    }
+
+    .text-muted { color: #4e6d8a; }
+    .fw-500 { font-weight: 500; }
+    .mt-1 { margin-top: 0.6rem; }
+
+    .mini-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+      border: 1px solid #dce4ef;
+      border-radius: 12px;
+      overflow: hidden;
+    }
+
+    .mini-table th {
+      text-align: left;
+      padding: 0.6rem 0.8rem;
+      font-weight: 600;
+      color: #1f3f60;
+      background: #e8f2ec;
+      border: 1px solid #c8d8d0;
+    }
+
+    .mini-table td {
+      padding: 0.5rem 0.8rem;
+      border: 1px solid #c8d8d0;
+      background: #ffffff;
+    }
+
+    .mini-table tr:nth-child(even) td {
+      background: #f4f9f6;
+    }
+
+    .mini-table tr:hover td {
+      background: #e6f3ec;
+    }
+
+    @media (max-width: 720px) {
+      .card {
+        padding: 1.2rem 1rem;
+        border-radius: 32px;
+      }
+      .calendar-table td,
+      .calendar-table th {
+        font-size: 0.75rem;
+        padding: 0.3rem 0.4rem;
+      }
+    }
+  </style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ====== ШАПКА ====== -->
+  <div class="card">
+    <div class="card-header">
+      <i class="fas fa-table"></i>
+      <h2>Sheets Hub</h2>
+      <span class="badge-soft"><i class="far fa-calendar-alt"></i> СЕНТЯБРЬ 2026</span>
+      <span style="margin-left: auto; font-size: 0.8rem; opacity: 0.5;">
+        <i class="fas fa-cloud"></i> helix-485@helix-505412
+      </span>
+    </div>
+
+    <div class="flex-row">
+      <span class="field-label"><i class="fas fa-tag"></i> Название</span>
+      <span class="field-value"><i class="fas fa-chevron-down"></i> Гинеколог</span>
+      <span class="field-label">Услуга</span>
+      <span class="field-value"><i class="fas fa-chevron-down"></i> Гинеколог</span>
+      <span class="field-label">Город</span>
+      <span class="field-value"><i class="fas fa-chevron-down"></i> Минск</span>
+      <span class="field-label">Адрес</span>
+      <span class="field-value"><i class="fas fa-chevron-down"></i> Свердлова 26</span>
+      <span class="chip"><i class="far fa-circle"></i> пустое поле не учитывается</span>
+    </div>
+
+    <div class="divider-light"></div>
+
+    <div class="flex-row flex-between">
+      <span><i class="fas fa-stethoscope" style="color:#2a7d5a;"></i> Гинеколог — СЕНТЯБРЬ 2026: <strong>20 слотов</strong>, занято 0 — справка: 5 — чтение CSV — быстро</span>
+      <span class="service-account"><i class="fas fa-key"></i> сервисный аккаунт</span>
+    </div>
+  </div>
+
+  <!-- ====== КАЛЕНДАРЬ (ВО ВСЮ ШИРИНУ) ====== -->
+  <div class="card">
+    <div class="card-header">
+      <i class="fas fa-calendar-day"></i>
+      <h2>Календарь записи</h2>
+      <span class="badge-soft">Гинеколог — Свердлова 26</span>
+    </div>
+
+    <div class="table-wrap">
+      <table class="calendar-table">
+        <thead>
+          <tr>
+            <th>Время</th>
+            <th>вт, 22 сентября</th>
+            <th>вт, 29 сентября</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>8:00</td><td><span class="status-record">запись</span></td><td><span class="status-record occupied">запись</span></td></tr>
+          <tr><td>8:30</td><td><span class="status-record">запись</span></td><td><span class="status-record">запись</span></td></tr>
+          <tr><td>9:00</td><td><span class="status-record occupied">запись</span></td><td><span class="status-record">запись</span></td></tr>
+          <tr><td>9:30</td><td><span class="status-record">запись</span></td><td><span class="status-record occupied">запись</span></td></tr>
+          <tr><td>10:00</td><td><span class="status-record">запись</span></td><td><span class="status-record">запись</span></td></tr>
+          <tr><td>10:30</td><td><span class="status-record">запись</span></td><td><span class="status-record">запись</span></td></tr>
+          <tr><td>11:00</td><td><span class="status-record occupied">запись</span></td><td><span class="status-record">запись</span></td></tr>
+          <tr><td>11:30</td><td><span class="status-record">запись</span></td><td><span class="status-record">запись</span></td></tr>
+          <tr><td>12:00</td><td><span class="status-record">запись</span></td><td><span class="status-record occupied">запись</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="flex-row mt-1">
+      <span class="chip"><i class="far fa-clock"></i> 20 слотов</span>
+      <span class="chip"><i class="fas fa-user-md"></i> Гинеколог</span>
+    </div>
+  </div>
+
+  <!-- ====== ОБЩАЯ ИНФОРМАЦИЯ (ПОД КАЛЕНДАРЁМ, ВО ВСЮ ШИРИНУ) ====== -->
+  <div class="card">
+    <div class="card-header">
+      <i class="fas fa-info-circle"></i>
+      <h2>Общая информация</h2>
+      <span class="badge-soft">5</span>
+    </div>
+
+    <div class="info-block">
+      <p><i class="fas fa-exclamation-triangle" style="color:#b8862a;"></i> <strong>Врач НЕ работает</strong> с ДЕВСТВЕННИЦАМИ и ДЕТЬМИ ДО 18 лет.</p>
+    </div>
+
+    <div style="background: #fafdff; border-radius: 24px; padding: 0.8rem 1.2rem;">
+      <p style="font-weight: 500;"><i class="fas fa-user-md" style="color:#2a7d5a;"></i> врач-акушер гинеколог 1-й категории — Курьянова Ирина Александровна</p>
+      <ul style="list-style: none; margin-top: 0.5rem; font-size: 0.9rem; color: #1f3f60;">
+        <li><i class="fas fa-check-circle" style="color: #1e7a5a;"></i> врач производит взятие биоматериала.</li>
+        <li><i class="fas fa-minus-circle" style="color: #b13e3e;"></i> НЕ консультирует, НЕ выдает заключение, НЕ назначает лечение.</li>
+        <li><i class="fas fa-lightbulb" style="color: #d4a13e;"></i> может подсказать, какие анализы следует сдать.</li>
+        <li><i class="fas fa-file-alt" style="color: #2a7d5a;"></i> может помочь расшифровать результаты анализов.</li>
+      </ul>
+    </div>
+
+    <div class="flex-row mt-1" style="justify-content: space-between;">
+      <span class="service-account"><i class="fas fa-user-circle"></i> Обыватель</span>
+      <span><i class="fas fa-database"></i> чтение CSV — быстро</span>
+    </div>
+  </div>
+
+  <!-- ====== НАСТРОЙКИ ====== -->
+  <div class="card" style="margin-top: 1.8rem;">
+    <div class="card-header">
+      <i class="fas fa-sliders-h"></i>
+      <h2>Настройки &amp; рабочие таблицы</h2>
+      <span class="badge-soft">общие для всех ПК</span>
+    </div>
+
+    <div class="flex-row" style="justify-content: space-between; background: #f0f8f4; border-radius: 60px; padding: 0.3rem 1.2rem;">
+      <span><i class="fas fa-key"></i> Сервисный аккаунт: <strong>helix-485@helix-505412.iam.gserviceaccount.com</strong></span>
+      <span><i class="fas fa-file-code"></i> JSON ключа</span>
+    </div>
+
+    <div class="divider-light"></div>
+
+    <div class="flex-row">
+      <span class="field-label"><i class="fas fa-cloud-upload-alt"></i> Служебная таблица</span>
+      <span class="field-value"><i class="fas fa-link"></i> SheetsHub (облако)</span>
+      <span class="chip"><i class="fas fa-check-circle" style="color:#1e7a5a;"></i> доступ открыт</span>
+    </div>
+
+    <div class="divider-light"></div>
+
+    <div class="flex-row">
+      <span class="field-label"><i class="fab fa-telegram"></i> Telegram</span>
+      <span class="field-value"><i class="fas fa-lock"></i> Токен: ••••••••</span>
+      <span class="field-value"><i class="fas fa-hashtag"></i> Chat ID: 123456</span>
+      <button class="btn btn-sm btn-outline"><i class="fas fa-toggle-on"></i> Включить</button>
+      <button class="btn btn-sm btn-primary"><i class="fas fa-paper-plane"></i> Тест</button>
+    </div>
+
+    <div class="divider-light"></div>
+
+    <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
+      <span class="fw-500"><i class="fas fa-list-ul"></i> Рабочие таблицы (общие)</span>
+      <span class="text-muted" style="font-size: 0.8rem;">заполните название, услугу, город, адрес — фильтр сверху</span>
+    </div>
+
+    <div class="table-wrap">
+      <table class="mini-table">
+        <thead>
+          <tr><th>Название</th><th>Ссылка</th><th>Лист</th><th>Услуга</th><th>Город</th><th>Адрес</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Гинеколог</td><td><i class="fas fa-link"></i></td><td>все</td><td>Гинеколог</td><td>—</td><td>—</td></tr>
+          <tr><td>Гинеколог</td><td><i class="fas fa-link"></i></td><td>все</td><td>Запись</td><td>—</td><td>—</td></tr>
+          <tr><td>Гинеколог</td><td><i class="fas fa-link"></i></td><td>все</td><td>Запись</td><td>Минск</td><td>Свердлова 26</td></tr>
+          <tr><td>Гинеколог</td><td><i class="fas fa-link"></i></td><td>все</td><td>Запись</td><td>Барановичи</td><td>—</td></tr>
+          <tr><td>Гинеколог</td><td><i class="fas fa-link"></i></td><td>все</td><td>Запись</td><td>Грест</td><td>—</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="flex-row" style="justify-content: space-between; margin-top: 0.6rem;">
+      <button class="btn btn-sm btn-outline"><i class="fas fa-plus"></i> Добавить таблицу</button>
+      <div style="display: flex; gap: 0.6rem; flex-wrap: wrap;">
+        <span class="chip"><i class="fas fa-sync-alt fa-spin"></i> Загружаю общий список...</span>
+        <button class="btn btn-sm btn-outline"><i class="fas fa-cloud-download-alt"></i> Загрузить из облака</button>
+        <button class="btn btn-sm btn-primary"><i class="fas fa-save"></i> Сохранить для всех ПК</button>
+      </div>
+    </div>
+
+    <div style="border-top: 1px solid rgba(0,0,0,0.03); margin-top: 1rem; padding-top: 0.8rem; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 0.4rem;">
+      <span><i class="fas fa-check-circle" style="color: #1e7a5a;"></i> после правок нажмите «Сохранить»</span>
+      <span><i class="fas fa-share-alt"></i> общий доступ для helix-485</span>
+    </div>
+  </div>
+
+  <div style="display: flex; justify-content: flex-end; gap: 1.2rem; font-size: 0.8rem; color: #5e7b98; padding: 0.2rem 0.5rem;">
+    <span><i class="fas fa-circle" style="color: #6f9e7a; font-size: 0.4rem;"></i> Sheets Hub v.2</span>
+    <span><i class="fas fa-cloud"></i> синхронизация активна</span>
+    <span><i class="far fa-clock"></i> сентябрь 2026</span>
+  </div>
+
+</div>
+
+<script>
+  (function(){
+    document.querySelectorAll('.btn').forEach(b => {
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const txt = b.innerText.trim();
+        if (txt.includes('Тест')) alert('📨 Уведомление отправлено (демо)');
+        else if (txt.includes('Сохранить')) alert('💾 Сохранено для всех ПК (демо)');
+        else if (txt.includes('Загрузить')) alert('☁️ Список загружен из облака (демо)');
+        else if (txt.includes('Добавить')) alert('➕ Новая строка добавлена (демо)');
+        else if (!b.classList.contains('btn-primary') && !b.classList.contains('btn-outline')) {
+          alert('🧩 Действие: ' + (txt || 'клик'));
+        }
+      });
+    });
+  })();
+</script>
+</body>
+</html>

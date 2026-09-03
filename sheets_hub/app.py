@@ -38,15 +38,19 @@ from sheets_hub.telegram import notify_booking_async, notify_free_async, send_me
 
 HIDDEN = {"_sid", "_sheet", "_row", "_tone", "_bg"}
 
-GREEN = "#188038"
-GREEN_HOVER = "#137333"
-GREEN_SOFT = "#e6f4ea"
-SLOT_GREEN = "#1b5e20"
-SLOT_BOOKED = "#145214"
-SLOT_BLOCKED = "#f1f3f4"
-SLOT_LOCK = "#f9a825"
-SLOT_TIME = "#f1f3f4"
-SLOT_OUTLINE = "#dadce0"
+# Визуал из packaging/Helix_Front.html — только цвета/скругления, логика без изменений.
+GREEN = "#1d8a5a"
+GREEN_HOVER = "#156d48"
+GREEN_SOFT = "#e8f2ec"
+GREEN_ACCENT = "#2a7d5a"
+SLOT_GREEN = "#f4f9f6"
+SLOT_GREEN_FG = "#1e7a5a"
+SLOT_BOOKED = "#fdecea"
+SLOT_BOOKED_FG = "#b13e3e"
+SLOT_BLOCKED = "#eef2f6"
+SLOT_LOCK = "#fff3cd"
+SLOT_TIME = "#e8f2ec"
+SLOT_OUTLINE = "#c8d8d0"
 AUTO_REFRESH_MS = 30_000
 # Полный sync списка таблиц не на каждое автообновление — иначе тормозит календарь.
 # Раз в N автообновлений тянем общий список таблиц (30с × N).
@@ -57,23 +61,26 @@ CAL_ROW_H = 72
 CAL_HEADER_H = 60
 CAL_GAP = 1
 INFO_TONES = {
-    "warn": ("#f8d7c4", "#c5221f"),
-    "ok": ("#1b5e20", "#ffffff"),
-    "note": ("#fff59d", "#202124"),
-    "info": ("#b3e5fc", "#202124"),
+    "warn": ("#f0f8f4", "#142433"),
+    "ok": ("#e8f2ec", "#1e7a5a"),
+    "note": ("#fff8e6", "#8a6d1d"),
+    "info": ("#eaf0f8", "#1f3f60"),
 }
-BG = "#f8f9fa"
+BG = "#f0f4fa"
 CARD = "#ffffff"
-BORDER = "#5f6368"
-LINE = "#e8eaed"
-TEXT = "#202124"
-MUTED = "#5f6368"
-HINT = "#80868b"
-DANGER = "#d93025"
-DANGER_HOVER = "#b3261e"
-ZEBRA = "#fafafa"
-HOVER = "#f1f3f4"
-SELECT = "#ceead6"
+BORDER = "#cbd8e8"
+LINE = "#dbe3ed"
+TEXT = "#142433"
+MUTED = "#4e6d8a"
+HINT = "#5e7b98"
+DANGER = "#b13e3e"
+DANGER_HOVER = "#8f3030"
+ZEBRA = "#f4f9f6"
+HOVER = "#e6f3ec"
+SELECT = "#d7eedc"
+RADIUS_CARD = 20
+RADIUS_PILL = 18
+RADIUS_INPUT = 12
 
 
 def _enable_windows_dpi() -> None:
@@ -114,8 +121,8 @@ def _input_box(parent, title: str, hint: str) -> ctk.CTkFrame:
     box = ctk.CTkFrame(
         parent,
         fg_color=CARD,
-        corner_radius=8,
-        border_width=2,
+        corner_radius=RADIUS_INPUT,
+        border_width=1,
         border_color=BORDER,
     )
     ctk.CTkLabel(
@@ -140,13 +147,13 @@ def _input_box(parent, title: str, hint: str) -> ctk.CTkFrame:
 def _styled_entry(parent, placeholder: str, **kwargs) -> ctk.CTkEntry:
     options = {
         "height": 36,
-        "corner_radius": 6,
-        "border_width": 2,
+        "corner_radius": RADIUS_INPUT,
+        "border_width": 1,
         "border_color": BORDER,
         "fg_color": CARD,
         "text_color": TEXT,
         "placeholder_text": placeholder,
-        "placeholder_text_color": "#9aa0a6",
+        "placeholder_text_color": HINT,
     }
     options.update(kwargs)
     entry = ctk.CTkEntry(parent, **options)
@@ -496,8 +503,8 @@ class SheetsHubApp(ctk.CTk):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        container = ctk.CTkFrame(self, fg_color=CARD, corner_radius=12, border_width=0)
-        container.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+        container = ctk.CTkFrame(self, fg_color=CARD, corner_radius=RADIUS_CARD, border_width=1, border_color=LINE)
+        container.grid(row=0, column=0, sticky="nsew", padx=16, pady=16)
         container.grid_columnconfigure(0, weight=1)
         container.grid_rowconfigure(3, weight=1)
 
@@ -514,7 +521,7 @@ class SheetsHubApp(ctk.CTk):
             command=command,
             width=width,
             height=36,
-            corner_radius=8,
+            corner_radius=RADIUS_PILL,
             fg_color=CARD,
             hover_color=HOVER,
             border_width=1,
@@ -530,7 +537,7 @@ class SheetsHubApp(ctk.CTk):
             command=command,
             width=width,
             height=36,
-            corner_radius=8,
+            corner_radius=RADIUS_PILL,
             fg_color=GREEN,
             hover_color=GREEN_HOVER,
             font=ctk.CTkFont(size=13, weight="bold"),
@@ -538,7 +545,7 @@ class SheetsHubApp(ctk.CTk):
 
     def _build_header(self, parent: ctk.CTkFrame) -> None:
         header = ctk.CTkFrame(parent, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", padx=16, pady=(10, 4))
+        header.grid(row=0, column=0, sticky="ew", padx=18, pady=(14, 6))
         header.grid_columnconfigure(1, weight=1)
 
         title_box = ctk.CTkFrame(header, fg_color="transparent")
@@ -554,10 +561,10 @@ class SheetsHubApp(ctk.CTk):
         self.count_label = ctk.CTkLabel(
             title_box,
             text="0",
-            fg_color=LINE,
-            text_color=MUTED,
-            corner_radius=12,
-            width=40,
+            fg_color=GREEN_SOFT,
+            text_color=GREEN_ACCENT,
+            corner_radius=RADIUS_PILL,
+            width=44,
             height=26,
             font=ctk.CTkFont(size=13),
         )
@@ -585,7 +592,7 @@ class SheetsHubApp(ctk.CTk):
 
     def _build_filter(self, parent: ctk.CTkFrame) -> None:
         filter_area = ctk.CTkFrame(parent, fg_color="transparent")
-        filter_area.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 2))
+        filter_area.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 4))
         filter_area.grid_columnconfigure(0, weight=1)
 
         self.search_var = tk.StringVar()
@@ -595,7 +602,7 @@ class SheetsHubApp(ctk.CTk):
             "Поиск по имени, дате или телефону",
             height=32,
             textvariable=self.search_var,
-        ).grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        ).grid(row=0, column=0, sticky="ew", pady=(0, 6))
 
         params = ctk.CTkFrame(filter_area, fg_color="transparent")
         params.grid(row=1, column=0, sticky="ew")
@@ -644,7 +651,7 @@ class SheetsHubApp(ctk.CTk):
         wrap = ctk.CTkFrame(
             parent,
             fg_color=CARD,
-            corner_radius=6,
+            corner_radius=RADIUS_PILL,
             border_width=1,
             border_color=BORDER,
         )
@@ -655,7 +662,7 @@ class SheetsHubApp(ctk.CTk):
             variable=variable,
             width=150,
             height=30,
-            corner_radius=5,
+            corner_radius=RADIUS_PILL,
             border_width=0,
             fg_color=CARD,
             button_color=CARD,
@@ -686,11 +693,11 @@ class SheetsHubApp(ctk.CTk):
         table_wrap = ctk.CTkFrame(
             parent,
             fg_color=CARD,
-            corner_radius=10,
+            corner_radius=RADIUS_INPUT,
             border_width=1,
-            border_color="#e0e0e0",
+            border_color=SLOT_OUTLINE,
         )
-        table_wrap.grid(row=3, column=0, sticky="nsew", padx=16, pady=(0, 4))
+        table_wrap.grid(row=3, column=0, sticky="nsew", padx=18, pady=(0, 6))
         table_wrap.grid_columnconfigure(0, weight=1)
         table_wrap.grid_rowconfigure(1, weight=1)
 
@@ -788,7 +795,7 @@ class SheetsHubApp(ctk.CTk):
         # Пересчёт колонок только после отрисовки и после паузы ресайза окна.
         self.bind("<Configure>", self._on_root_configure)
 
-        self.empty_state = ctk.CTkFrame(inner, fg_color=CARD, corner_radius=10)
+        self.empty_state = ctk.CTkFrame(inner, fg_color=CARD, corner_radius=RADIUS_INPUT)
         self.empty_state.grid_columnconfigure(0, weight=1)
         self.empty_title = ctk.CTkLabel(
             self.empty_state,
@@ -814,17 +821,17 @@ class SheetsHubApp(ctk.CTk):
         self.info_wrap = ctk.CTkFrame(
             parent,
             fg_color=GREEN_SOFT,
-            corner_radius=10,
+            corner_radius=RADIUS_CARD,
             border_width=1,
-            border_color="#ceead6",
+            border_color=SLOT_OUTLINE,
         )
         self.info_wrap.grid_columnconfigure(0, weight=1)
 
         # Полоска между календарём и справкой: вверх — больше справки, вниз — меньше.
         self.info_sash = tk.Frame(
             self.info_wrap,
-            bg="#a8dab5",
-            height=7,
+            bg=GREEN_ACCENT,
+            height=6,
             cursor="sb_v_double_arrow",
             highlightthickness=0,
             bd=0,
@@ -841,9 +848,9 @@ class SheetsHubApp(ctk.CTk):
             text="▶ Общая информация",
             command=self._toggle_info_panel,
             height=28,
-            corner_radius=6,
+            corner_radius=RADIUS_PILL,
             fg_color="transparent",
-            hover_color="#d7eedc",
+            hover_color=HOVER,
             text_color=TEXT,
             font=ctk.CTkFont(size=13, weight="bold"),
             anchor="w",
@@ -1965,10 +1972,10 @@ class SheetsHubApp(ctk.CTk):
             text = f"{name}\n{phone}" if phone and phone not in name else name
             if sheet_bg:
                 return text, sheet_bg, contrast_fg(sheet_bg), True
-            return text, SLOT_BOOKED, "#ffffff", True
+            return text, SLOT_BOOKED, SLOT_BOOKED_FG, True
         if sheet_bg:
             return "запись", sheet_bg, contrast_fg(sheet_bg), False
-        return "запись", SLOT_GREEN, "#ffffff", False
+        return "запись", SLOT_GREEN, SLOT_GREEN_FG, False
 
     def _patch_calendar_slots(self, records: list[Record]) -> bool:
         """Обновить текст/цвет слотов на месте, без уничтожения сетки."""
@@ -2023,7 +2030,7 @@ class SheetsHubApp(ctk.CTk):
                 if sheet_bg:
                     sheet_bg = soften_fill(sheet_bg, fallback=SLOT_GREEN)
                 base_bg = sheet_bg or SLOT_BOOKED
-                base_fg = contrast_fg(base_bg) if sheet_bg else "#ffffff"
+                base_fg = contrast_fg(base_bg) if sheet_bg else SLOT_BOOKED_FG
                 if query and query in blob:
                     bg, fg = "#66bb6a", "#102910"
                 elif query:
@@ -2039,7 +2046,7 @@ class SheetsHubApp(ctk.CTk):
                 elif sheet_bg:
                     bg, fg = sheet_bg, contrast_fg(sheet_bg)
                 else:
-                    bg, fg = SLOT_GREEN, "#ffffff"
+                    bg, fg = SLOT_GREEN, SLOT_GREEN_FG
             try:
                 label.configure(bg=bg, fg=fg)
                 cell = getattr(label, "_cell", None) or label.master
@@ -2273,8 +2280,8 @@ class SheetsHubApp(ctk.CTk):
             0,
             time_w,
             text="Время",
-            bg=GREEN,
-            fg="#ffffff",
+            bg=GREEN_SOFT,
+            fg=TEXT,
             font=_ui_font(10, bold=True),
         )
         for col, date in enumerate(dates, start=1):
@@ -2285,8 +2292,8 @@ class SheetsHubApp(ctk.CTk):
                 col,
                 date_w,
                 text=date,
-                bg=GREEN,
-                fg="#fce8e6" if weekend else "#ffffff",
+                bg=GREEN_SOFT,
+                fg=DANGER if weekend else TEXT,
                 font=_ui_font(10, bold=True),
                 wraplength=max(40, date_w - 12),
             )
@@ -2355,7 +2362,7 @@ class SheetsHubApp(ctk.CTk):
         gap = CAL_GAP
         cell = tk.Frame(
             parent,
-            bg=kwargs.get("bg", GREEN),
+            bg=kwargs.get("bg", GREEN_SOFT),
             highlightthickness=0,
             bd=0,
         )
@@ -2944,7 +2951,7 @@ class SheetsHubApp(ctk.CTk):
         pregnant_var = tk.StringVar(value="")
         warn_label = None
         if ask_pregnancy:
-            preg_box = ctk.CTkFrame(dialog, fg_color=BG, corner_radius=10, border_width=1, border_color=LINE)
+            preg_box = ctk.CTkFrame(dialog, fg_color=BG, corner_radius=RADIUS_INPUT, border_width=1, border_color=LINE)
             preg_box.pack(fill="x", padx=16, pady=(0, 8))
             ctk.CTkLabel(
                 preg_box,
@@ -3198,7 +3205,7 @@ class SheetsHubApp(ctk.CTk):
                 command=free_slot,
                 width=120,
                 height=36,
-                corner_radius=8,
+                corner_radius=RADIUS_PILL,
                 fg_color=DANGER,
                 hover_color=DANGER_HOVER,
                 font=ctk.CTkFont(size=13, weight="bold"),
@@ -3302,7 +3309,7 @@ class SheetsHubApp(ctk.CTk):
         dialog.grid_rowconfigure(3, weight=1, minsize=180)
         self._tables_dialog_open = True
 
-        account = ctk.CTkFrame(dialog, fg_color=BG, corner_radius=10, border_width=1, border_color=LINE)
+        account = ctk.CTkFrame(dialog, fg_color=BG, corner_radius=RADIUS_INPUT, border_width=1, border_color=LINE)
         account.grid(row=0, column=0, sticky="ew", padx=16, pady=(12, 8))
         account.grid_columnconfigure(1, weight=1)
 
@@ -3344,7 +3351,7 @@ class SheetsHubApp(ctk.CTk):
         )
         self._outline_button(adv, "JSON…", pick_key, 80).grid(row=0, column=2, padx=4)
 
-        sync_box = ctk.CTkFrame(dialog, fg_color=BG, corner_radius=10, border_width=1, border_color=LINE)
+        sync_box = ctk.CTkFrame(dialog, fg_color=BG, corner_radius=RADIUS_INPUT, border_width=1, border_color=LINE)
         sync_box.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 8))
         sync_box.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(
@@ -3381,7 +3388,7 @@ class SheetsHubApp(ctk.CTk):
             row=2, column=2, sticky="e", padx=(4, 12), pady=(0, 10)
         )
 
-        tg_box = ctk.CTkFrame(dialog, fg_color=BG, corner_radius=10, border_width=1, border_color=LINE)
+        tg_box = ctk.CTkFrame(dialog, fg_color=BG, corner_radius=RADIUS_INPUT, border_width=1, border_color=LINE)
         tg_box.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 8))
         tg_box.grid_columnconfigure(1, weight=1)
         tg_box.grid_columnconfigure(3, weight=1)
@@ -3843,7 +3850,7 @@ class _RefList:
         self.placeholder = placeholder
         self.on_change = on_change
         self.rows: list[dict] = []
-        self.frame = ctk.CTkFrame(parent, fg_color=BG, corner_radius=10, border_width=1, border_color=LINE)
+        self.frame = ctk.CTkFrame(parent, fg_color=BG, corner_radius=RADIUS_INPUT, border_width=1, border_color=LINE)
         self.frame.grid_columnconfigure(0, weight=1)
         self.frame.grid_rowconfigure(2, weight=1)
 
@@ -3870,7 +3877,7 @@ class _RefList:
             text="+ Добавить",
             width=110,
             height=28,
-            corner_radius=8,
+            corner_radius=RADIUS_PILL,
             fg_color=GREEN,
             hover_color=GREEN_HOVER,
             command=self.add_empty,
@@ -3899,7 +3906,7 @@ class _RefList:
             text="+ Добавить таблицу",
             width=160,
             height=30,
-            corner_radius=8,
+            corner_radius=RADIUS_PILL,
             fg_color=GREEN,
             hover_color=GREEN_HOVER,
             command=self.add_empty,
