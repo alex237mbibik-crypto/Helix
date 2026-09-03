@@ -86,6 +86,35 @@ def _mark_color(key: str) -> tuple[str, str]:
     return bg, contrast_fg(bg)
 
 
+def _doctor_key(name: str) -> str:
+    """Один ключ для одного врача — по фамилии (первое слово)."""
+    raw = " ".join((name or "").strip().lower().replace("ё", "е").split())
+    if not raw:
+        return ""
+    return raw.split()[0]
+
+
+def _doctor_names_in_text(text: str) -> list[str]:
+    """ФИО из текста справки — строки с заглавной буквы, без телефонов."""
+    names: list[str] = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or len(line) > 80:
+            continue
+        low = line.lower()
+        if any(x in low for x in ("тел", "запись", "прием", "приём", "кабинет", "услуг")):
+            continue
+        if re.search(r"\+?\d[\d\s\-()]{5,}", line):
+            # есть телефон — берём часть до запятой/цифры как ФИО
+            chunk = re.split(r"[,+]", line)[0].strip()
+            if len(chunk.split()) >= 2:
+                names.append(chunk)
+            continue
+        if len(line.split()) >= 2 and line[0].isupper():
+            names.append(line)
+    return names
+
+
 def _info_title_line(text: str) -> str:
     for line in (text or "").splitlines():
         line = line.strip()
@@ -423,16 +452,13 @@ class HelixApi:
         self, cal: list[Record], info_records: list[Record]
     ) -> tuple[dict[str, tuple[str, str]], dict[int, tuple[str, str]]]:
         """
-        Один цвет у дня в календаре и у блока в «Общей информации».
+        Один цвет на врача — все его дни и блок в «Общей информации» совпадают.
         Без медленного Google color API.
         """
-        from sheets_hub.client import contrast_fg, soften_fill
-
         dates = list(
             dict.fromkeys(str(r.values.get("Дата") or "").strip() for r in cal if r.values.get("Дата"))
         )
         date_doctor: dict[str, str] = {}
-        date_cached_bg: dict[str, dict[str, int]] = {}
         for record in cal:
             date = str(record.values.get("Дата") or "").strip()
             if not date:
@@ -440,20 +466,6 @@ class HelixApi:
             doc = str(record.values.get("_doctor") or "").strip()
             if doc and date not in date_doctor:
                 date_doctor[date] = doc
-            raw_bg = str(record.values.get("_bg") or "").strip()
-            if raw_bg:
-                counts = date_cached_bg.setdefault(date, {})
-                counts[raw_bg] = counts.get(raw_bg, 0) + 1
-        date_top_bg = {
-            date: max(counts.items(), key=lambda item: item[1])[0]
-            for date, counts in date_cached_bg.items()
-            if counts
-        }
-
-        def _soft_pair(raw: str) -> tuple[str, str]:
-            soft = soften_fill(raw, fallback="#2e7d32")
-            bg = _lighten_hex(soft, 0.22)
-            return bg, contrast_fg(bg)
 
         weekday_tokens = (
             ("понедельник", "пн"),
@@ -473,23 +485,28 @@ class HelixApi:
                 hit = False
                 for full, short in weekday_tokens:
                     if (full in dlow or short in dlow.split()) and (
-                        full in low or re.search(rf"(^|\\W){re.escape(short)}(\\W|$)", low)
+                        full in low or re.search(rf"(^|\W){re.escape(short)}(\W|$)", low)
                     ):
                         hit = True
                         break
                 if not hit:
-                    # «1», «01», «1.» из заголовка дня
-                    nums = re.findall(r"\\b0*([1-9]\\d?)\\b", dlow)
+                    nums = re.findall(r"\b0*([1-9]\d?)\b", dlow)
                     for num in nums:
-                        if re.search(rf"(^|\\W)0*{re.escape(num)}(\\W|$)", low):
+                        if re.search(rf"(^|\W)0*{re.escape(num)}(\W|$)", low):
                             hit = True
                             break
                 if hit:
                     found.append(date)
             return found
 
-        # Цвет каждого инфо-блока.
-        info_meta: list[tuple[Record, str, tuple[str, str]]] = []
+        # canonical name by surname key
+        key_to_name: dict[str, str] = {}
+        for doc in date_doctor.values():
+            key = _doctor_key(doc)
+            if key and key not in key_to_name:
+                key_to_name[key] = doc
+
+        info_meta: list[tuple[Record, str, list[str]]] = []
         for record in info_records:
             text = str(record.values.get("Текст") or "").strip()
             if not text:
@@ -500,83 +517,69 @@ class HelixApi:
                 )
             if not text:
                 continue
-            title = _info_title_line(text)
-            raw_bg = str(record.values.get("_bg") or "").strip()
-            color = _soft_pair(raw_bg) if raw_bg else _mark_color(title or text)
-            if color[0]:
-                info_meta.append((record, text, color))
+            names = _doctor_names_in_text(text)
+            if not names:
+                title = _info_title_line(text)
+                if title and len(title.split()) >= 2:
+                    names = [title]
+            info_meta.append((record, text, names))
+            for name in names:
+                key = _doctor_key(name)
+                if key and key not in key_to_name:
+                    key_to_name[key] = name
+
+        # Один цвет на врача (не на день!).
+        doctor_colors: dict[str, tuple[str, str]] = {}
+        for key, name in key_to_name.items():
+            doctor_colors[key] = _mark_color(name)
 
         day_colors: dict[str, tuple[str, str]] = {}
         info_colors: dict[int, tuple[str, str]] = {}
 
-        # 1) Дни с ФИО врача из строки листа.
+        # Дни из строки врача на листе.
         for date, doc in date_doctor.items():
-            day_colors[date] = (
-                _soft_pair(date_top_bg[date]) if date in date_top_bg else _mark_color(doc)
-            )
+            key = _doctor_key(doc)
+            if key in doctor_colors:
+                day_colors[date] = doctor_colors[key]
 
-        # 2) Дни с кэшированной заливкой Google.
-        for date, raw in date_top_bg.items():
-            if date not in day_colors:
-                day_colors[date] = _soft_pair(raw)
-
-        # 3) Привязка инфо → дни (врач / день недели / общий _bg).
-        doctors_by_key = {doc.strip().lower(): doc for doc in date_doctor.values() if doc.strip()}
-        for record, text, color in info_meta:
+        # Справка → врач → все его дни.
+        for record, text, names in info_meta:
             blob = text.lower().replace("ё", "е")
-            linked_dates: list[str] = []
+            linked: list[str] = []
+            chosen_key = ""
 
-            for key, doc in sorted(doctors_by_key.items(), key=lambda item: -len(item[0])):
-                if key and key in blob:
-                    for date, dname in date_doctor.items():
-                        if dname.strip().lower() == key:
-                            linked_dates.append(date)
+            for name in names:
+                key = _doctor_key(name)
+                if not key:
+                    continue
+                for date, doc in date_doctor.items():
+                    if _doctor_key(doc) == key:
+                        linked.append(date)
+                if not linked and key in blob:
+                    linked = _dates_mentioned(text)
+                if linked:
+                    chosen_key = key
                     break
 
-            if not linked_dates:
-                linked_dates = _dates_mentioned(text)
+            if not linked:
+                for key, doc_name in key_to_name.items():
+                    if key and key in blob:
+                        linked = [
+                            date for date, d in date_doctor.items() if _doctor_key(d) == key
+                        ]
+                        if not linked:
+                            linked = _dates_mentioned(text)
+                        if linked:
+                            chosen_key = key
+                            break
 
-            raw_bg = str(record.values.get("_bg") or "").strip()
-            if not linked_dates and raw_bg:
-                for date, cached in date_top_bg.items():
-                    if cached == raw_bg:
-                        linked_dates.append(date)
-
-            # Красим только связанные дни тем же цветом, что и блок справки.
-            if linked_dates:
+            if chosen_key and chosen_key in doctor_colors:
+                color = doctor_colors[chosen_key]
                 info_colors[id(record)] = color
-                for date in linked_dates:
+                for date in linked:
                     day_colors[date] = color
-            elif date_doctor or date_top_bg:
-                # Есть разметка дней — инфо без связи не красим отдельно
-                # (иначе «цвет в справке есть, в ячейках нет»).
-                continue
-            else:
-                # Нет привязки дней вообще: красим инфо, дни — по порядку блоков.
-                info_colors[id(record)] = color
 
-        # 4) Если дней ещё нет цветов, а инфо есть — раздаём цвета по порядку дат.
-        if info_colors and dates and not day_colors:
-            palette = [info_colors[id(rec)] for rec, _t, _c in info_meta if id(rec) in info_colors]
-            if not palette:
-                palette = [c for _r, _t, c in info_meta]
-            for idx, date in enumerate(dates):
-                day_colors[date] = palette[idx % len(palette)]
-            # Синхронизируем инфо с тем же порядком.
-            for idx, (record, _text, _color) in enumerate(info_meta):
-                info_colors[id(record)] = palette[idx % len(palette)]
-        elif info_meta and day_colors:
-            # Инфо без связи, но дни уже окрашены — подтянем инфо к ближайшему
-            # совпадению по врачу, иначе оставим без цвета.
-            for record, text, color in info_meta:
-                if id(record) in info_colors:
-                    continue
-                blob = text.lower().replace("ё", "е")
-                for date, doc in date_doctor.items():
-                    if doc and doc.strip().lower() in blob and date in day_colors:
-                        info_colors[id(record)] = day_colors[date]
-                        break
-
+        # Оставшиеся дни без врача — не красим (белые/дефолтные слоты).
         return day_colors, info_colors
 
     def snapshot(self) -> dict[str, Any]:
