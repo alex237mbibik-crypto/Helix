@@ -8,10 +8,11 @@ SheetsHub — как запустить
    - папка _internal   ← без неё программа НЕ запустится
    - папка webui       ← HTML-интерфейс Helix
    - config.yaml
-3. Интерфейс — HTML-макет Helix (pywebview), один в один с дизайном.
-   Старый CustomTkinter: перед запуском выполните
-     set SHEETS_HUB_UI=ctk
-4. Telegram: в блоке настроек на главном экране или в config.yaml.
+3. Интерфейс — HTML-макет Helix (pywebview).
+   Настройки рабочей станции скрыты: откройте Ctrl+Shift+T
+   (пароль — ui.tables_password в config.yaml, если задан).
+   Старый CustomTkinter: set SHEETS_HUB_UI=ctk
+4. Telegram: Ctrl+Shift+T → блок Telegram или config.yaml.
 5. credentials.json — рядом с exe или кнопка «JSON ключа».
 6. Служебная таблица + «Сохранить для всех ПК» — общий список таблиц.
 7. Запускайте SheetsHub.exe (или start_SheetsHub.bat).

@@ -89,7 +89,8 @@ class HelixApi:
             "search": "",
         }
         self._window = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._auto_tick = 0
 
     def set_window(self, window) -> None:
         self._window = window
@@ -306,6 +307,9 @@ class HelixApi:
                 },
                 "tables": [_ref_to_dict(r) for r in usable_refs(self._tables())],
                 "config_path": str(resolve_config_path()),
+                "ui": {
+                    "has_password": bool((self.config.ui.tables_password or "").strip()),
+                },
             }
 
     # --- public API for JS ---
@@ -370,13 +374,18 @@ class HelixApi:
         # каскад: сброс зависимых при смене верхних
         return self.snapshot()
 
-    def reload(self) -> dict[str, Any]:
+    def reload(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        data = payload if isinstance(payload, dict) else {}
+        fast = bool(data.get("fast"))
+        sync_registry = bool(data.get("sync_registry", not fast))
         if not self.client:
             self.status = "Нет подключения — укажите credentials.json"
             return self.snapshot()
+        if not self._lock.acquire(blocking=False):
+            return self.snapshot()
         try:
             sources = self._selected_sources()
-            if self._registry_ready():
+            if sync_registry and self._registry_ready():
                 try:
                     remote = self.client.pull_table_registry(
                         self.config.registry_spreadsheet_id,
@@ -388,7 +397,11 @@ class HelixApi:
                         sources = self._selected_sources()
                 except Exception:
                     pass
-            raw, errors = self.client.fetch_all(sources)
+            raw, errors = self.client.fetch_all(
+                sources,
+                include_colors=not fast,
+                fast=fast,
+            )
             booking = [item for item in raw if item.kind != KIND_INFO]
             self.records = explode_records(booking)
             infos = [i for i in raw if i.kind == KIND_INFO or is_info_title(i.sheet)]
@@ -411,7 +424,17 @@ class HelixApi:
                 )
         except Exception as exc:
             self.status = str(exc).split("\n")[0]
+        finally:
+            self._lock.release()
         return self.snapshot()
+
+    def unlock_settings(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        data = payload or {}
+        expected = (self.config.ui.tables_password or "").strip()
+        got = str(data.get("password") or "").strip()
+        if expected and got != expected:
+            return {"ok": False, "error": "Неверный пароль"}
+        return {"ok": True}
 
     def _registry_ready(self) -> bool:
         text = (self.config.registry_spreadsheet_id or "").strip()

@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
     body {
       background: #f0f4fa;
       font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
@@ -18,18 +19,22 @@
       display: flex;
       justify-content: center;
       line-height: 1.5;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      overscroll-behavior-y: contain;
     }
     .app { max-width: 1100px; width: 100%; }
     .card {
-      background: rgba(255, 255, 255, 0.85);
-      backdrop-filter: blur(8px);
-      -webkit-backdrop-filter: blur(8px);
+      background: #ffffff;
       border-radius: 40px;
       padding: 1.8rem 2rem;
       box-shadow: 0 12px 30px -8px rgba(0, 20, 40, 0.08), 0 4px 12px rgba(0, 0, 0, 0.02);
       border: 1px solid rgba(255, 255, 255, 0.7);
       margin-bottom: 1.8rem;
+      content-visibility: auto;
+      contain: layout style;
     }
+    .card.hidden { display: none !important; }
     .card-header {
       display: flex; align-items: center; gap: 0.6rem; margin-bottom: 1.2rem; flex-wrap: wrap;
     }
@@ -53,7 +58,7 @@
     .flex-between { justify-content: space-between; }
     .field-label { font-weight: 500; color: #1e3a5a; min-width: 70px; font-size: 0.9rem; }
     .field-value, select.field-value, input.field-value {
-      background: rgba(255, 255, 255, 0.6); backdrop-filter: blur(4px);
+      background: #f7faf8;
       padding: 0.35rem 1.2rem; border-radius: 60px; border: 1px solid rgba(200, 216, 208, 0.8);
       font-size: 0.9rem; color: #0f2a44; display: inline-flex; align-items: center; gap: 0.4rem;
       font-family: inherit;
@@ -67,7 +72,20 @@
     .divider-light {
       height: 1px; background: linear-gradient(to right, #dbe3ed, transparent); margin: 1.2rem 0;
     }
-    .table-wrap { overflow-x: auto; margin: 0.6rem 0; }
+    .table-wrap {
+      overflow: auto;
+      margin: 0.6rem 0;
+      max-height: min(62vh, 740px);
+      scroll-behavior: smooth;
+      -webkit-overflow-scrolling: touch;
+      overscroll-behavior: contain;
+      border-radius: 12px;
+    }
+    .table-wrap::-webkit-scrollbar { width: 10px; height: 10px; }
+    .table-wrap::-webkit-scrollbar-thumb {
+      background: #c5d5cc; border-radius: 20px; border: 2px solid #f0f4fa;
+    }
+    .table-wrap::-webkit-scrollbar-track { background: transparent; }
     .calendar-table {
       width: 100%; border-collapse: collapse; font-size: 0.9rem;
       border: 1px solid #dce4ef; border-radius: 12px; overflow: hidden;
@@ -88,10 +106,10 @@
     .status-record.blocked { color: #4e6d8a; }
     .status-record.lock { color: #8a6d1d; }
     .btn {
-      border: none; background: rgba(255, 255, 255, 0.6); backdrop-filter: blur(4px);
+      border: none; background: #f7faf8;
       padding: 0.5rem 1.4rem; border-radius: 60px; font-weight: 500; font-size: 0.85rem;
-      color: #1d3a58; border: 1px solid rgba(255, 255, 255, 0.6);
-      box-shadow: 0 2px 8px rgba(0, 20, 40, 0.02); transition: all 0.15s ease;
+      color: #1d3a58; border: 1px solid #e2ebe6;
+      box-shadow: 0 2px 8px rgba(0, 20, 40, 0.02); transition: background 0.15s ease, transform 0.15s ease;
       cursor: pointer; display: inline-flex; align-items: center; gap: 0.5rem; font-family: inherit;
     }
     .btn-primary {
@@ -226,11 +244,12 @@
     <div id="infoHost"></div>
   </div>
 
-  <div class="card">
+  <div class="card hidden" id="settingsCard">
     <div class="card-header">
       <i class="fas fa-sliders-h"></i>
       <h2>Настройки &amp; рабочие таблицы</h2>
-      <span class="badge-soft">общие для всех ПК</span>
+      <span class="badge-soft">Ctrl+Shift+T</span>
+      <button class="btn btn-sm btn-outline" id="btnHideSettings" style="margin-left:auto;">Скрыть</button>
     </div>
 
     <div class="flex-row" style="justify-content: space-between; background: #f0f8f4; border-radius: 60px; padding: 0.45rem 1.2rem;">
@@ -320,36 +339,50 @@
 
 <script>
 (function () {
-  const state = { slot: null, data: null };
+  const state = {
+    slot: null,
+    data: null,
+    settingsOpen: false,
+    busy: false,
+    lastCalSig: "",
+    lastInfoSig: "",
+    lastTablesSig: "",
+  };
 
   function api() {
     return window.pywebview && window.pywebview.api;
   }
 
   function fillSelect(el, values, current) {
+    if (document.activeElement === el) return;
     const cur = current || "";
+    const next = ["", ...(values || [])];
+    if (cur && !next.includes(cur)) next.push(cur);
+    const same =
+      el.options.length === next.length &&
+      Array.from(el.options).every((o, i) => o.value === next[i]);
+    if (same) {
+      el.value = cur;
+      return;
+    }
     el.innerHTML = "";
-    const empty = document.createElement("option");
-    empty.value = "";
-    empty.textContent = "—";
-    el.appendChild(empty);
-    (values || []).forEach((v) => {
+    next.forEach((v) => {
       const o = document.createElement("option");
       o.value = v;
-      o.textContent = v;
+      o.textContent = v || "—";
       if (v === cur) o.selected = true;
       el.appendChild(o);
     });
-    if (cur && !(values || []).includes(cur)) {
-      const o = document.createElement("option");
-      o.value = cur;
-      o.textContent = cur;
-      o.selected = true;
-      el.appendChild(o);
-    }
   }
 
   function renderCalendar(cal) {
+    const sig = JSON.stringify({
+      d: cal.dates,
+      t: cal.times_raw,
+      c: cal.cells,
+    });
+    if (sig === state.lastCalSig) return;
+    state.lastCalSig = sig;
     const table = document.getElementById("calTable");
     const thead = table.querySelector("thead tr");
     const tbody = table.querySelector("tbody");
@@ -362,6 +395,7 @@
     tbody.innerHTML = "";
     const times = cal.times_raw || [];
     const shorts = cal.times || [];
+    const frag = document.createDocumentFragment();
     times.forEach((t, idx) => {
       const tr = document.createElement("tr");
       const tdTime = document.createElement("td");
@@ -381,28 +415,40 @@
         }
         tr.appendChild(td);
       });
-      tbody.appendChild(tr);
+      frag.appendChild(tr);
     });
+    tbody.appendChild(frag);
   }
 
   function renderInfo(items) {
+    const sig = JSON.stringify(items || []);
+    if (sig === state.lastInfoSig) return;
+    state.lastInfoSig = sig;
     const host = document.getElementById("infoHost");
     host.innerHTML = "";
     document.getElementById("infoCount").textContent = String((items || []).length);
+    if (!(items || []).length) {
+      host.innerHTML = '<p class="text-muted">Нет справочной информации для выбранной таблицы.</p>';
+      return;
+    }
+    const frag = document.createDocumentFragment();
     (items || []).forEach((item) => {
       const div = document.createElement("div");
       div.className = "info-block";
       div.textContent = item.text || "";
-      host.appendChild(div);
+      frag.appendChild(div);
     });
-    if (!(items || []).length) {
-      host.innerHTML = '<p class="text-muted">Нет справочной информации для выбранной таблицы.</p>';
-    }
+    host.appendChild(frag);
   }
 
   function renderTables(rows) {
+    if (!state.settingsOpen) return;
+    const sig = JSON.stringify(rows || []);
+    if (sig === state.lastTablesSig) return;
+    state.lastTablesSig = sig;
     const tbody = document.querySelector("#tablesGrid tbody");
     tbody.innerHTML = "";
+    const frag = document.createDocumentFragment();
     (rows || []).forEach((row) => {
       const tr = document.createElement("tr");
       ["name", "spreadsheet_id", "sheet", "service", "city", "address"].forEach((key) => {
@@ -413,8 +459,9 @@
         td.appendChild(input);
         tr.appendChild(td);
       });
-      tbody.appendChild(tr);
+      frag.appendChild(tr);
     });
+    tbody.appendChild(frag);
   }
 
   function collectTables() {
@@ -429,8 +476,9 @@
     return rows;
   }
 
-  function applyState(data) {
+  function applyState(data, opts) {
     if (!data) return;
+    const options = opts || {};
     state.data = data;
     const f = data.filters || {};
     const o = data.options || {};
@@ -446,8 +494,6 @@
       '<i class="fas fa-stethoscope" style="color:#2a7d5a;"></i> ' + (data.status || "");
     const email = data.email || "нет ключа";
     document.getElementById("emailTop").innerHTML = '<i class="fas fa-cloud"></i> ' + email;
-    document.getElementById("saLine").innerHTML =
-      '<i class="fas fa-key"></i> Сервисный аккаунт: <strong>' + (data.email || "—") + "</strong>";
     const cal = data.calendar || {};
     document.getElementById("calBadge").textContent = cal.title || "—";
     document.getElementById("chipSlots").innerHTML =
@@ -458,48 +504,68 @@
       '<i class="far fa-calendar-alt"></i> ' + ((cal.dates && cal.dates[0]) || "календарь");
     renderCalendar(cal);
     renderInfo(data.info || []);
-    const reg = data.registry || {};
-    if (document.activeElement !== document.getElementById("regUrl")) {
-      document.getElementById("regUrl").value = reg.spreadsheet_id || "";
+
+    if (state.settingsOpen || options.forceSettings) {
+      document.getElementById("saLine").innerHTML =
+        '<i class="fas fa-key"></i> Сервисный аккаунт: <strong>' + (data.email || "—") + "</strong>";
+      const reg = data.registry || {};
+      if (document.activeElement !== document.getElementById("regUrl")) {
+        document.getElementById("regUrl").value = reg.spreadsheet_id || "";
+      }
+      if (document.activeElement !== document.getElementById("regSheet")) {
+        document.getElementById("regSheet").value = reg.sheet || "SheetsHub";
+      }
+      const tg = data.telegram || {};
+      if (document.activeElement !== document.getElementById("tgToken")) {
+        document.getElementById("tgToken").value = tg.bot_token || "";
+      }
+      if (document.activeElement !== document.getElementById("tgChat")) {
+        document.getElementById("tgChat").value = tg.chat_id || "";
+      }
+      document.getElementById("tgOn").checked = !!tg.enabled;
+      renderTables(data.tables || []);
+      document.getElementById("cfgPath").textContent = data.config_path || "";
     }
-    if (document.activeElement !== document.getElementById("regSheet")) {
-      document.getElementById("regSheet").value = reg.sheet || "SheetsHub";
-    }
-    const tg = data.telegram || {};
-    if (document.activeElement !== document.getElementById("tgToken")) {
-      document.getElementById("tgToken").value = tg.bot_token || "";
-    }
-    if (document.activeElement !== document.getElementById("tgChat")) {
-      document.getElementById("tgChat").value = tg.chat_id || "";
-    }
-    document.getElementById("tgOn").checked = !!tg.enabled;
-    renderTables(data.tables || []);
-    document.getElementById("cfgPath").textContent = data.config_path || "";
   }
 
   async function call(name, payload) {
     const a = api();
     if (!a || !a[name]) {
-      document.getElementById("cloudStatus").textContent = "ожидание Python…";
+      const chip = document.getElementById("cloudStatus");
+      if (chip) chip.textContent = "ожидание Python…";
       return null;
     }
     try {
       const result = payload === undefined ? await a[name]() : await a[name](payload);
       if (result && result.error && result.ok === false) {
-        document.getElementById("cloudStatus").textContent = result.error;
+        const chip = document.getElementById("cloudStatus");
+        if (chip && state.settingsOpen) chip.textContent = result.error;
       }
-      if (result) applyState(result);
+      if (result && (result.calendar || result.status !== undefined)) applyState(result);
       return result;
     } catch (err) {
-      document.getElementById("cloudStatus").textContent = String(err);
+      const chip = document.getElementById("cloudStatus");
+      if (chip && state.settingsOpen) chip.textContent = String(err);
       return null;
     }
   }
 
-  async function refresh() {
-    document.getElementById("cloudStatus").innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> обновляю…';
-    await call("reload");
-    document.getElementById("cloudStatus").innerHTML = '<i class="fas fa-cloud"></i> готово';
+  async function refresh(full) {
+    if (state.busy) return;
+    state.busy = true;
+    const chip = document.getElementById("cloudStatus");
+    if (chip && state.settingsOpen) {
+      chip.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> обновляю…';
+    }
+    try {
+      if (full) await call("reload", { fast: false, sync_registry: true });
+      else await call("reload", { fast: true, sync_registry: false });
+    } finally {
+      state.busy = false;
+      if (chip && state.settingsOpen) {
+        chip.innerHTML = '<i class="fas fa-cloud"></i> готово';
+      }
+    }
   }
 
   async function pushFilters() {
@@ -511,7 +577,35 @@
       sheet: document.getElementById("fSheet").value,
       search: document.getElementById("fSearch").value,
     });
-    await call("reload");
+    await refresh(true);
+  }
+
+  async function openSettings() {
+    const hasPass = !!(state.data && state.data.ui && state.data.ui.has_password);
+    if (hasPass) {
+      const pwd = prompt("Пароль для настроек рабочей станции:");
+      if (pwd === null) return;
+      const res = await call("unlock_settings", { password: pwd });
+      if (!res || res.ok === false) {
+        alert((res && res.error) || "Неверный пароль");
+        return;
+      }
+    }
+    state.settingsOpen = true;
+    state.lastTablesSig = "";
+    document.getElementById("settingsCard").classList.remove("hidden");
+    applyState(state.data || {}, { forceSettings: true });
+    document.getElementById("settingsCard").scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function hideSettings() {
+    state.settingsOpen = false;
+    document.getElementById("settingsCard").classList.add("hidden");
+  }
+
+  function toggleSettings() {
+    if (state.settingsOpen) hideSettings();
+    else openSettings();
   }
 
   function openBook(cell) {
@@ -548,9 +642,10 @@
   let searchTimer = null;
   document.getElementById("fSearch").addEventListener("input", () => {
     clearTimeout(searchTimer);
-    searchTimer = setTimeout(pushFilters, 350);
+    searchTimer = setTimeout(pushFilters, 450);
   });
-  document.getElementById("btnRefresh").addEventListener("click", refresh);
+  document.getElementById("btnRefresh").addEventListener("click", () => refresh(true));
+  document.getElementById("btnHideSettings").addEventListener("click", hideSettings);
   document.getElementById("btnJson").addEventListener("click", () => call("pick_credentials"));
   document.getElementById("btnTgTest").addEventListener("click", async () => {
     const res = await call("test_telegram", {
@@ -571,6 +666,7 @@
   document.getElementById("btnAddTable").addEventListener("click", () => {
     const rows = collectTables();
     rows.push({ name: "", spreadsheet_id: "", sheet: "все", service: "", city: "", address: "" });
+    state.lastTablesSig = "";
     renderTables(rows);
   });
   document.getElementById("btnLoadCloud").addEventListener("click", async () => {
@@ -622,6 +718,16 @@
     else closeBook();
   });
 
+  // Ctrl+Shift+T — настройки (и при русской раскладке: keyCode 84 = T).
+  window.addEventListener("keydown", (e) => {
+    const isT = e.code === "KeyT" || e.keyCode === 84 || (e.key || "").toLowerCase() === "t";
+    if (e.ctrlKey && e.shiftKey && isT) {
+      e.preventDefault();
+      toggleSettings();
+    }
+    if (e.key === "Escape" && state.settingsOpen) hideSettings();
+  });
+
   window.Helix = {
     refresh: async function () {
       const a = api();
@@ -633,8 +739,15 @@
 
   window.addEventListener("pywebviewready", async () => {
     await call("connect");
-    await refresh();
-    setInterval(() => call("reload"), 30000);
+    await refresh(true);
+    let tick = 0;
+    setInterval(() => {
+      if (document.getElementById("bookModal").classList.contains("open")) return;
+      if (state.busy) return;
+      tick += 1;
+      // Быстрый тихий refresh; раз в ~2.5 мин тянем registry.
+      refresh(tick % 5 === 0);
+    }, 45000);
   });
 })();
 </script>
