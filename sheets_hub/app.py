@@ -3383,7 +3383,7 @@ class SheetsHubApp(ctk.CTk):
         ctk.CTkLabel(tg_box, text="Токен", text_color=MUTED, font=ctk.CTkFont(size=11)).grid(
             row=1, column=0, sticky="w", padx=12, pady=(0, 8)
         )
-        _styled_entry(tg_box, "123456:ABC…", textvariable=tg_token_var, height=28).grid(
+        _styled_entry(tg_box, "123456:ABC…", textvariable=tg_token_var, height=28, show="*").grid(
             row=1, column=1, sticky="ew", padx=4, pady=(0, 8)
         )
         ctk.CTkLabel(tg_box, text="Chat ID", text_color=MUTED, font=ctk.CTkFont(size=11)).grid(
