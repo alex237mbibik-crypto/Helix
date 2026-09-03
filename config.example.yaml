@@ -21,14 +21,16 @@ sources: []
 
 destinations: []
 
-# Уведомления в Telegram при записи клиента в календаре (для тестов).
-# 1) Создайте бота через @BotFather, скопируйте token.
-# 2) Напишите боту любое сообщение в Telegram.
-# 3) Откройте https://api.telegram.org/bot<TOKEN>/getUpdates — найдите chat.id.
+# Уведомления в Telegram при записи клиента в календаре.
+# После сборки/установки откройте config.yaml рядом с SheetsHub.exe и замените заглушки:
+# 1) @BotFather → токен бота
+# 2) Напишите боту сообщение
+# 3) https://api.telegram.org/bot<TOKEN>/getUpdates → chat.id
+# Затем поставьте enabled: true (или включите в окне Таблицы).
 telegram:
   enabled: false
-  bot_token: ""
-  chat_id: ""
+  bot_token: "PASTE_BOT_TOKEN_HERE"
+  chat_id: "PASTE_CHAT_ID_HERE"
 
 # Кнопка «Таблицы» скрыта — открыть окно: Ctrl+Shift+T
 # (пароль не нужен; при желании задайте tables_password)

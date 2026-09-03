@@ -2,22 +2,25 @@ SheetsHub — как запустить
 ========================
 
 1. Распакуйте весь архив SheetsHub-Windows целиком в одну папку
-   (можно в Program Files — настройки всё равно пишутся в AppData).
+   (можно в Program Files).
 2. В папке должны быть рядом:
    - SheetsHub.exe
    - папка _internal   ← без неё программа НЕ запустится
+   - config.yaml       ← заглушки Telegram; можно править до копирования в PF
    - config.example.yaml
-3. credentials.json — рядом с exe ИЛИ программа сохранит его в:
-   %LOCALAPPDATA%\SheetsHub\credentials.json
-   (кнопка JSON… в окне Таблицы / Ctrl+Shift+T).
+3. Telegram: замените в config.yaml
+     bot_token: "PASTE_BOT_TOKEN_HERE"
+     chat_id: "PASTE_CHAT_ID_HERE"
+   затем enabled: true
+   (или введите в окне Таблицы / Ctrl+Shift+T и нажмите Тест).
+   Если программа в Program Files, сохранённые из окна настройки пишутся в:
+     %LOCALAPPDATA%\SheetsHub\config.yaml
+4. credentials.json — рядом с exe или через кнопку JSON… в «Таблицы»
+   (из Program Files ключ сохранится в %LOCALAPPDATA%\SheetsHub\).
    Каждую таблицу откройте для email из этого файла (роль «Редактор»).
-4. В «Таблицы» укажите ссылку на общую Google-таблицу списка (тоже Редактор для SA) —
+5. В «Таблицы» укажите ссылку на общую Google-таблицу списка (тоже Редактор для SA) —
    тогда список таблиц синхронизируется между всеми компьютерами.
-5. Запускайте SheetsHub.exe (или start_SheetsHub.bat).
-
-Где хранятся настройки (Telegram, список таблиц, registry):
-  %LOCALAPPDATA%\SheetsHub\config.yaml
-  (если программа в Program Files — только здесь, рядом с exe писать нельзя)
+6. Запускайте SheetsHub.exe (или start_SheetsHub.bat).
 
 Защита окна «Таблицы» (в config.yaml):
   ui:

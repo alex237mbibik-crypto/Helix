@@ -49,6 +49,7 @@ jobs:
             exit /b 1
           )
           copy /Y config.example.yaml dist\SheetsHub\
+          copy /Y config.example.yaml dist\SheetsHub\config.yaml
           if exist credentials.example.json copy /Y credentials.example.json dist\SheetsHub\
           if exist packaging\bundled_credentials.json copy /Y packaging\bundled_credentials.json dist\SheetsHub\credentials.json
           if exist packaging\HOW_TO_RUN.txt copy /Y packaging\HOW_TO_RUN.txt dist\SheetsHub\

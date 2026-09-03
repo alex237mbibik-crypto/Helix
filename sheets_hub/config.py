@@ -17,7 +17,7 @@ def app_root() -> Path:
 
 
 def user_data_dir() -> Path:
-    """Папка настроек с правами на запись (для установки в Program Files)."""
+    """Папка с правами на запись (AppData), без запросов админа."""
     if sys.platform == "win32":
         base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or str(Path.home())
         path = Path(base) / "SheetsHub"
@@ -37,6 +37,10 @@ def user_data_dir() -> Path:
             return app_root()
 
 
+def legacy_user_data_dir() -> Path:
+    return user_data_dir()
+
+
 def _dir_is_writable(folder: Path) -> bool:
     try:
         folder.mkdir(parents=True, exist_ok=True)
@@ -49,7 +53,7 @@ def _dir_is_writable(folder: Path) -> bool:
 
 
 def writable_data_dir() -> Path:
-    """Куда можно писать config/credentials: рядом с exe, иначе AppData."""
+    """Рядом с exe, если можно писать; иначе тихо в AppData (без UAC)."""
     root = app_root()
     if _dir_is_writable(root):
         return root
@@ -60,7 +64,7 @@ _RESOLVED_CONFIG_PATH: Path | None = None
 
 
 def resolve_config_path() -> Path:
-    """config.yaml: при Program Files — %LOCALAPPDATA%\\SheetsHub\\config.yaml."""
+    """config.yaml: рядом с exe или %LOCALAPPDATA%\\SheetsHub — без запросов прав."""
     global _RESOLVED_CONFIG_PATH
     if _RESOLVED_CONFIG_PATH is not None:
         return _RESOLVED_CONFIG_PATH
@@ -77,7 +81,7 @@ def resolve_config_path() -> Path:
         _RESOLVED_CONFIG_PATH = root_cfg
         return _RESOLVED_CONFIG_PATH
 
-    # Program Files / нет прав: переносим существующий config в AppData.
+    # Program Files: читаем заглушку рядом с exe, пишем копию в AppData.
     if root_cfg.exists():
         try:
             user_cfg.write_text(root_cfg.read_text(encoding="utf-8"), encoding="utf-8")
@@ -85,6 +89,11 @@ def resolve_config_path() -> Path:
             pass
     _RESOLVED_CONFIG_PATH = user_cfg
     return _RESOLVED_CONFIG_PATH
+
+
+def reset_resolved_config_path() -> None:
+    global _RESOLVED_CONFIG_PATH
+    _RESOLVED_CONFIG_PATH = None
 
 
 def _example_config_path() -> Path:
@@ -99,7 +108,7 @@ def _example_config_path() -> Path:
 
 
 ROOT = app_root()
-# Фактический путь может быть в AppData — всегда через resolve_config_path().
+# Фактический путь: рядом с exe или AppData — через resolve_config_path().
 CONFIG_PATH = ROOT / "config.yaml"
 EXAMPLE_CONFIG_PATH = _example_config_path()
 
@@ -108,19 +117,25 @@ def find_credentials_file(configured: Path | str | None = None) -> Path | None:
     """Ищет credentials рядом с программой и в AppData."""
     candidates: list[Path] = []
     data = writable_data_dir()
+    legacy = user_data_dir()
     if configured:
         raw = Path(configured)
         candidates.append(raw)
         if not raw.is_absolute():
-            candidates.append(ROOT / raw)
             candidates.append(data / raw)
+            candidates.append(ROOT / raw)
+            candidates.append(legacy / raw)
     candidates.append(data / "credentials.json")
     candidates.append(ROOT / "credentials.json")
+    candidates.append(legacy / "credentials.json")
     try:
         candidates.extend(sorted(data.glob("client_secret*.json")))
         candidates.extend(sorted(data.glob("*credentials*.json")))
         candidates.extend(sorted(ROOT.glob("client_secret*.json")))
         candidates.extend(sorted(ROOT.glob("*credentials*.json")))
+        if legacy != data and legacy.exists():
+            candidates.extend(sorted(legacy.glob("client_secret*.json")))
+            candidates.extend(sorted(legacy.glob("*credentials*.json")))
     except Exception:
         pass
 
@@ -382,8 +397,24 @@ class TelegramConfig:
     bot_token: str = ""
     chat_id: str = ""
 
+    @staticmethod
+    def _is_real(value: str) -> bool:
+        text = (value or "").strip()
+        if not text:
+            return False
+        upper = text.upper()
+        if upper.startswith("PASTE_") or upper.startswith("YOUR_"):
+            return False
+        if "TOKEN_HERE" in upper or "CHAT_ID_HERE" in upper:
+            return False
+        return True
+
     def is_configured(self) -> bool:
-        return bool(self.enabled and self.bot_token.strip() and self.chat_id.strip())
+        return bool(
+            self.enabled
+            and self._is_real(self.bot_token)
+            and self._is_real(self.chat_id)
+        )
 
 
 @dataclass
@@ -474,22 +505,26 @@ def _dump_ref(ref: SheetRef) -> dict[str, Any]:
 
 def load_config(path: Path | None = None) -> AppConfig:
     config_path = path or resolve_config_path()
-    if not config_path.exists():
-        if EXAMPLE_CONFIG_PATH.exists():
+    text: str | None = None
+    if config_path.exists():
+        text = config_path.read_text(encoding="utf-8")
+    else:
+        legacy_cfg = legacy_user_data_dir() / "config.yaml"
+        if legacy_cfg.exists():
+            text = legacy_cfg.read_text(encoding="utf-8")
+        elif EXAMPLE_CONFIG_PATH.exists():
+            example = EXAMPLE_CONFIG_PATH.read_text(encoding="utf-8")
             try:
                 config_path.parent.mkdir(parents=True, exist_ok=True)
-                config_path.write_text(
-                    EXAMPLE_CONFIG_PATH.read_text(encoding="utf-8"),
-                    encoding="utf-8",
-                )
-            except Exception as exc:
-                raise FileNotFoundError(
-                    f"Нет config.yaml и не удалось создать: {config_path}\n{exc}"
-                ) from exc
+                config_path.write_text(example, encoding="utf-8")
+                text = config_path.read_text(encoding="utf-8")
+            except Exception:
+                # Program Files без прав: читаем пример из памяти, запись — после UAC.
+                text = example
         else:
             raise FileNotFoundError("Нет config.yaml и config.example.yaml")
 
-    raw: dict[str, Any] = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    raw: dict[str, Any] = yaml.safe_load(text) or {}
     configured = Path(raw.get("credentials") or "credentials.json")
     found = find_credentials_file(configured)
     data_dir = writable_data_dir()

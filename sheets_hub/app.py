@@ -28,7 +28,6 @@ from sheets_hub.config import (
     resolve_config_path,
     save_config,
     usable_refs,
-    user_data_dir,
     writable_data_dir,
 )
 from sheets_hub.models import Record
@@ -458,7 +457,7 @@ class SheetsHubApp(ctk.CTk):
         self._schedule_auto_refresh()
 
     def _persist_config(self, *, quiet: bool = True) -> bool:
-        """Пишет config.yaml (в AppData, если Program Files недоступен для записи)."""
+        """Пишет config.yaml (рядом с exe или в AppData без запросов прав)."""
         try:
             save_config(self.config_data)
             return True
@@ -1548,7 +1547,7 @@ class SheetsHubApp(ctk.CTk):
         go = messagebox.askokcancel(
             "Нужен ключ сервисного аккаунта",
             "Не найден JSON сервисного аккаунта.\n\n"
-            f"Программа положит его сюда (можно писать даже из Program Files):\n{expected}\n\n"
+            f"Программа сохранит его рядом с собой:\n{expected}\n\n"
             "Имя файла лучше: credentials.json\n\n"
             "Сейчас можно выбрать файл вручную.",
         )

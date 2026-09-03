@@ -163,8 +163,8 @@ def _send_via_curl(url: str, payload: dict, *, timeout: float = 12.0) -> tuple[b
 def send_message(settings: TelegramConfig, text: str, *, timeout: float = 12.0) -> tuple[bool, str]:
     token = (settings.bot_token or "").strip()
     chat_id = _normalize_chat_id(settings.chat_id)
-    if not token or not chat_id:
-        return False, "Укажите токен бота и chat_id"
+    if not TelegramConfig._is_real(token) or not TelegramConfig._is_real(chat_id):
+        return False, "Замените PASTE_BOT_TOKEN_HERE / PASTE_CHAT_ID_HERE в config.yaml на свои значения"
     if ":" not in token:
         return False, "Похоже, токен бота неполный (обычно вида 123456:AA...)"
 
@@ -201,9 +201,11 @@ def notify_booking_async(
     *,
     on_done: Callable[[bool, str], None] | None = None,
 ) -> None:
-    if not settings.bot_token.strip() or not settings.chat_id.strip():
+    if not TelegramConfig._is_real(settings.bot_token) or not TelegramConfig._is_real(
+        settings.chat_id
+    ):
         if on_done:
-            on_done(False, "Telegram не настроен (нет токена или chat_id)")
+            on_done(False, "Telegram не настроен (замените заглушки в config.yaml)")
         return
     if not settings.enabled:
         if on_done:
@@ -225,9 +227,11 @@ def notify_free_async(
     *,
     on_done: Callable[[bool, str], None] | None = None,
 ) -> None:
-    if not settings.bot_token.strip() or not settings.chat_id.strip():
+    if not TelegramConfig._is_real(settings.bot_token) or not TelegramConfig._is_real(
+        settings.chat_id
+    ):
         if on_done:
-            on_done(False, "Telegram не настроен (нет токена или chat_id)")
+            on_done(False, "Telegram не настроен (замените заглушки в config.yaml)")
         return
     if not settings.enabled:
         if on_done:

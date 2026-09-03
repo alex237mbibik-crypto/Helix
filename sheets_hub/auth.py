@@ -116,7 +116,7 @@ def credentials_email(path: Path) -> str:
 
 
 def install_google_credentials(source: Path, dest: Path | None = None) -> Path:
-    """Копирует JSON сервисного аккаунта в credentials.json (AppData, если Program Files)."""
+    """Копирует JSON сервисного аккаунта в credentials.json (рядом с exe или AppData)."""
     target = dest or (writable_data_dir() / "credentials.json")
     source = source.expanduser().resolve()
     if not source.exists():
