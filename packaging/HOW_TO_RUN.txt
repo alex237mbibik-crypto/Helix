@@ -6,29 +6,15 @@ SheetsHub — как запустить
 2. В папке должны быть рядом:
    - SheetsHub.exe
    - папка _internal   ← без неё программа НЕ запустится
-   - config.yaml       ← заглушки Telegram; можно править до копирования в PF
-   - config.example.yaml
-3. Telegram: замените в config.yaml
-     bot_token: "PASTE_BOT_TOKEN_HERE"
-     chat_id: "PASTE_CHAT_ID_HERE"
-   затем enabled: true
-   (или введите в окне Таблицы / Ctrl+Shift+T и нажмите Тест).
-   Если программа в Program Files, сохранённые из окна настройки пишутся в:
-     %LOCALAPPDATA%\SheetsHub\config.yaml
-4. credentials.json — рядом с exe или через кнопку JSON… в «Таблицы»
-   (из Program Files ключ сохранится в %LOCALAPPDATA%\SheetsHub\).
-   Каждую таблицу откройте для email из этого файла (роль «Редактор»).
-5. В «Таблицы» укажите ссылку на общую Google-таблицу списка (тоже Редактор для SA) —
-   тогда список таблиц синхронизируется между всеми компьютерами.
-6. Запускайте SheetsHub.exe (или start_SheetsHub.bat).
+   - папка webui       ← HTML-интерфейс Helix
+   - config.yaml
+3. Интерфейс — HTML-макет Helix (pywebview), один в один с дизайном.
+   Старый CustomTkinter: перед запуском выполните
+     set SHEETS_HUB_UI=ctk
+4. Telegram: в блоке настроек на главном экране или в config.yaml.
+5. credentials.json — рядом с exe или кнопка «JSON ключа».
+6. Служебная таблица + «Сохранить для всех ПК» — общий список таблиц.
+7. Запускайте SheetsHub.exe (или start_SheetsHub.bat).
 
-Защита окна «Таблицы» (в config.yaml):
-  ui:
-    show_tables_button: false   # кнопка скрыта; открыть: Ctrl+Shift+T
-    tables_password: ""         # пусто = без пароля; иначе спросит перед открытием
-
-Если ошибка «Could not load PyInstaller's embedded PKG archive»:
-- скачайте архив заново из GitHub Actions;
-- не копируйте один только .exe — копируйте всю папку;
-- добавьте папку в исключения антивируса (часто портит .exe);
-- не запускайте из архива напрямую — сначала распакуйте.
+Если программа в Program Files, сохранённые настройки пишутся в:
+  %LOCALAPPDATA%\SheetsHub\

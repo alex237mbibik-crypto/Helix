@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sheets Hub · календарь</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:opsz@14..32&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #f0f4fa;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      padding: 2rem 1.5rem;
+      color: #142433;
+      display: flex;
+      justify-content: center;
+      line-height: 1.5;
+    }
+    .app { max-width: 1100px; width: 100%; }
+    .card {
+      background: rgba(255, 255, 255, 0.85);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border-radius: 40px;
+      padding: 1.8rem 2rem;
+      box-shadow: 0 12px 30px -8px rgba(0, 20, 40, 0.08), 0 4px 12px rgba(0, 0, 0, 0.02);
+      border: 1px solid rgba(255, 255, 255, 0.7);
+      margin-bottom: 1.8rem;
+    }
+    .card-header {
+      display: flex; align-items: center; gap: 0.6rem; margin-bottom: 1.2rem; flex-wrap: wrap;
+    }
+    .card-header i {
+      font-size: 1.6rem; color: #2a7d5a; background: rgba(42, 125, 90, 0.08);
+      padding: 0.4rem 0.6rem; border-radius: 18px;
+    }
+    .card-header h2 {
+      font-weight: 600; font-size: 1.5rem; letter-spacing: -0.02em; color: #0b1f33;
+    }
+    .badge-soft {
+      background: #e6f0ea; color: #1d6b4a; padding: 0.2rem 1rem; border-radius: 40px;
+      font-size: 0.75rem; font-weight: 500; margin-left: 0.3rem;
+    }
+    .chip {
+      background: rgba(42, 125, 90, 0.06); border: 1px solid rgba(42, 125, 90, 0.12);
+      padding: 0.2rem 1rem; border-radius: 40px; font-size: 0.8rem; color: #1d6b4a;
+      display: inline-flex; align-items: center; gap: 0.3rem;
+    }
+    .flex-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem 1.2rem; }
+    .flex-between { justify-content: space-between; }
+    .field-label { font-weight: 500; color: #1e3a5a; min-width: 70px; font-size: 0.9rem; }
+    .field-value, select.field-value, input.field-value {
+      background: rgba(255, 255, 255, 0.6); backdrop-filter: blur(4px);
+      padding: 0.35rem 1.2rem; border-radius: 60px; border: 1px solid rgba(200, 216, 208, 0.8);
+      font-size: 0.9rem; color: #0f2a44; display: inline-flex; align-items: center; gap: 0.4rem;
+      font-family: inherit;
+    }
+    select.field-value { min-width: 140px; cursor: pointer; appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%232a7d5a' d='M1 1l5 5 5-5'/%3E%3C/svg%3E");
+      background-repeat: no-repeat; background-position: right 1rem center; padding-right: 2.2rem;
+    }
+    input.field-value { min-width: 200px; outline: none; }
+    input.field-value.token { -webkit-text-security: disc; }
+    .divider-light {
+      height: 1px; background: linear-gradient(to right, #dbe3ed, transparent); margin: 1.2rem 0;
+    }
+    .table-wrap { overflow-x: auto; margin: 0.6rem 0; }
+    .calendar-table {
+      width: 100%; border-collapse: collapse; font-size: 0.9rem;
+      border: 1px solid #dce4ef; border-radius: 12px; overflow: hidden;
+    }
+    .calendar-table th {
+      text-align: left; font-weight: 600; color: #1d3a58; padding: 0.7rem 0.8rem;
+      background: #e8f2ec; border: 1px solid #c8d8d0; font-size: 0.85rem;
+    }
+    .calendar-table td {
+      padding: 0.5rem 0.8rem; border: 1px solid #c8d8d0; color: #0f2a44; background: #ffffff;
+    }
+    .calendar-table tr:nth-child(even) td { background: #f4f9f6; }
+    .calendar-table tr:hover td { background: #e6f3ec; }
+    .calendar-table td.slot { cursor: pointer; }
+    .calendar-table td.slot:hover { outline: 2px solid #2a7d5a; outline-offset: -2px; }
+    .status-record { color: #1e7a5a; font-weight: 450; }
+    .status-record.occupied { color: #b13e3e; }
+    .status-record.blocked { color: #4e6d8a; }
+    .status-record.lock { color: #8a6d1d; }
+    .btn {
+      border: none; background: rgba(255, 255, 255, 0.6); backdrop-filter: blur(4px);
+      padding: 0.5rem 1.4rem; border-radius: 60px; font-weight: 500; font-size: 0.85rem;
+      color: #1d3a58; border: 1px solid rgba(255, 255, 255, 0.6);
+      box-shadow: 0 2px 8px rgba(0, 20, 40, 0.02); transition: all 0.15s ease;
+      cursor: pointer; display: inline-flex; align-items: center; gap: 0.5rem; font-family: inherit;
+    }
+    .btn-primary {
+      background: #1d8a5a; border-color: #1d8a5a; color: white;
+      box-shadow: 0 6px 14px -4px rgba(29, 138, 90, 0.25);
+    }
+    .btn-primary i { color: white; }
+    .btn-primary:hover { background: #156d48; transform: scale(1.01); }
+    .btn-outline { background: transparent; border: 1px solid #cbd8e8; }
+    .btn-outline:hover { background: rgba(255, 255, 255, 0.3); border-color: #2a7d5a; }
+    .btn-danger { background: #b13e3e; border-color: #b13e3e; color: #fff; }
+    .btn-sm { padding: 0.25rem 1rem; font-size: 0.8rem; }
+    .service-account {
+      background: #eaf0f8; border-radius: 60px; padding: 0.2rem 1.2rem; font-size: 0.8rem;
+      display: inline-flex; align-items: center; gap: 0.4rem;
+    }
+    .info-block {
+      background: #f0f8f4; border-radius: 24px; padding: 1rem 1.6rem; margin: 0.8rem 0;
+      border-left: 4px solid #2a7d5a; white-space: pre-wrap;
+    }
+    .text-muted { color: #4e6d8a; }
+    .fw-500 { font-weight: 500; }
+    .mt-1 { margin-top: 0.6rem; }
+    .mini-table {
+      width: 100%; border-collapse: collapse; font-size: 0.85rem;
+      border: 1px solid #dce4ef; border-radius: 12px; overflow: hidden;
+    }
+    .mini-table th {
+      text-align: left; padding: 0.6rem 0.8rem; font-weight: 600; color: #1f3f60;
+      background: #e8f2ec; border: 1px solid #c8d8d0;
+    }
+    .mini-table td { padding: 0.4rem 0.5rem; border: 1px solid #c8d8d0; background: #ffffff; }
+    .mini-table input {
+      width: 100%; border: 1px solid #dce4ef; border-radius: 8px; padding: 0.35rem 0.5rem;
+      font-family: inherit; font-size: 0.85rem; color: #0f2a44; background: #fff;
+    }
+    .modal-back {
+      position: fixed; inset: 0; background: rgba(15, 42, 68, 0.35); display: none;
+      align-items: center; justify-content: center; z-index: 50; padding: 1rem;
+    }
+    .modal-back.open { display: flex; }
+    .modal {
+      background: #fff; border-radius: 28px; padding: 1.5rem 1.6rem; width: min(480px, 100%);
+      box-shadow: 0 20px 40px rgba(0,20,40,0.15);
+    }
+    .modal h3 { margin-bottom: 0.8rem; color: #0b1f33; }
+    .modal label { display: block; font-size: 0.85rem; color: #4e6d8a; margin: 0.6rem 0 0.25rem; }
+    .modal input, .modal select {
+      width: 100%; padding: 0.55rem 0.9rem; border-radius: 14px; border: 1px solid #cbd8e8;
+      font-family: inherit; font-size: 0.95rem;
+    }
+    .preg-row { display: flex; gap: 1rem; margin: 0.8rem 0; flex-wrap: wrap; }
+    .preg-row label { display: flex; align-items: center; gap: 0.4rem; color: #142433; margin: 0; cursor: pointer; }
+    .warn-box {
+      display: none; color: #b13e3e; font-weight: 600; font-size: 0.85rem; margin-top: 0.6rem;
+      white-space: pre-wrap;
+    }
+    .footer-meta {
+      display: flex; justify-content: flex-end; gap: 1.2rem; font-size: 0.8rem; color: #5e7b98;
+      padding: 0.2rem 0.5rem;
+    }
+    @media (max-width: 720px) {
+      .card { padding: 1.2rem 1rem; border-radius: 32px; }
+      .calendar-table td, .calendar-table th { font-size: 0.75rem; padding: 0.3rem 0.4rem; }
+    }
+  </style>
+</head>
+<body>
+<div class="app">
+
+  <div class="card">
+    <div class="card-header">
+      <i class="fas fa-table"></i>
+      <h2>Sheets Hub</h2>
+      <span class="badge-soft" id="badgeMonth"><i class="far fa-calendar-alt"></i> календарь</span>
+      <span style="margin-left: auto; font-size: 0.8rem; opacity: 0.7;" id="emailTop">
+        <i class="fas fa-cloud"></i> нет ключа
+      </span>
+    </div>
+
+    <div class="flex-row">
+      <span class="field-label"><i class="fas fa-tag"></i> Название</span>
+      <select class="field-value" id="fName"></select>
+      <span class="field-label">Услуга</span>
+      <select class="field-value" id="fService"></select>
+      <span class="field-label">Город</span>
+      <select class="field-value" id="fCity"></select>
+      <span class="field-label">Адрес</span>
+      <select class="field-value" id="fAddress"></select>
+      <span class="field-label">Лист</span>
+      <select class="field-value" id="fSheet"></select>
+      <span class="chip"><i class="far fa-circle"></i> пустое поле не учитывается</span>
+    </div>
+
+    <div class="divider-light"></div>
+
+    <div class="flex-row" style="margin-bottom: 0.8rem;">
+      <input class="field-value" id="fSearch" placeholder="Поиск по имени, дате или телефону" style="flex:1; min-width:240px;" />
+      <button class="btn btn-primary" id="btnRefresh"><i class="fas fa-sync-alt"></i> Обновить</button>
+    </div>
+
+    <div class="flex-row flex-between">
+      <span id="statusLine"><i class="fas fa-stethoscope" style="color:#2a7d5a;"></i> Загрузка…</span>
+      <span class="service-account"><i class="fas fa-key"></i> сервисный аккаунт</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <i class="fas fa-calendar-day"></i>
+      <h2>Календарь записи</h2>
+      <span class="badge-soft" id="calBadge">—</span>
+    </div>
+    <div class="table-wrap">
+      <table class="calendar-table" id="calTable">
+        <thead><tr><th>Время</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="flex-row mt-1">
+      <span class="chip" id="chipSlots"><i class="far fa-clock"></i> 0 слотов</span>
+      <span class="chip" id="chipTitle"><i class="fas fa-user-md"></i> —</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <i class="fas fa-info-circle"></i>
+      <h2>Общая информация</h2>
+      <span class="badge-soft" id="infoCount">0</span>
+    </div>
+    <div id="infoHost"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <i class="fas fa-sliders-h"></i>
+      <h2>Настройки &amp; рабочие таблицы</h2>
+      <span class="badge-soft">общие для всех ПК</span>
+    </div>
+
+    <div class="flex-row" style="justify-content: space-between; background: #f0f8f4; border-radius: 60px; padding: 0.45rem 1.2rem;">
+      <span id="saLine"><i class="fas fa-key"></i> Сервисный аккаунт: <strong>—</strong></span>
+      <button class="btn btn-sm btn-outline" id="btnJson"><i class="fas fa-file-code"></i> JSON ключа</button>
+    </div>
+
+    <div class="divider-light"></div>
+
+    <div class="flex-row">
+      <span class="field-label"><i class="fas fa-cloud-upload-alt"></i> Служебная таблица</span>
+      <input class="field-value" id="regUrl" placeholder="https://docs.google.com/spreadsheets/d/…" style="flex:1; min-width:220px;" />
+      <input class="field-value" id="regSheet" placeholder="SheetsHub" style="width:140px;" />
+    </div>
+
+    <div class="divider-light"></div>
+
+    <div class="flex-row">
+      <span class="field-label"><i class="fab fa-telegram"></i> Telegram</span>
+      <input class="field-value token" id="tgToken" placeholder="Токен" style="min-width:180px;" />
+      <input class="field-value" id="tgChat" placeholder="Chat ID" style="width:140px;" />
+      <label class="chip" style="cursor:pointer;"><input type="checkbox" id="tgOn" /> Включить</label>
+      <button class="btn btn-sm btn-primary" id="btnTgTest"><i class="fas fa-paper-plane"></i> Тест</button>
+    </div>
+
+    <div class="divider-light"></div>
+
+    <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
+      <span class="fw-500"><i class="fas fa-list-ul"></i> Рабочие таблицы (общие)</span>
+      <span class="text-muted" style="font-size: 0.8rem;">заполните название, услугу, город, адрес — фильтр сверху</span>
+    </div>
+
+    <div class="table-wrap">
+      <table class="mini-table" id="tablesGrid">
+        <thead>
+          <tr><th>Название</th><th>Ссылка</th><th>Лист</th><th>Услуга</th><th>Город</th><th>Адрес</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="flex-row" style="justify-content: space-between; margin-top: 0.6rem;">
+      <button class="btn btn-sm btn-outline" id="btnAddTable"><i class="fas fa-plus"></i> Добавить таблицу</button>
+      <div style="display: flex; gap: 0.6rem; flex-wrap: wrap;">
+        <span class="chip" id="cloudStatus"><i class="fas fa-cloud"></i> готово</span>
+        <button class="btn btn-sm btn-outline" id="btnLoadCloud"><i class="fas fa-cloud-download-alt"></i> Загрузить из облака</button>
+        <button class="btn btn-sm btn-primary" id="btnSaveCloud"><i class="fas fa-save"></i> Сохранить для всех ПК</button>
+      </div>
+    </div>
+
+    <div style="border-top: 1px solid rgba(0,0,0,0.03); margin-top: 1rem; padding-top: 0.8rem; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 0.4rem;">
+      <span><i class="fas fa-check-circle" style="color: #1e7a5a;"></i> после правок нажмите «Сохранить»</span>
+      <span id="cfgPath" class="text-muted" style="font-size:0.8rem;"></span>
+    </div>
+  </div>
+
+  <div class="footer-meta">
+    <span><i class="fas fa-circle" style="color: #6f9e7a; font-size: 0.4rem;"></i> Sheets Hub · Helix UI</span>
+    <span><i class="fas fa-cloud"></i> HTML + Python</span>
+  </div>
+</div>
+
+<div class="modal-back" id="bookModal">
+  <div class="modal">
+    <h3 id="bookWhen">Запись</h3>
+    <label>Имя клиента</label>
+    <input id="bookClient" placeholder="Иванова А. +79001234567" />
+    <div id="pregBlock" style="display:none;">
+      <label>Беременность</label>
+      <div class="preg-row">
+        <label><input type="radio" name="preg" value="no" /> Не беременна</label>
+        <label><input type="radio" name="preg" value="yes" /> Беременна</label>
+      </div>
+      <div class="warn-box" id="pregWarn">НЕЛЬЗЯ БЕРЕМЕННЫМ:
+7425 — ПАП-тест на основе жидкостной цитологии
+74040 — Цервикальный скрининг
+74042 — Цервикальный минимум
+40-534 — Маркеры пролиферации</div>
+    </div>
+    <div class="flex-row" style="justify-content: space-between; margin-top: 1.2rem;">
+      <button class="btn btn-primary" id="bookSave">Сохранить</button>
+      <button class="btn btn-danger btn-sm" id="bookFree" style="display:none;">Освободить</button>
+      <button class="btn btn-outline" id="bookCancel">Отмена</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  const state = { slot: null, data: null };
+
+  function api() {
+    return window.pywebview && window.pywebview.api;
+  }
+
+  function fillSelect(el, values, current) {
+    const cur = current || "";
+    el.innerHTML = "";
+    const empty = document.createElement("option");
+    empty.value = "";
+    empty.textContent = "—";
+    el.appendChild(empty);
+    (values || []).forEach((v) => {
+      const o = document.createElement("option");
+      o.value = v;
+      o.textContent = v;
+      if (v === cur) o.selected = true;
+      el.appendChild(o);
+    });
+    if (cur && !(values || []).includes(cur)) {
+      const o = document.createElement("option");
+      o.value = cur;
+      o.textContent = cur;
+      o.selected = true;
+      el.appendChild(o);
+    }
+  }
+
+  function renderCalendar(cal) {
+    const table = document.getElementById("calTable");
+    const thead = table.querySelector("thead tr");
+    const tbody = table.querySelector("tbody");
+    thead.innerHTML = "<th>Время</th>";
+    (cal.dates || []).forEach((d) => {
+      const th = document.createElement("th");
+      th.textContent = d;
+      thead.appendChild(th);
+    });
+    tbody.innerHTML = "";
+    const times = cal.times_raw || [];
+    const shorts = cal.times || [];
+    times.forEach((t, idx) => {
+      const tr = document.createElement("tr");
+      const tdTime = document.createElement("td");
+      tdTime.textContent = shorts[idx] || t;
+      tr.appendChild(tdTime);
+      (cal.dates || []).forEach((d) => {
+        const td = document.createElement("td");
+        const key = t + "|" + d;
+        const cell = (cal.cells || {})[key];
+        if (cell) {
+          td.className = "slot";
+          const span = document.createElement("span");
+          span.className = "status-record " + (cell.css || "free");
+          span.textContent = cell.label || "запись";
+          td.appendChild(span);
+          td.addEventListener("click", () => openBook(cell));
+        }
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+  }
+
+  function renderInfo(items) {
+    const host = document.getElementById("infoHost");
+    host.innerHTML = "";
+    document.getElementById("infoCount").textContent = String((items || []).length);
+    (items || []).forEach((item) => {
+      const div = document.createElement("div");
+      div.className = "info-block";
+      div.textContent = item.text || "";
+      host.appendChild(div);
+    });
+    if (!(items || []).length) {
+      host.innerHTML = '<p class="text-muted">Нет справочной информации для выбранной таблицы.</p>';
+    }
+  }
+
+  function renderTables(rows) {
+    const tbody = document.querySelector("#tablesGrid tbody");
+    tbody.innerHTML = "";
+    (rows || []).forEach((row) => {
+      const tr = document.createElement("tr");
+      ["name", "spreadsheet_id", "sheet", "service", "city", "address"].forEach((key) => {
+        const td = document.createElement("td");
+        const input = document.createElement("input");
+        input.value = row[key] || "";
+        input.dataset.key = key;
+        td.appendChild(input);
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+  }
+
+  function collectTables() {
+    const rows = [];
+    document.querySelectorAll("#tablesGrid tbody tr").forEach((tr) => {
+      const obj = {};
+      tr.querySelectorAll("input").forEach((inp) => {
+        obj[inp.dataset.key] = inp.value.trim();
+      });
+      rows.push(obj);
+    });
+    return rows;
+  }
+
+  function applyState(data) {
+    if (!data) return;
+    state.data = data;
+    const f = data.filters || {};
+    const o = data.options || {};
+    fillSelect(document.getElementById("fName"), o.names, f.name);
+    fillSelect(document.getElementById("fService"), o.services, f.service);
+    fillSelect(document.getElementById("fCity"), o.cities, f.city);
+    fillSelect(document.getElementById("fAddress"), o.addresses, f.address);
+    fillSelect(document.getElementById("fSheet"), o.sheets, f.sheet);
+    if (document.activeElement !== document.getElementById("fSearch")) {
+      document.getElementById("fSearch").value = f.search || "";
+    }
+    document.getElementById("statusLine").innerHTML =
+      '<i class="fas fa-stethoscope" style="color:#2a7d5a;"></i> ' + (data.status || "");
+    const email = data.email || "нет ключа";
+    document.getElementById("emailTop").innerHTML = '<i class="fas fa-cloud"></i> ' + email;
+    document.getElementById("saLine").innerHTML =
+      '<i class="fas fa-key"></i> Сервисный аккаунт: <strong>' + (data.email || "—") + "</strong>";
+    const cal = data.calendar || {};
+    document.getElementById("calBadge").textContent = cal.title || "—";
+    document.getElementById("chipSlots").innerHTML =
+      '<i class="far fa-clock"></i> ' + (cal.slots || 0) + " слотов";
+    document.getElementById("chipTitle").innerHTML =
+      '<i class="fas fa-user-md"></i> ' + (cal.title || "—");
+    document.getElementById("badgeMonth").innerHTML =
+      '<i class="far fa-calendar-alt"></i> ' + ((cal.dates && cal.dates[0]) || "календарь");
+    renderCalendar(cal);
+    renderInfo(data.info || []);
+    const reg = data.registry || {};
+    if (document.activeElement !== document.getElementById("regUrl")) {
+      document.getElementById("regUrl").value = reg.spreadsheet_id || "";
+    }
+    if (document.activeElement !== document.getElementById("regSheet")) {
+      document.getElementById("regSheet").value = reg.sheet || "SheetsHub";
+    }
+    const tg = data.telegram || {};
+    if (document.activeElement !== document.getElementById("tgToken")) {
+      document.getElementById("tgToken").value = tg.bot_token || "";
+    }
+    if (document.activeElement !== document.getElementById("tgChat")) {
+      document.getElementById("tgChat").value = tg.chat_id || "";
+    }
+    document.getElementById("tgOn").checked = !!tg.enabled;
+    renderTables(data.tables || []);
+    document.getElementById("cfgPath").textContent = data.config_path || "";
+  }
+
+  async function call(name, payload) {
+    const a = api();
+    if (!a || !a[name]) {
+      document.getElementById("cloudStatus").textContent = "ожидание Python…";
+      return null;
+    }
+    try {
+      const result = payload === undefined ? await a[name]() : await a[name](payload);
+      if (result && result.error && result.ok === false) {
+        document.getElementById("cloudStatus").textContent = result.error;
+      }
+      if (result) applyState(result);
+      return result;
+    } catch (err) {
+      document.getElementById("cloudStatus").textContent = String(err);
+      return null;
+    }
+  }
+
+  async function refresh() {
+    document.getElementById("cloudStatus").innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> обновляю…';
+    await call("reload");
+    document.getElementById("cloudStatus").innerHTML = '<i class="fas fa-cloud"></i> готово';
+  }
+
+  async function pushFilters() {
+    await call("set_filters", {
+      name: document.getElementById("fName").value,
+      service: document.getElementById("fService").value,
+      city: document.getElementById("fCity").value,
+      address: document.getElementById("fAddress").value,
+      sheet: document.getElementById("fSheet").value,
+      search: document.getElementById("fSearch").value,
+    });
+    await call("reload");
+  }
+
+  function openBook(cell) {
+    state.slot = cell;
+    document.getElementById("bookWhen").textContent =
+      (cell.date || "") + " · " + (cell.time || "");
+    document.getElementById("bookClient").value =
+      cell.css === "occupied" ? (cell.label || "") : "";
+    const preg = document.getElementById("pregBlock");
+    preg.style.display = cell.ask_pregnancy ? "block" : "none";
+    document.querySelectorAll('input[name="preg"]').forEach((r) => (r.checked = false));
+    document.getElementById("pregWarn").style.display = "none";
+    document.getElementById("bookFree").style.display =
+      cell.css === "occupied" ? "inline-flex" : "none";
+    document.getElementById("bookModal").classList.add("open");
+    document.getElementById("bookClient").focus();
+  }
+
+  function closeBook() {
+    document.getElementById("bookModal").classList.remove("open");
+    state.slot = null;
+  }
+
+  document.querySelectorAll('input[name="preg"]').forEach((r) => {
+    r.addEventListener("change", () => {
+      document.getElementById("pregWarn").style.display =
+        r.value === "yes" && r.checked ? "block" : "none";
+    });
+  });
+
+  ["fName", "fService", "fCity", "fAddress", "fSheet"].forEach((id) => {
+    document.getElementById(id).addEventListener("change", pushFilters);
+  });
+  let searchTimer = null;
+  document.getElementById("fSearch").addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(pushFilters, 350);
+  });
+  document.getElementById("btnRefresh").addEventListener("click", refresh);
+  document.getElementById("btnJson").addEventListener("click", () => call("pick_credentials"));
+  document.getElementById("btnTgTest").addEventListener("click", async () => {
+    const res = await call("test_telegram", {
+      bot_token: document.getElementById("tgToken").value,
+      chat_id: document.getElementById("tgChat").value,
+      enabled: true,
+    });
+    if (res && res.ok === false) alert(res.error || "Ошибка Telegram");
+    else if (res && res.ok) alert("Тест отправлен");
+  });
+  document.getElementById("tgOn").addEventListener("change", () => {
+    call("save_telegram", {
+      bot_token: document.getElementById("tgToken").value,
+      chat_id: document.getElementById("tgChat").value,
+      enabled: document.getElementById("tgOn").checked,
+    });
+  });
+  document.getElementById("btnAddTable").addEventListener("click", () => {
+    const rows = collectTables();
+    rows.push({ name: "", spreadsheet_id: "", sheet: "все", service: "", city: "", address: "" });
+    renderTables(rows);
+  });
+  document.getElementById("btnLoadCloud").addEventListener("click", async () => {
+    await call("save_registry", {
+      spreadsheet_id: document.getElementById("regUrl").value,
+      sheet: document.getElementById("regSheet").value,
+    });
+    const res = await call("load_cloud_tables");
+    if (res && res.ok === false) alert(res.error || "Ошибка загрузки");
+  });
+  document.getElementById("btnSaveCloud").addEventListener("click", async () => {
+    const res = await call("save_cloud_tables", {
+      registry: {
+        spreadsheet_id: document.getElementById("regUrl").value,
+        sheet: document.getElementById("regSheet").value,
+      },
+      tables: collectTables(),
+    });
+    if (res && res.ok === false) alert(res.error || "Ошибка сохранения");
+    else alert("Сохранено для всех ПК");
+  });
+  document.getElementById("bookCancel").addEventListener("click", closeBook);
+  document.getElementById("bookModal").addEventListener("click", (e) => {
+    if (e.target.id === "bookModal") closeBook();
+  });
+  document.getElementById("bookSave").addEventListener("click", async () => {
+    if (!state.slot) return;
+    const preg = document.querySelector('input[name="preg"]:checked');
+    const res = await call("book_slot", {
+      spreadsheet_id: state.slot.spreadsheet_id,
+      sheet: state.slot.sheet,
+      row: state.slot.row,
+      client: document.getElementById("bookClient").value,
+      pregnant: preg ? preg.value : "",
+      freeing: false,
+    });
+    if (res && res.ok === false) alert(res.error || "Ошибка");
+    else closeBook();
+  });
+  document.getElementById("bookFree").addEventListener("click", async () => {
+    if (!state.slot) return;
+    const res = await call("book_slot", {
+      spreadsheet_id: state.slot.spreadsheet_id,
+      sheet: state.slot.sheet,
+      row: state.slot.row,
+      freeing: true,
+    });
+    if (res && res.ok === false) alert(res.error || "Ошибка");
+    else closeBook();
+  });
+
+  window.Helix = {
+    refresh: async function () {
+      const a = api();
+      if (!a) return;
+      const snap = await a.get_state();
+      applyState(snap);
+    },
+  };
+
+  window.addEventListener("pywebviewready", async () => {
+    await call("connect");
+    await refresh();
+    setInterval(() => call("reload"), 30000);
+  });
+})();
+</script>
+</body>
+</html>

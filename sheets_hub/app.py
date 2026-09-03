@@ -38,7 +38,8 @@ from sheets_hub.telegram import notify_booking_async, notify_free_async, send_me
 
 HIDDEN = {"_sid", "_sheet", "_row", "_tone", "_bg"}
 
-# Визуал из packaging/Helix_Front.html — только цвета/скругления, логика без изменений.
+# Визуал из packaging/Helix_Front.html: карточки, таблица календаря, палитра.
+# Логика записи / Telegram / реестр без изменений.
 GREEN = "#1d8a5a"
 GREEN_HOVER = "#156d48"
 GREEN_SOFT = "#e8f2ec"
@@ -55,11 +56,11 @@ AUTO_REFRESH_MS = 30_000
 # Полный sync списка таблиц не на каждое автообновление — иначе тормозит календарь.
 # Раз в N автообновлений тянем общий список таблиц (30с × N).
 REGISTRY_EVERY_N_REFRESH = 2
-CAL_TIME_W = 72
-CAL_DATE_W = 176
-CAL_ROW_H = 72
-CAL_HEADER_H = 60
-CAL_GAP = 1
+CAL_TIME_W = 88
+CAL_DATE_W = 160
+CAL_ROW_H = 44
+CAL_HEADER_H = 40
+CAL_GAP = 0  # HTML-таблица: ячейки стык в стык
 INFO_TONES = {
     "warn": ("#f0f8f4", "#142433"),
     "ok": ("#e8f2ec", "#1e7a5a"),
@@ -78,9 +79,9 @@ DANGER_HOVER = "#8f3030"
 ZEBRA = "#f4f9f6"
 HOVER = "#e6f3ec"
 SELECT = "#d7eedc"
-RADIUS_CARD = 20
-RADIUS_PILL = 18
-RADIUS_INPUT = 12
+RADIUS_CARD = 28
+RADIUS_PILL = 20
+RADIUS_INPUT = 14
 
 
 def _enable_windows_dpi() -> None:
@@ -503,16 +504,38 @@ class SheetsHubApp(ctk.CTk):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        container = ctk.CTkFrame(self, fg_color=CARD, corner_radius=RADIUS_CARD, border_width=1, border_color=LINE)
-        container.grid(row=0, column=0, sticky="nsew", padx=16, pady=16)
-        container.grid_columnconfigure(0, weight=1)
-        container.grid_rowconfigure(3, weight=1)
+        # Фон как в Helix_Front.html; три карточки: шапка, календарь, справка.
+        shell = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
+        shell.grid(row=0, column=0, sticky="nsew")
+        shell.grid_columnconfigure(0, weight=1)
+        shell.grid_rowconfigure(1, weight=1)
 
-        self._build_header(container)
-        self._build_filter(container)
-        self._build_status(container)
-        self._build_table(container)
-        self._build_info_panel(container)
+        top_card = ctk.CTkFrame(
+            shell,
+            fg_color=CARD,
+            corner_radius=RADIUS_CARD,
+            border_width=1,
+            border_color=LINE,
+        )
+        top_card.grid(row=0, column=0, sticky="ew", padx=18, pady=(18, 10))
+        top_card.grid_columnconfigure(0, weight=1)
+
+        cal_card = ctk.CTkFrame(
+            shell,
+            fg_color=CARD,
+            corner_radius=RADIUS_CARD,
+            border_width=1,
+            border_color=LINE,
+        )
+        cal_card.grid(row=1, column=0, sticky="nsew", padx=18, pady=(0, 10))
+        cal_card.grid_columnconfigure(0, weight=1)
+        cal_card.grid_rowconfigure(1, weight=1)
+
+        self._build_header(top_card)
+        self._build_filter(top_card)
+        self._build_status(top_card)
+        self._build_table(cal_card)
+        self._build_info_panel(shell)
 
     def _outline_button(self, parent, text: str, command, width: int = 140) -> ctk.CTkButton:
         return ctk.CTkButton(
@@ -690,6 +713,31 @@ class SheetsHubApp(ctk.CTk):
         self.status.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 4))
 
     def _build_table(self, parent: ctk.CTkFrame) -> None:
+        # parent уже карточка календаря из Helix_Front.
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(1, weight=1)
+
+        head = ctk.CTkFrame(parent, fg_color="transparent")
+        head.grid(row=0, column=0, sticky="ew", padx=18, pady=(14, 6))
+        head.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            head,
+            text="Календарь записи",
+            font=ctk.CTkFont(size=18, weight="bold"),
+            text_color=TEXT,
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w")
+        self.cal_badge = ctk.CTkLabel(
+            head,
+            text="",
+            fg_color=GREEN_SOFT,
+            text_color=GREEN_ACCENT,
+            corner_radius=RADIUS_PILL,
+            height=26,
+            font=ctk.CTkFont(size=12),
+        )
+        self.cal_badge.grid(row=0, column=1, sticky="w", padx=(10, 0))
+
         table_wrap = ctk.CTkFrame(
             parent,
             fg_color=CARD,
@@ -697,20 +745,12 @@ class SheetsHubApp(ctk.CTk):
             border_width=1,
             border_color=SLOT_OUTLINE,
         )
-        table_wrap.grid(row=3, column=0, sticky="nsew", padx=18, pady=(0, 6))
+        table_wrap.grid(row=1, column=0, sticky="nsew", padx=18, pady=(0, 14))
         table_wrap.grid_columnconfigure(0, weight=1)
-        table_wrap.grid_rowconfigure(1, weight=1)
-
-        ctk.CTkLabel(
-            table_wrap,
-            text="Календарь записи",
-            font=ctk.CTkFont(size=14, weight="bold"),
-            text_color=TEXT,
-            anchor="w",
-        ).grid(row=0, column=0, sticky="w", padx=12, pady=(6, 2))
+        table_wrap.grid_rowconfigure(0, weight=1)
 
         inner = tk.Frame(table_wrap, bg=CARD, highlightthickness=0)
-        inner.grid(row=1, column=0, sticky="nsew", padx=1, pady=(0, 1))
+        inner.grid(row=0, column=0, sticky="nsew", padx=1, pady=1)
         inner.grid_columnconfigure(0, weight=1)
         inner.grid_rowconfigure(0, weight=1)
         self._table_inner = inner
@@ -726,26 +766,26 @@ class SheetsHubApp(ctk.CTk):
         self._style_treeview()
 
         # Календарь: горизонтальный скролл общий, вертикальный — только у слотов.
-        # Даты живут вне вертикального canvas → не моргают и не пропадают.
         self.cal_shell = tk.Frame(inner, bg=CARD, highlightthickness=0)
         self.cal_shell.grid_columnconfigure(0, weight=1)
-        self.cal_shell.grid_rowconfigure(1, weight=1)
+        self.cal_shell.grid_rowconfigure(0, weight=1)
 
+        # Подзаголовок календаря (адрес/услуга) — в бейдже сверху; здесь скрыт.
         self.cal_header_title = tk.Label(
             self.cal_shell,
             text="",
             bg=CARD,
             fg=TEXT,
-            font=_ui_font(13, bold=True),
+            font=_ui_font(1),
             anchor="w",
         )
-        self.cal_header_title.grid(row=0, column=0, columnspan=2, sticky="ew", padx=4, pady=(0, 2))
+        # Не показываем дубль заголовка — текст уходит в self.cal_badge.
 
         self.cal_x_canvas = tk.Canvas(self.cal_shell, bg=CARD, highlightthickness=0, bd=0)
         self.cal_hsb = ttk.Scrollbar(self.cal_shell, orient="horizontal", command=self.cal_x_canvas.xview)
         self.cal_x_canvas.configure(xscrollcommand=self.cal_hsb.set)
-        self.cal_x_canvas.grid(row=1, column=0, sticky="nsew")
-        self.cal_hsb.grid(row=2, column=0, sticky="ew")
+        self.cal_x_canvas.grid(row=0, column=0, sticky="nsew")
+        self.cal_hsb.grid(row=1, column=0, sticky="ew")
 
         self.cal_x_host = tk.Frame(self.cal_x_canvas, bg=CARD)
         self._cal_x_window = self.cal_x_canvas.create_window((0, 0), window=self.cal_x_host, anchor="nw")
@@ -761,7 +801,7 @@ class SheetsHubApp(ctk.CTk):
         self._cal_window = self.cal_canvas.create_window((0, 0), window=self.cal_host, anchor="nw")
 
         self.cal_vsb = ttk.Scrollbar(self.cal_shell, orient="vertical", command=self.cal_canvas.yview)
-        self.cal_vsb.grid(row=1, column=1, sticky="ns")
+        self.cal_vsb.grid(row=0, column=1, sticky="ns")
         self.cal_canvas.configure(yscrollcommand=self.cal_vsb.set)
 
         self.cal_x_host.bind("<Configure>", self._on_cal_x_host_configure)
@@ -820,10 +860,10 @@ class SheetsHubApp(ctk.CTk):
     def _build_info_panel(self, parent: ctk.CTkFrame) -> None:
         self.info_wrap = ctk.CTkFrame(
             parent,
-            fg_color=GREEN_SOFT,
+            fg_color=CARD,
             corner_radius=RADIUS_CARD,
             border_width=1,
-            border_color=SLOT_OUTLINE,
+            border_color=LINE,
         )
         self.info_wrap.grid_columnconfigure(0, weight=1)
 
@@ -831,7 +871,7 @@ class SheetsHubApp(ctk.CTk):
         self.info_sash = tk.Frame(
             self.info_wrap,
             bg=GREEN_ACCENT,
-            height=6,
+            height=4,
             cursor="sb_v_double_arrow",
             highlightthickness=0,
             bd=0,
@@ -849,10 +889,10 @@ class SheetsHubApp(ctk.CTk):
             command=self._toggle_info_panel,
             height=28,
             corner_radius=RADIUS_PILL,
-            fg_color="transparent",
+            fg_color=GREEN_SOFT,
             hover_color=HOVER,
             text_color=TEXT,
-            font=ctk.CTkFont(size=13, weight="bold"),
+            font=ctk.CTkFont(size=14, weight="bold"),
             anchor="w",
         )
         self.info_toggle_btn.pack(fill="x", padx=4, pady=2)
@@ -900,7 +940,7 @@ class SheetsHubApp(ctk.CTk):
         if not self._info_has_content:
             self.info_wrap.grid_remove()
             return
-        self.info_wrap.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 8))
+        self.info_wrap.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 18))
         if self._info_expanded:
             try:
                 # Сначала полоска сверху (граница с календарём), потом заголовок и текст.
@@ -1076,16 +1116,12 @@ class SheetsHubApp(ctk.CTk):
             return 1
 
     def _compute_date_col_width(self) -> int:
-        """Ширина колонки даты: не меньше CAL_DATE_W (читаемый текст), лишнее — горизонтальный скролл."""
+        """Колонки дат растягиваются на всю ширину (как table width:100% в HTML)."""
         cols = max(self._cal_date_cols, 1)
         avail = self._calendar_viewport_width() - self._cal_time_col_w
         if avail < CAL_DATE_W:
             return CAL_DATE_W
-        # Растягиваем только если колонок мало и места хватает; иначе фиксированный минимум + скролл.
-        fitted = avail // cols
-        if fitted >= CAL_DATE_W:
-            return min(fitted, 220)
-        return CAL_DATE_W
+        return max(CAL_DATE_W, avail // cols)
 
     def _schedule_calendar_relayout(self, *, delay_ms: int = 350) -> None:
         """Отложенный пересчёт колонок (после паузы ресайза)."""
@@ -2179,7 +2215,7 @@ class SheetsHubApp(ctk.CTk):
         self.empty_title.configure(text=title)
         self.empty_text.configure(text=message)
         self.empty_retry.grid() if can_retry else self.empty_retry.grid_remove()
-        self.empty_state.grid(row=0, column=0, rowspan=3, columnspan=2, sticky="nsew")
+        self.empty_state.grid(row=0, column=0, rowspan=2, columnspan=2, sticky="nsew")
 
     def _hide_empty_state(self) -> None:
         self.empty_state.grid_remove()
@@ -2188,11 +2224,11 @@ class SheetsHubApp(ctk.CTk):
         if on:
             self.tree.grid_remove()
             self.vsb.grid_remove()
-            self.cal_shell.grid(row=0, column=0, rowspan=3, sticky="nsew")
+            self.cal_shell.grid(row=0, column=0, rowspan=2, sticky="nsew")
         else:
             self.cal_shell.grid_remove()
-            self.tree.grid(row=0, column=0, rowspan=3, sticky="nsew")
-            self.vsb.grid(row=0, column=1, rowspan=3, sticky="ns")
+            self.tree.grid(row=0, column=0, rowspan=2, sticky="nsew")
+            self.vsb.grid(row=0, column=1, rowspan=2, sticky="ns")
 
     def _draw_calendars(self, records: list[Record]) -> None:
         if self._cal_draw_after_id is not None:
@@ -2217,6 +2253,10 @@ class SheetsHubApp(ctk.CTk):
                 groups.setdefault((record.spreadsheet_id, record.sheet, record.source_name), []).append(record)
             if not groups:
                 self.cal_header_title.configure(text="")
+                try:
+                    self.cal_badge.configure(text="")
+                except Exception:
+                    pass
                 self._cal_resizing = False
                 self._cal_drawing = False
                 return
@@ -2256,12 +2296,16 @@ class SheetsHubApp(ctk.CTk):
         sample = items[0].values
         title = " · ".join(part for part in (name, sample.get("Адрес", ""), sample.get("Тип услуги", "")) if part)
         self.cal_header_title.configure(text=title)
+        try:
+            self.cal_badge.configure(text=f"  {title}  " if title else "")
+        except Exception:
+            pass
         self._cal_date_cols = len(dates)
 
         header = self.cal_header_host
         body = self.cal_host
-        header.configure(bg=SLOT_OUTLINE)
-        body.configure(bg=SLOT_OUTLINE)
+        header.configure(bg=CARD)
+        body.configure(bg=CARD)
         time_w = self._cal_time_col_w
         date_w = self._compute_date_col_width() if self._calendar_viewport_width() > 40 else self._cal_date_w
         self._cal_date_w = date_w
@@ -2363,7 +2407,9 @@ class SheetsHubApp(ctk.CTk):
         cell = tk.Frame(
             parent,
             bg=kwargs.get("bg", GREEN_SOFT),
-            highlightthickness=0,
+            highlightthickness=1,
+            highlightbackground=SLOT_OUTLINE,
+            highlightcolor=SLOT_OUTLINE,
             bd=0,
         )
         cell.place(
@@ -2373,7 +2419,7 @@ class SheetsHubApp(ctk.CTk):
             height=max(8, CAL_HEADER_H - 2 * gap),
         )
         self._register_cal_cell(col, cell, row=row, row_h=CAL_HEADER_H, header=True)
-        label = tk.Label(cell, padx=4, pady=6, borderwidth=0, highlightthickness=0, **kwargs)
+        label = tk.Label(cell, padx=8, pady=6, borderwidth=0, highlightthickness=0, **kwargs)
         label.pack(fill="both", expand=True)
         return label
 
@@ -2382,7 +2428,9 @@ class SheetsHubApp(ctk.CTk):
         cell = tk.Frame(
             parent,
             bg=kwargs.get("bg", CARD),
-            highlightthickness=0,
+            highlightthickness=1,
+            highlightbackground=SLOT_OUTLINE,
+            highlightcolor=SLOT_OUTLINE,
             bd=0,
         )
         cell.place(
@@ -2392,8 +2440,9 @@ class SheetsHubApp(ctk.CTk):
             height=max(8, CAL_ROW_H - 2 * gap),
         )
         self._register_cal_cell(col, cell, row=row, row_h=CAL_ROW_H, header=False)
-        label = tk.Label(cell, padx=6, pady=4, borderwidth=0, highlightthickness=0, **kwargs)
+        label = tk.Label(cell, padx=8, pady=4, borderwidth=0, highlightthickness=0, **kwargs)
         label.pack(fill="both", expand=True)
+        label._cell = cell
         return label
 
     def _draw_slot(self, parent: tk.Frame, record: Record | None, row: int, col: int, width: int) -> None:
@@ -2402,6 +2451,8 @@ class SheetsHubApp(ctk.CTk):
             self._cal_body_cell(parent, row, col, width, text="", bg=SLOT_BLOCKED, fg=MUTED)
             return
         text, bg, fg, bold = self._slot_visual(record)
+        if bg == SLOT_GREEN and row % 2 == 1:
+            bg = ZEBRA
         label = self._cal_body_cell(
             parent,
             row,
@@ -2410,10 +2461,10 @@ class SheetsHubApp(ctk.CTk):
             text=text,
             bg=bg,
             fg=fg,
-            font=_ui_font(11, bold=bold),
+            font=_ui_font(12, bold=bold),
             wraplength=max(40, width - 14),
             justify="left",
-            anchor="nw",
+            anchor="w",
         )
         label._record = record
         label._cell = label.master
