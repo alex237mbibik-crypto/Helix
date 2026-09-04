@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import threading
@@ -68,59 +67,12 @@ def _lighten_hex(bg_hex: str, amount: float = 0.2) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
-def _mark_color(key: str) -> tuple[str, str]:
-    """Быстрый стабильный цвет смены — без Google Sheets API."""
-    from sheets_hub.client import contrast_fg
+def _soft_sheet_color(raw: str) -> tuple[str, str]:
+    from sheets_hub.client import contrast_fg, soften_fill
 
-    raw = " ".join((key or "").strip().lower().split())
-    if not raw:
-        return "", ""
-    digest = hashlib.md5(raw.encode("utf-8")).digest()
-    channels = [
-        150 + digest[0] % 85,
-        150 + digest[1] % 85,
-        150 + digest[2] % 85,
-    ]
-    channels[digest[3] % 3] = 110 + digest[4] % 55
-    bg = _lighten_hex(f"#{channels[0]:02x}{channels[1]:02x}{channels[2]:02x}", 0.12)
+    soft = soften_fill(raw, fallback="#2e7d32")
+    bg = _lighten_hex(soft, 0.22)
     return bg, contrast_fg(bg)
-
-
-def _doctor_key(name: str) -> str:
-    """Один ключ для одного врача — по фамилии (первое слово)."""
-    raw = " ".join((name or "").strip().lower().replace("ё", "е").split())
-    if not raw:
-        return ""
-    return raw.split()[0]
-
-
-def _doctor_names_in_text(text: str) -> list[str]:
-    """ФИО из текста справки — строки с заглавной буквы, без телефонов."""
-    names: list[str] = []
-    for line in (text or "").splitlines():
-        line = line.strip()
-        if not line or len(line) > 80:
-            continue
-        low = line.lower()
-        if any(x in low for x in ("тел", "запись", "прием", "приём", "кабинет", "услуг")):
-            continue
-        if re.search(r"\+?\d[\d\s\-()]{5,}", line):
-            # есть телефон — берём часть до запятой/цифры как ФИО
-            chunk = re.split(r"[,+]", line)[0].strip()
-            if len(chunk.split()) >= 2:
-                names.append(chunk)
-            continue
-        if len(line.split()) >= 2 and line[0].isupper():
-            names.append(line)
-    return names
-
-
-def _info_title_line(text: str) -> str:
-    for line in (text or "").splitlines():
-        line = line.strip()
-        if line:
-            return line
-    return (text or "").strip()
 
 
 def _ui_cache_path() -> Path:
@@ -411,8 +363,6 @@ class HelixApi:
         *,
         day_colors: dict[str, tuple[str, str]] | None = None,
     ) -> dict[str, Any]:
-        from sheets_hub.client import contrast_fg, soften_fill
-
         status = record.values.get("Статус", "")
         client = record.values.get("Клиент", "").strip()
         phone = record.values.get("Телефон", "").strip()
@@ -430,11 +380,10 @@ class HelixApi:
             label, css = "запись", "free"
             bg, fg = "", ""
         if css not in {"blocked", "lock"}:
+            # Только заливка из Google Sheets — без локальных «временных» цветов.
             sheet_bg = str(record.values.get("_bg") or "").strip()
             if sheet_bg:
-                soft = soften_fill(sheet_bg, fallback="#2e7d32")
-                bg = _lighten_hex(soft, 0.22)
-                fg = contrast_fg(bg)
+                bg, fg = _soft_sheet_color(sheet_bg)
             else:
                 date = str(record.values.get("Дата") or "").strip()
                 mark = (day_colors or {}).get(date)
@@ -459,160 +408,29 @@ class HelixApi:
     def _shift_mark_colors(
         self, cal: list[Record], info_records: list[Record]
     ) -> tuple[dict[str, tuple[str, str]], dict[int, tuple[str, str]]]:
-        """
-        Цвета смены: сначала заливка из Google Sheets (_bg), иначе стабильный цвет врача.
-        """
-        from sheets_hub.client import contrast_fg, soften_fill
-
-        dates = list(
-            dict.fromkeys(str(r.values.get("Дата") or "").strip() for r in cal if r.values.get("Дата"))
-        )
-        date_doctor: dict[str, str] = {}
-        date_bg_counts: dict[str, dict[str, int]] = {}
-        for record in cal:
-            date = str(record.values.get("Дата") or "").strip()
-            if not date:
-                continue
-            doc = str(record.values.get("_doctor") or "").strip()
-            if doc and date not in date_doctor:
-                date_doctor[date] = doc
-            raw_bg = str(record.values.get("_bg") or "").strip()
-            if raw_bg:
-                counts = date_bg_counts.setdefault(date, {})
-                counts[raw_bg] = counts.get(raw_bg, 0) + 1
-
-        weekday_tokens = (
-            ("понедельник", "пн"),
-            ("вторник", "вт"),
-            ("среда", "ср"),
-            ("четверг", "чт"),
-            ("пятница", "пт"),
-            ("суббота", "сб"),
-            ("воскресенье", "вс"),
-        )
-
-        def _dates_mentioned(text: str) -> list[str]:
-            low = (text or "").lower().replace("ё", "е")
-            found: list[str] = []
-            for date in dates:
-                dlow = date.lower().replace("ё", "е")
-                hit = False
-                for full, short in weekday_tokens:
-                    if (full in dlow or short in dlow.split()) and (
-                        full in low or re.search(rf"(^|\W){re.escape(short)}(\W|$)", low)
-                    ):
-                        hit = True
-                        break
-                if not hit:
-                    nums = re.findall(r"\b0*([1-9]\d?)\b", dlow)
-                    for num in nums:
-                        if re.search(rf"(^|\W)0*{re.escape(num)}(\W|$)", low):
-                            hit = True
-                            break
-                if hit:
-                    found.append(date)
-            return found
-
-        def _soft_pair(raw: str) -> tuple[str, str]:
-            soft = soften_fill(raw, fallback="#2e7d32")
-            bg = _lighten_hex(soft, 0.22)
-            return bg, contrast_fg(bg)
-
-        # canonical name by surname key
-        key_to_name: dict[str, str] = {}
-        for doc in date_doctor.values():
-            key = _doctor_key(doc)
-            if key and key not in key_to_name:
-                key_to_name[key] = doc
-
-        info_meta: list[tuple[Record, str, list[str]]] = []
-        for record in info_records:
-            text = str(record.values.get("Текст") or "").strip()
-            if not text:
-                text = "\n".join(
-                    str(v).strip()
-                    for k, v in record.values.items()
-                    if str(v).strip() and not str(k).startswith("_")
-                )
-            if not text:
-                continue
-            names = _doctor_names_in_text(text)
-            if not names:
-                title = _info_title_line(text)
-                if title and len(title.split()) >= 2:
-                    names = [title]
-            info_meta.append((record, text, names))
-            for name in names:
-                key = _doctor_key(name)
-                if key and key not in key_to_name:
-                    key_to_name[key] = name
-
-        # Fallback: один цвет на врача, если Google ещё не отдал заливку.
-        doctor_colors: dict[str, tuple[str, str]] = {}
-        for key, name in key_to_name.items():
-            doctor_colors[key] = _mark_color(name)
-
+        """Только цвета из Google Sheets (_bg). Без локальных заглушек."""
         day_colors: dict[str, tuple[str, str]] = {}
         info_colors: dict[int, tuple[str, str]] = {}
+        date_bg_counts: dict[str, dict[str, int]] = {}
 
-        for date, doc in date_doctor.items():
-            key = _doctor_key(doc)
-            if key in doctor_colors:
-                day_colors[date] = doctor_colors[key]
+        for record in cal:
+            date = str(record.values.get("Дата") or "").strip()
+            raw_bg = str(record.values.get("_bg") or "").strip()
+            if not date or not raw_bg:
+                continue
+            counts = date_bg_counts.setdefault(date, {})
+            counts[raw_bg] = counts.get(raw_bg, 0) + 1
 
-        # Google Sheets — главный источник цвета дня.
         for date, counts in date_bg_counts.items():
             if not counts:
                 continue
             raw = max(counts.items(), key=lambda item: item[1])[0]
-            day_colors[date] = _soft_pair(raw)
+            day_colors[date] = _soft_sheet_color(raw)
 
-        for record, text, names in info_meta:
+        for record in info_records:
             sheet_bg = str(record.values.get("_bg") or "").strip()
             if sheet_bg:
-                info_colors[id(record)] = _soft_pair(sheet_bg)
-                continue
-
-            blob = text.lower().replace("ё", "е")
-            linked: list[str] = []
-            chosen_key = ""
-
-            for name in names:
-                key = _doctor_key(name)
-                if not key:
-                    continue
-                for date, doc in date_doctor.items():
-                    if _doctor_key(doc) == key:
-                        linked.append(date)
-                if not linked and key in blob:
-                    linked = _dates_mentioned(text)
-                if linked:
-                    chosen_key = key
-                    break
-
-            if not linked:
-                for key, doc_name in key_to_name.items():
-                    if key and key in blob:
-                        linked = [
-                            date for date, d in date_doctor.items() if _doctor_key(d) == key
-                        ]
-                        if not linked:
-                            linked = _dates_mentioned(text)
-                        if linked:
-                            chosen_key = key
-                            break
-
-            if chosen_key and chosen_key in doctor_colors:
-                color = doctor_colors[chosen_key]
-                # Если у связанных дней уже есть Google-цвет — берём его для блока.
-                for date in linked:
-                    if date in day_colors and date in date_bg_counts:
-                        color = day_colors[date]
-                        break
-                info_colors[id(record)] = color
-                for date in linked:
-                    if date not in date_bg_counts:
-                        day_colors[date] = color
+                info_colors[id(record)] = _soft_sheet_color(sheet_bg)
 
         return day_colors, info_colors
 
