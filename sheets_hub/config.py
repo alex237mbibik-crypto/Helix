@@ -440,17 +440,24 @@ def usable_refs(refs: list[SheetRef]) -> list[SheetRef]:
     return [item for item in refs if not item.is_placeholder()]
 
 
-def _ref_identity(ref: SheetRef) -> tuple[str, str]:
+def _ref_identity(ref: SheetRef) -> tuple[str, str, str, str, str]:
+    """Уникальность строки реестра: одна ссылка может быть у нескольких услуг/адресов."""
     try:
         sid = ref.normalized_id()
     except ValueError:
         sid = re.sub(r"\s+", "", ref.spreadsheet_id or "")
-    return sid, (ref.sheet or "").strip().lower()
+    return (
+        sid,
+        (ref.sheet or "").strip().lower(),
+        (ref.service or "").strip().lower(),
+        (ref.address or "").strip().lower(),
+        (ref.name or "").strip().lower(),
+    )
 
 
 def merge_tables(sources: list[SheetRef], destinations: list[SheetRef]) -> list[SheetRef]:
-    """Один список: читаем и пишем в те же таблицы. Пустые PASTE_ не прячут заполненные."""
-    merged: dict[tuple[str, str], SheetRef] = {}
+    """Один список таблиц. Одинаковая ссылка + разная услуга/адрес — это разные строки."""
+    merged: dict[tuple[str, str, str, str, str], SheetRef] = {}
     for ref in [*usable_refs(sources), *usable_refs(destinations)]:
         key = _ref_identity(ref)
         existing = merged.get(key)
