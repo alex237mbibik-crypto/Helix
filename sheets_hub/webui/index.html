@@ -416,12 +416,12 @@
     if (document.activeElement === el) return;
     const cur = current || "";
     const next = ["", ...(values || [])];
-    if (cur && !next.includes(cur)) next.push(cur);
+    // Не оставляем устаревшее значение вне каскада — иначе «залипает» старый адрес.
     const same =
       el.options.length === next.length &&
       Array.from(el.options).every((o, i) => o.value === next[i]);
     if (same) {
-      el.value = cur;
+      el.value = next.includes(cur) ? cur : "";
       return;
     }
     el.innerHTML = "";
@@ -432,6 +432,7 @@
       if (v === cur) o.selected = true;
       el.appendChild(o);
     });
+    if (cur && !next.includes(cur)) el.value = "";
   }
 
   function renderCalendar(cal) {
@@ -799,8 +800,15 @@
     });
   });
 
-  ["fName", "fService", "fCity", "fAddress", "fSheet"].forEach((id) => {
-    document.getElementById(id).addEventListener("change", pushFilters);
+  const FILTER_CASCADE = ["fName", "fService", "fCity", "fAddress", "fSheet"];
+  FILTER_CASCADE.forEach((id, idx) => {
+    document.getElementById(id).addEventListener("change", () => {
+      for (let j = idx + 1; j < FILTER_CASCADE.length; j++) {
+        const el = document.getElementById(FILTER_CASCADE[j]);
+        if (el) el.value = "";
+      }
+      pushFilters();
+    });
   });
   let searchTimer = null;
   document.getElementById("fSearch").addEventListener("input", () => {

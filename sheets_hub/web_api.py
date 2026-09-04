@@ -258,10 +258,17 @@ class HelixApi:
         }
 
     def _selected_sources(self) -> list[SheetRef]:
-        # Как в CTk: одна активная таблица, иначе клиент тянет всё подряд.
+        # Одна активная таблица. Не подставляем «первую попавшуюся», если фильтры
+        # заданы, но ничего не совпало — иначе скачет на Свердлова и т.п.
         matched = self._filter_tables()
         if matched:
             return [matched[0]]
+        any_filter = any(
+            (self.filters.get(k) or "").strip()
+            for k in ("name", "service", "city", "address")
+        )
+        if any_filter:
+            return []
         tables = [ref for ref in self._tables() if not ref.is_placeholder()]
         return [tables[0]] if tables else []
 
@@ -592,17 +599,20 @@ class HelixApi:
 
     def set_filters(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         data = payload or {}
-        prev_top = {
-            k: (self.filters.get(k) or "") for k in ("name", "service", "city", "address")
-        }
-        for key in ("name", "service", "city", "address", "sheet", "search"):
+        cascade = ("name", "service", "city", "address")
+        prev = {k: (self.filters.get(k) or "") for k in cascade}
+        for key in (*cascade, "sheet", "search"):
             if key in data:
                 self.filters[key] = str(data.get(key) or "").strip()
-        top_changed = any(
-            (self.filters.get(k) or "") != prev_top[k] for k in prev_top
-        )
-        # Смена таблицы — сбрасываем лист, reload выставит месяц заново.
-        if top_changed:
+        # Смена верхнего фильтра → все последующие в «—», иначе тянется старая таблица.
+        changed_at: int | None = None
+        for idx, key in enumerate(cascade):
+            if (self.filters.get(key) or "") != prev[key]:
+                changed_at = idx
+                break
+        if changed_at is not None:
+            for later in cascade[changed_at + 1 :]:
+                self.filters[later] = ""
             self.filters["sheet"] = ""
         self._apply_preferred_sheet()
         self._persist_ui_cache()
@@ -635,7 +645,14 @@ class HelixApi:
             sources = self._selected_sources()
             if not sources:
                 self.records = []
-                self.status = "Нет таблиц. Откройте настройки и загрузите список из облака."
+                any_filter = any(
+                    (self.filters.get(k) or "").strip()
+                    for k in ("name", "service", "city", "address")
+                )
+                if any_filter:
+                    self.status = "Нет таблицы по выбранным фильтрам — уточните адрес или сбросьте «—»."
+                else:
+                    self.status = "Нет таблиц. Откройте настройки и загрузите список из облака."
                 return self.snapshot()
             if sync_registry and self._registry_ready():
                 try:
