@@ -134,6 +134,69 @@ def soften_fill(bg_hex: str, *, fallback: str = "#1b5e20") -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
+def _color_bounds_from_records(
+    records: list[Record],
+) -> tuple[int, int, list[int]]:
+    """Строки и колонки, для которых реально нужны цвета (узкий запрос)."""
+    cols: set[int] = set()
+    rows: list[int] = []
+    for record in records:
+        if record.layout == "calendar":
+            col = record.col_index.get("Клиент")
+        else:
+            col = record.col_index.get("Текст")
+        if col:
+            try:
+                cols.add(int(col))
+            except (TypeError, ValueError):
+                pass
+        if record.row:
+            try:
+                rows.append(int(record.row))
+            except (TypeError, ValueError):
+                pass
+    if not rows:
+        return 1, MAX_SHEET_ROWS, sorted(cols)
+    row_min = max(1, min(rows) - 1)  # чуть выше — заголовок/врач
+    row_max = min(MAX_SHEET_ROWS, max(rows) + 1)
+    return row_min, row_max, sorted(cols)
+
+
+def _merge_col_spans(cols: list[int]) -> list[tuple[int, int]]:
+    """Склеить соседние колонки в отрезки (B:D, F:F, …)."""
+    if not cols:
+        return []
+    ordered = sorted(set(cols))
+    spans: list[tuple[int, int]] = []
+    start = prev = ordered[0]
+    for col in ordered[1:]:
+        if col <= prev + 1:
+            prev = col
+            continue
+        spans.append((start, prev))
+        start = prev = col
+    spans.append((start, prev))
+    return spans
+
+
+def _parse_grid_colors(data: dict) -> dict[tuple[int, int], str]:
+    colors: dict[tuple[int, int], str] = {}
+    sheets = data.get("sheets") or []
+    if not sheets:
+        return colors
+    for grid in sheets[0].get("data") or []:
+        start_row = int(grid.get("startRow") or 0)
+        start_col = int(grid.get("startColumn") or 0)
+        for r_idx, row in enumerate(grid.get("rowData") or []):
+            values = row.get("values") or []
+            for c_idx, cell in enumerate(values):
+                fmt = cell.get("effectiveFormat") or cell.get("userEnteredFormat") or {}
+                hex_color = _rgb_dict_to_hex(fmt.get("backgroundColor"))
+                if hex_color:
+                    colors[(start_row + r_idx + 1, start_col + c_idx + 1)] = hex_color
+    return colors
+
+
 def _fetch_sheet_colors(
     credentials_path: Path,
     spreadsheet_id: str,
@@ -141,30 +204,44 @@ def _fetch_sheet_colors(
     *,
     max_rows: int = MAX_SHEET_ROWS,
     max_cols: int = 40,
+    row_start: int | None = None,
+    row_end: int | None = None,
+    cols: list[int] | None = None,
     allow_stale: bool = False,
+    force: bool = False,
 ) -> dict[tuple[int, int], str]:
-    """Цвета заливки ячеек через Sheets API includeGridData."""
+    """Цвета заливки — только нужные колонки/строки (быстрее полного листа)."""
     title = (sheet or "").strip() or "Sheet1"
     cache_key = f"{spreadsheet_id}|{title}"
     now = time.time()
     cached = _COLOR_CACHE.get(cache_key)
-    if cached and (now - cached[0]) < _COLOR_CACHE_TTL_SEC:
+    if not force and cached and (now - cached[0]) < _COLOR_CACHE_TTL_SEC:
         return cached[1]
     if allow_stale and cached and (now - cached[0]) < _COLOR_CACHE_STALE_SEC:
         return cached[1]
 
     safe = title.replace("'", "''")
-    cell_range = f"'{safe}'!A1:{_col_to_a1(max_cols)}{max_rows}"
+    r0 = max(1, int(row_start or 1))
+    r1 = max(r0, min(MAX_SHEET_ROWS, int(row_end or max_rows)))
+    wanted = [c for c in (cols or []) if isinstance(c, int) and c >= 1]
+    if wanted:
+        spans = _merge_col_spans(wanted)
+        a1_ranges = [
+            f"'{safe}'!{_col_to_a1(a)}{r0}:{_col_to_a1(b)}{r1}" for a, b in spans
+        ]
+    else:
+        a1_ranges = [f"'{safe}'!A{r0}:{_col_to_a1(max_cols)}{r1}"]
+
     fields = (
+        "sheets.data.startRow,sheets.data.startColumn,"
         "sheets.data.rowData.values.effectiveFormat.backgroundColor,"
         "sheets.data.rowData.values.userEnteredFormat.backgroundColor"
     )
     token = _access_token(credentials_path)
+    ranges_q = "&".join(f"ranges={quote(r, safe='')}" for r in a1_ranges)
     url = (
         f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}"
-        f"?includeGridData=true"
-        f"&ranges={quote(cell_range, safe='')}"
-        f"&fields={quote(fields, safe='')}"
+        f"?includeGridData=true&{ranges_q}&fields={quote(fields, safe='')}"
     )
     data: dict = {}
     try:
@@ -174,7 +251,7 @@ def _fetch_sheet_colors(
             response = requests.get(
                 url,
                 headers={"Authorization": f"Bearer {token}"},
-                timeout=12,
+                timeout=6,
                 verify=False,
             )
             response.raise_for_status()
@@ -182,21 +259,14 @@ def _fetch_sheet_colors(
         except Exception:
             return cached[1] if cached else {}
 
-    colors: dict[tuple[int, int], str] = {}
-    sheets = data.get("sheets") or []
-    if not sheets:
-        return cached[1] if cached else {}
-    grid = (sheets[0].get("data") or [{}])[0]
-    for r_idx, row in enumerate(grid.get("rowData") or []):
-        values = row.get("values") or []
-        for c_idx, cell in enumerate(values):
-            fmt = cell.get("effectiveFormat") or cell.get("userEnteredFormat") or {}
-            hex_color = _rgb_dict_to_hex(fmt.get("backgroundColor"))
-            if hex_color:
-                colors[(r_idx + 1, c_idx + 1)] = hex_color
+    colors = _parse_grid_colors(data)
     if colors:
-        _COLOR_CACHE[cache_key] = (now, colors)
-    return colors
+        # Узкий ответ мержим с кэшем — не теряем старые ячейки вне диапазона.
+        merged = dict(cached[1]) if cached else {}
+        merged.update(colors)
+        _COLOR_CACHE[cache_key] = (now, merged)
+        return merged
+    return cached[1] if cached else {}
 
 
 def enrich_records_with_sheet_colors(
@@ -1418,8 +1488,8 @@ class SheetsClient:
             raise errors[0]
         raise SheetsError(f"Не удалось прочитать «{source.name}»")
 
-    def _attach_sheet_colors(self, records: list[Record]) -> None:
-        """Подтянуть заливку ячеек (цвет врача) — мягко, без падения чтения."""
+    def _attach_sheet_colors(self, records: list[Record], *, force: bool = False) -> None:
+        """Подтянуть заливку ячеек — только нужные колонки/строки."""
         if not records:
             return
         by_sheet: dict[tuple[str, str], list[Record]] = {}
@@ -1429,7 +1499,16 @@ class SheetsClient:
 
         def one(sid: str, title: str, group: list[Record]) -> None:
             try:
-                colors = _fetch_sheet_colors(self._credentials_path, sid, title)
+                row_start, row_end, cols = _color_bounds_from_records(group)
+                colors = _fetch_sheet_colors(
+                    self._credentials_path,
+                    sid,
+                    title,
+                    row_start=row_start,
+                    row_end=row_end,
+                    cols=cols or None,
+                    force=force,
+                )
                 enrich_records_with_sheet_colors(group, colors)
             except Exception:
                 pass

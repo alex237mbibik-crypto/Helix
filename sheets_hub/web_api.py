@@ -411,6 +411,8 @@ class HelixApi:
         *,
         day_colors: dict[str, tuple[str, str]] | None = None,
     ) -> dict[str, Any]:
+        from sheets_hub.client import contrast_fg, soften_fill
+
         status = record.values.get("Статус", "")
         client = record.values.get("Клиент", "").strip()
         phone = record.values.get("Телефон", "").strip()
@@ -428,10 +430,16 @@ class HelixApi:
             label, css = "запись", "free"
             bg, fg = "", ""
         if css not in {"blocked", "lock"}:
-            date = str(record.values.get("Дата") or "").strip()
-            mark = (day_colors or {}).get(date)
-            if mark and mark[0]:
-                bg, fg = mark
+            sheet_bg = str(record.values.get("_bg") or "").strip()
+            if sheet_bg:
+                soft = soften_fill(sheet_bg, fallback="#2e7d32")
+                bg = _lighten_hex(soft, 0.22)
+                fg = contrast_fg(bg)
+            else:
+                date = str(record.values.get("Дата") or "").strip()
+                mark = (day_colors or {}).get(date)
+                if mark and mark[0]:
+                    bg, fg = mark
         return {
             "time": record.values.get("Время", ""),
             "date": record.values.get("Дата", ""),
@@ -452,13 +460,15 @@ class HelixApi:
         self, cal: list[Record], info_records: list[Record]
     ) -> tuple[dict[str, tuple[str, str]], dict[int, tuple[str, str]]]:
         """
-        Один цвет на врача — все его дни и блок в «Общей информации» совпадают.
-        Без медленного Google color API.
+        Цвета смены: сначала заливка из Google Sheets (_bg), иначе стабильный цвет врача.
         """
+        from sheets_hub.client import contrast_fg, soften_fill
+
         dates = list(
             dict.fromkeys(str(r.values.get("Дата") or "").strip() for r in cal if r.values.get("Дата"))
         )
         date_doctor: dict[str, str] = {}
+        date_bg_counts: dict[str, dict[str, int]] = {}
         for record in cal:
             date = str(record.values.get("Дата") or "").strip()
             if not date:
@@ -466,6 +476,10 @@ class HelixApi:
             doc = str(record.values.get("_doctor") or "").strip()
             if doc and date not in date_doctor:
                 date_doctor[date] = doc
+            raw_bg = str(record.values.get("_bg") or "").strip()
+            if raw_bg:
+                counts = date_bg_counts.setdefault(date, {})
+                counts[raw_bg] = counts.get(raw_bg, 0) + 1
 
         weekday_tokens = (
             ("понедельник", "пн"),
@@ -499,6 +513,11 @@ class HelixApi:
                     found.append(date)
             return found
 
+        def _soft_pair(raw: str) -> tuple[str, str]:
+            soft = soften_fill(raw, fallback="#2e7d32")
+            bg = _lighten_hex(soft, 0.22)
+            return bg, contrast_fg(bg)
+
         # canonical name by surname key
         key_to_name: dict[str, str] = {}
         for doc in date_doctor.values():
@@ -528,7 +547,7 @@ class HelixApi:
                 if key and key not in key_to_name:
                     key_to_name[key] = name
 
-        # Один цвет на врача (не на день!).
+        # Fallback: один цвет на врача, если Google ещё не отдал заливку.
         doctor_colors: dict[str, tuple[str, str]] = {}
         for key, name in key_to_name.items():
             doctor_colors[key] = _mark_color(name)
@@ -536,14 +555,24 @@ class HelixApi:
         day_colors: dict[str, tuple[str, str]] = {}
         info_colors: dict[int, tuple[str, str]] = {}
 
-        # Дни из строки врача на листе.
         for date, doc in date_doctor.items():
             key = _doctor_key(doc)
             if key in doctor_colors:
                 day_colors[date] = doctor_colors[key]
 
-        # Справка → врач → все его дни.
+        # Google Sheets — главный источник цвета дня.
+        for date, counts in date_bg_counts.items():
+            if not counts:
+                continue
+            raw = max(counts.items(), key=lambda item: item[1])[0]
+            day_colors[date] = _soft_pair(raw)
+
         for record, text, names in info_meta:
+            sheet_bg = str(record.values.get("_bg") or "").strip()
+            if sheet_bg:
+                info_colors[id(record)] = _soft_pair(sheet_bg)
+                continue
+
             blob = text.lower().replace("ё", "е")
             linked: list[str] = []
             chosen_key = ""
@@ -575,11 +604,16 @@ class HelixApi:
 
             if chosen_key and chosen_key in doctor_colors:
                 color = doctor_colors[chosen_key]
+                # Если у связанных дней уже есть Google-цвет — берём его для блока.
+                for date in linked:
+                    if date in day_colors and date in date_bg_counts:
+                        color = day_colors[date]
+                        break
                 info_colors[id(record)] = color
                 for date in linked:
-                    day_colors[date] = color
+                    if date not in date_bg_counts:
+                        day_colors[date] = color
 
-        # Оставшиеся дни без врача — не красим (белые/дефолтные слоты).
         return day_colors, info_colors
 
     def snapshot(self) -> dict[str, Any]:
@@ -760,10 +794,10 @@ class HelixApi:
         data = payload if isinstance(payload, dict) else {}
         fast = bool(data.get("fast", True))
         sync_registry = bool(data.get("sync_registry", False))
-        # Цвета ячеек больше не качаем с Google API — из‑за них UI зависал.
-        # Подпись врача по дням берём из строки листа / кэша (см. day_doctors).
+        # cache — мгновенно из памяти; fetch — узкий запрос к Google после CSV;
+        # skip — без цветов.
         colors_mode = str(data.get("colors") or "cache").strip().lower()
-        if colors_mode not in {"skip", "cache"}:
+        if colors_mode not in {"skip", "cache", "fetch"}:
             colors_mode = "cache"
         refresh_sheets = bool(data.get("refresh_sheets", False))
         if not self.client:
@@ -823,7 +857,7 @@ class HelixApi:
                 if not known_sheet and sheet_titles:
                     self.filters["sheet"] = sheet_titles[0]
                     self._apply_preferred_sheet()
-            # Цвета никогда не качаем на UI-потоке — только кэш или фон.
+            # CSV сразу; цвета Google — отдельно (узкий диапазон), чтобы UI не ждал.
             raw, errors = self.client.fetch_all(
                 sources,
                 include_colors=False,
@@ -843,6 +877,15 @@ class HelixApi:
                     self.client.apply_cached_colors(self.records)
                 except Exception:
                     pass
+            elif colors_mode == "fetch":
+                try:
+                    self.client.apply_cached_colors(self.records)
+                except Exception:
+                    pass
+                try:
+                    self.client._attach_sheet_colors(self.records, force=True)
+                except Exception:
+                    pass
             self._sync_sheet_filter(sheet_titles)
             if errors:
                 self.status = "; ".join(errors[:2])
@@ -859,6 +902,23 @@ class HelixApi:
                 )
         except Exception as exc:
             self.status = str(exc).split("\n")[0]
+        finally:
+            self._lock.release()
+        return self.snapshot()
+
+    def fetch_colors(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Догрузить заливки Google по узкому диапазону — после быстрого CSV."""
+        data = payload if isinstance(payload, dict) else {}
+        force = bool(data.get("force", True))
+        if not self.client or not self.records:
+            return self.snapshot()
+        got_lock = self._lock.acquire(blocking=False)
+        if not got_lock:
+            return self.snapshot()
+        try:
+            self.client._attach_sheet_colors(self.records, force=force)
+        except Exception:
+            pass
         finally:
             self._lock.release()
         return self.snapshot()

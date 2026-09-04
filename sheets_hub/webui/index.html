@@ -658,12 +658,15 @@
     }
     if (full) state.lastCalSig = "";
     try {
+      // 1) Быстрый CSV + кэш цветов
       await call("reload", {
         fast: true,
         sync_registry: false,
         colors: "cache",
         refresh_sheets: false,
       });
+      // 2) Узкий запрос заливок Google — не блокирует первый кадр
+      call("fetch_colors", { force: !!full }).catch(() => {});
     } finally {
       state.busy = false;
       if (btn) {
@@ -933,7 +936,7 @@
           sync_registry: true,
           colors: "cache",
           background: true,
-        });
+        }).then(() => call("fetch_colors", { force: false }).catch(() => {}));
       } else {
         refresh(false);
       }
