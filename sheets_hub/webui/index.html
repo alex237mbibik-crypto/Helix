@@ -29,8 +29,6 @@
       box-shadow: 0 12px 30px -8px rgba(0, 20, 40, 0.08), 0 4px 12px rgba(0, 0, 0, 0.02);
       border: 1px solid rgba(255, 255, 255, 0.7);
       margin-bottom: 1.8rem;
-      content-visibility: auto;
-      contain: layout style;
     }
     .card.hidden { display: none !important; }
     .card-header {
@@ -134,7 +132,27 @@
     .info-toggle:hover { background: #dcebe3; }
     .info-toggle .badge-soft { margin-left: auto; }
     .info-body { display: none; margin-top: 0.9rem; }
-    .info-body.open { display: block; }
+    .info-body.open {
+      display: block;
+      max-height: min(70vh, 900px);
+      overflow-y: auto;
+      padding-right: 0.35rem;
+      -webkit-overflow-scrolling: touch;
+    }
+    .info-body.open::-webkit-scrollbar { width: 10px; }
+    .info-body.open::-webkit-scrollbar-thumb {
+      background: #c5d5cc; border-radius: 20px; border: 2px solid #fff;
+    }
+    .info-block {
+      background: #f0f8f4; border-radius: 24px; padding: 1rem 1.6rem; margin: 0.8rem 0;
+      border-left: 4px solid #2a7d5a; white-space: pre-wrap;
+      overflow-wrap: anywhere; word-break: break-word;
+      line-height: 1.45;
+    }
+    .info-block.has-fill {
+      border-left-color: transparent;
+      font-weight: 500;
+    }
     .btn {
       border: none; background: #f7faf8;
       padding: 0.5rem 1.4rem; border-radius: 60px; font-weight: 500; font-size: 0.85rem;
@@ -155,14 +173,6 @@
     .service-account {
       background: #eaf0f8; border-radius: 60px; padding: 0.2rem 1.2rem; font-size: 0.8rem;
       display: inline-flex; align-items: center; gap: 0.4rem;
-    }
-    .info-block {
-      background: #f0f8f4; border-radius: 24px; padding: 1rem 1.6rem; margin: 0.8rem 0;
-      border-left: 4px solid #2a7d5a; white-space: pre-wrap;
-    }
-    .info-block.has-fill {
-      border-left-color: transparent;
-      font-weight: 500;
     }
     .text-muted { color: #4e6d8a; }
     .fw-500 { font-weight: 500; }

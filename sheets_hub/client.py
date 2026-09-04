@@ -64,8 +64,10 @@ _PS_TIMEOUT_SEC = 8
 _PS_SUBPROCESS_TIMEOUT = 10
 _TOKEN_URL = "https://oauth2.googleapis.com/token"
 _SHEETS_VALUES_URL = "https://sheets.googleapis.com/v4/spreadsheets/{sid}/values/{range}"
-# Больше 38 строк календаря на практике не нужно — быстрее загрузка и легче UI.
+# Календарь обычно укладывается в ~38 строк; справка/услуги ниже сетки — чаще длиннее.
 MAX_SHEET_ROWS = 38
+MAX_INFO_SHEET_ROWS = 120
+MAX_CALENDAR_WITH_NOTES_ROWS = 80
 # Кэш списка вкладок (htmlview) — не качать при каждом «Обновить».
 _SHEET_LIST_TTL_SEC = 300
 _SHEET_LIST_CACHE: dict[str, tuple[float, list[tuple[str, str]]]] = {}
@@ -156,9 +158,9 @@ def _color_bounds_from_records(
             except (TypeError, ValueError):
                 pass
     if not rows:
-        return 1, MAX_SHEET_ROWS, sorted(cols)
+        return 1, MAX_CALENDAR_WITH_NOTES_ROWS, sorted(cols)
     row_min = max(1, min(rows) - 1)  # чуть выше — заголовок/врач
-    row_max = min(MAX_SHEET_ROWS, max(rows) + 1)
+    row_max = min(MAX_INFO_SHEET_ROWS, max(rows) + 1)
     return row_min, row_max, sorted(cols)
 
 
@@ -222,7 +224,7 @@ def _fetch_sheet_colors(
 
     safe = title.replace("'", "''")
     r0 = max(1, int(row_start or 1))
-    r1 = max(r0, min(MAX_SHEET_ROWS, int(row_end or max_rows)))
+    r1 = max(r0, min(MAX_INFO_SHEET_ROWS, int(row_end or max_rows)))
     wanted = [c for c in (cols or []) if isinstance(c, int) and c >= 1]
     if wanted:
         spans = _merge_col_spans(wanted)
@@ -341,10 +343,11 @@ def _public_csv_url(spreadsheet_id: str, sheet: str = "", gid: str = "") -> str:
     return f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export?format=csv"
 
 
-def _parse_csv_text(text: str) -> list[list[str]]:
+def _parse_csv_text(text: str, *, max_rows: int | None = None) -> list[list[str]]:
     rows = list(csv.reader(io.StringIO(text)))
     rows = [[(cell or "").replace("\u202f", " ").strip() for cell in row] for row in rows]
-    return rows[:MAX_SHEET_ROWS]
+    limit = MAX_SHEET_ROWS if max_rows is None else max(1, int(max_rows))
+    return rows[:limit]
 
 
 def _fetch_url_curl(url: str, *, insecure: bool = False) -> str:
@@ -414,7 +417,23 @@ def _fetch_url_requests(url: str, *, verify: bool | str) -> str:
     return resp.content.decode("utf-8-sig", errors="replace")
 
 
-def _fetch_public_csv(spreadsheet_id: str, sheet: str = "", gid: str = "") -> list[list[str]]:
+def _row_limit_for_source(source: SheetRef | None = None, *, sheet_title: str = "") -> int:
+    """Справка/услуги — больше строк; календарь с заметками — средний запас."""
+    title = (sheet_title or (source.sheet if source else "") or "").strip()
+    if source is not None and is_info_ref(source):
+        return MAX_INFO_SHEET_ROWS
+    if is_info_title(title):
+        return MAX_INFO_SHEET_ROWS
+    return MAX_CALENDAR_WITH_NOTES_ROWS
+
+
+def _fetch_public_csv(
+    spreadsheet_id: str,
+    sheet: str = "",
+    gid: str = "",
+    *,
+    max_rows: int | None = None,
+) -> list[list[str]]:
     global _PUBLIC_FETCH_PREF
     resolved_gid = str(gid or "").strip() or _lookup_sheet_gid(spreadsheet_id, sheet)
     url = _public_csv_url(spreadsheet_id, sheet=sheet if not resolved_gid else "", gid=resolved_gid)
@@ -444,11 +463,12 @@ def _fetch_public_csv(spreadsheet_id: str, sheet: str = "", gid: str = "") -> li
     if _PUBLIC_FETCH_PREF:
         attempts.sort(key=lambda item: 0 if item[0] == _PUBLIC_FETCH_PREF else 1)
 
+    limit = MAX_CALENDAR_WITH_NOTES_ROWS if max_rows is None else max(1, int(max_rows))
     errors: list[str] = []
     for label, fetch in attempts:
         try:
             text = fetch()
-            rows = _parse_csv_text(text)
+            rows = _parse_csv_text(text, max_rows=limit)
             if not rows:
                 raise SheetsError("пустой ответ")
             _PUBLIC_FETCH_PREF = label
@@ -1252,27 +1272,28 @@ class SheetsClient:
             )
         return spreadsheet.worksheet(match)
 
-    def _sheet_values(self, worksheet) -> list[list[str]]:
-        # Читаем только первые MAX_SHEET_ROWS строк — меньше трафика и быстрее UI.
+    def _sheet_values(self, worksheet, *, max_rows: int | None = None) -> list[list[str]]:
+        limit = MAX_CALENDAR_WITH_NOTES_ROWS if max_rows is None else max(1, int(max_rows))
+
         def _read() -> list[list[str]]:
             try:
                 values = worksheet.get(
-                    f"A1:ZZ{MAX_SHEET_ROWS}",
+                    f"A1:ZZ{limit}",
                     value_render_option="FORMATTED_VALUE",
                 )
             except TypeError:
-                values = worksheet.get(f"A1:ZZ{MAX_SHEET_ROWS}")
+                values = worksheet.get(f"A1:ZZ{limit}")
             if not values:
                 return []
             return [[(cell or "").strip() if isinstance(cell, str) else str(cell or "") for cell in row] for row in values][
-                :MAX_SHEET_ROWS
+                :limit
             ]
 
         return self._call(_read)
 
     def get_headers(self, ref: SheetRef) -> list[str]:
         worksheet = self._open_worksheet(ref)
-        rows = self._sheet_values(worksheet)
+        rows = self._sheet_values(worksheet, max_rows=_row_limit_for_source(ref))
         if not rows:
             return []
         if is_calendar_matrix(rows):
@@ -1283,7 +1304,8 @@ class SheetsClient:
         spreadsheet_id = source.normalized_id()
         if not rows:
             return []
-        rows = rows[:MAX_SHEET_ROWS]
+        limit = _row_limit_for_source(source)
+        rows = rows[:limit]
 
         parsed = parse_sheet_rows(rows, source, spreadsheet_id)
         if parsed is not None:
@@ -1334,13 +1356,14 @@ class SheetsClient:
             sheet = titles[0]
         elif sheet.lower() in {"", "*", "все", "all", "все листы"}:
             sheet = ""
-        rows = _fetch_public_csv(spreadsheet_id, sheet)
+        limit = _row_limit_for_source(source, sheet_title=sheet)
+        rows = _fetch_public_csv(spreadsheet_id, sheet, max_rows=limit)
         part = replace(source, sheet=sheet or source.sheet or "лист 1")
         return self._records_from_rows(part, rows)
 
     def fetch_source(self, source: SheetRef) -> list[Record]:
         worksheet = self._open_worksheet(source)
-        rows = self._sheet_values(worksheet)
+        rows = self._sheet_values(worksheet, max_rows=_row_limit_for_source(source))
         return self._records_from_rows(source, rows)
 
     def expand_source(self, source: SheetRef) -> list[SheetRef]:
