@@ -898,6 +898,9 @@
       spreadsheet_id: cell.spreadsheet_id,
       sheet: cell.sheet,
       row: cell.row,
+      col: cell.col || 0,
+      date: cell.date || "",
+      time: cell.time || "",
     });
     if (!res || res.ok === false) {
       alert((res && res.error) || "Не удалось открыть слот");
@@ -935,6 +938,9 @@
         spreadsheet_id: slot.spreadsheet_id,
         sheet: slot.sheet,
         row: slot.row,
+        col: slot.col || 0,
+        date: slot.date || "",
+        time: slot.time || "",
         lock_text: lockText,
         lock_prev: lockPrev,
       });
@@ -1082,6 +1088,9 @@
       spreadsheet_id: slot.spreadsheet_id,
       sheet: slot.sheet,
       row: slot.row,
+      col: slot.col || 0,
+      date: slot.date || "",
+      time: slot.time || "",
       client: document.getElementById("bookClient").value,
       pregnant: preg ? preg.value : "",
       freeing: false,
@@ -1105,6 +1114,9 @@
       spreadsheet_id: slot.spreadsheet_id,
       sheet: slot.sheet,
       row: slot.row,
+      col: slot.col || 0,
+      date: slot.date || "",
+      time: slot.time || "",
       freeing: true,
       lock_text: state.lockText,
       lock_prev: state.lockPrev,

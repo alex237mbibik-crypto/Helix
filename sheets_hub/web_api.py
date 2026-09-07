@@ -408,6 +408,7 @@ class HelixApi:
             "bg": bg,
             "fg": fg,
             "row": record.row,
+            "col": int(record.col_index.get("Клиент") or 0),
             "sheet": record.sheet,
             "spreadsheet_id": record.spreadsheet_id,
             "source_name": record.source_name,
@@ -712,9 +713,24 @@ class HelixApi:
             booking = [item for item in raw if item.kind != KIND_INFO]
             self.records = explode_records(booking)
             infos = [i for i in raw if i.kind == KIND_INFO or is_info_title(i.sheet)]
-            seen = {(r.spreadsheet_id, r.sheet, r.row) for r in self.records}
+            seen = {
+                (
+                    r.spreadsheet_id,
+                    r.sheet,
+                    r.row,
+                    int(r.col_index.get("Клиент") or r.col_index.get("Текст") or 0),
+                    r.kind,
+                )
+                for r in self.records
+            }
             for item in infos:
-                key = (item.spreadsheet_id, item.sheet, item.row)
+                key = (
+                    item.spreadsheet_id,
+                    item.sheet,
+                    item.row,
+                    int(item.col_index.get("Клиент") or item.col_index.get("Текст") or 0),
+                    item.kind,
+                )
                 if key not in seen:
                     self.records.append(item)
                     seen.add(key)
@@ -778,6 +794,9 @@ class HelixApi:
             str(data.get("spreadsheet_id") or ""),
             str(data.get("sheet") or ""),
             int(data.get("row") or 0),
+            col=int(data.get("col") or 0),
+            date=str(data.get("date") or ""),
+            time=str(data.get("time") or ""),
         )
         if record is None:
             return {"ok": False, "error": "Слот не найден — обновите календарь"}
@@ -849,6 +868,9 @@ class HelixApi:
             "spreadsheet_id": record.spreadsheet_id,
             "sheet": record.sheet,
             "row": record.row,
+            "col": int(record.col_index.get("Клиент") or 0),
+            "date": str(record.values.get("Дата") or ""),
+            "time": str(record.values.get("Время") or ""),
             "lock_text": lock_text,
             "lock_prev": lock_prev,
         }
@@ -873,6 +895,9 @@ class HelixApi:
             str(data.get("spreadsheet_id") or (self._active_lock or {}).get("spreadsheet_id") or ""),
             str(data.get("sheet") or (self._active_lock or {}).get("sheet") or ""),
             int(data.get("row") or (self._active_lock or {}).get("row") or 0),
+            col=int(data.get("col") or (self._active_lock or {}).get("col") or 0),
+            date=str(data.get("date") or (self._active_lock or {}).get("date") or ""),
+            time=str(data.get("time") or (self._active_lock or {}).get("time") or ""),
         )
         self._active_lock = None
         if not self.client or record is None or not lock_text:
@@ -899,14 +924,66 @@ class HelixApi:
         text = (self.config.registry_spreadsheet_id or "").strip()
         return bool(text) and not text.upper().startswith("PASTE_")
 
-    def _find_record(self, spreadsheet_id: str, sheet: str, row: int) -> Record | None:
+    def _find_record(
+        self,
+        spreadsheet_id: str,
+        sheet: str,
+        row: int,
+        *,
+        col: int = 0,
+        date: str = "",
+        time: str = "",
+    ) -> Record | None:
+        """Найти слот. В сетке на одной строке несколько дней — нужен col/дата (для любой таблицы)."""
+        sid = str(spreadsheet_id or "")
+        title = str(sheet or "")
+        row_n = int(row or 0)
+        col_n = int(col or 0)
+        date_s = str(date or "").strip()
+        time_s = str(time or "").strip()
+        time_short = _short_time(time_s) if time_s else ""
+
+        candidates: list[Record] = []
         for record in self.records:
-            if (
-                record.spreadsheet_id == spreadsheet_id
-                and record.sheet == sheet
-                and record.row == int(row)
-            ):
+            if record.layout == "info":
+                continue
+            if record.spreadsheet_id != sid or (record.sheet or "") != title:
+                continue
+            if record.row != row_n:
+                continue
+            candidates.append(record)
+        if not candidates:
+            return None
+
+        def _time_matches(record: Record) -> bool:
+            if not time_s:
+                return True
+            raw = str(record.values.get("Время") or "").strip()
+            if raw == time_s:
+                return True
+            if time_short and _short_time(raw) == time_short:
+                return True
+            return False
+
+        if col_n:
+            for record in candidates:
+                slot_col = int(
+                    record.col_index.get("Клиент")
+                    or record.col_index.get("Текст")
+                    or 0
+                )
+                if slot_col == col_n:
+                    return record
+        if date_s or time_s:
+            for record in candidates:
+                if date_s and str(record.values.get("Дата") or "").strip() != date_s:
+                    continue
+                if not _time_matches(record):
+                    continue
                 return record
+        # Без col/даты — только если на строке один слот (не сетка дней).
+        if len(candidates) == 1:
+            return candidates[0]
         return None
 
     def book_slot(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -917,6 +994,9 @@ class HelixApi:
             str(data.get("spreadsheet_id") or ""),
             str(data.get("sheet") or ""),
             int(data.get("row") or 0),
+            col=int(data.get("col") or 0),
+            date=str(data.get("date") or ""),
+            time=str(data.get("time") or ""),
         )
         if record is None:
             return {"ok": False, "error": "Слот не найден — обновите календарь"}
