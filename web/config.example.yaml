@@ -1,0 +1,35 @@
+# credentials.json — вход в Nextcloud (url / username / app_password).
+# Пароль приложения: Nextcloud → Аватар → Настройки → Безопасность.
+#
+# registry — служебный .xlsx на Nextcloud с общим списком рабочих таблиц.
+# Пример пути: SheetsHub/registry.xlsx (относительно Files пользователя).
+# Лист SheetsHub создаётся сам при первом сохранении.
+#
+# sources ниже — необязательный локальный кэш; после настройки registry
+# список всегда берётся из облака.
+
+credentials: credentials.json
+
+registry:
+  spreadsheet_id: SheetsHub/registry.xlsx
+  sheet: SheetsHub
+
+sources: []
+
+# В каждой таблице заполняйте name / service / city / address —
+# по ним работает фильтр Услуга → Город → Адрес в программе.
+# spreadsheet_id — путь к .xlsx в Nextcloud Files, например:
+#   Calendars/Minsk-Gynecology.xlsx
+
+destinations: []
+
+# Уведомления в Telegram при записи клиента в календаре.
+telegram:
+  enabled: false
+  bot_token: "PASTE_BOT_TOKEN_HERE"
+  chat_id: "PASTE_CHAT_ID_HERE"
+
+# Кнопка «Таблицы» скрыта — открыть окно: Ctrl+Shift+T
+ui:
+  show_tables_button: false
+  tables_password: ""

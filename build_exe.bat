@@ -19,7 +19,8 @@ if exist packaging\start_SheetsHub.bat copy /Y packaging\start_SheetsHub.bat dis
 if exist packaging\Helix_Front.html copy /Y packaging\Helix_Front.html dist\SheetsHub\ >nul
 echo.
 echo Готово: dist\SheetsHub\SheetsHub.exe
-echo Интерфейс: HTML Helix (webui). Старый UI: set SHEETS_HUB_UI=ctk
+echo Exe = desktop-окно. Веб из исходников: python -m sheets_hub
+echo Старый UI: set SHEETS_HUB_UI=ctk
 echo Нужна вся папка dist\SheetsHub вместе с _internal
 if exist dist\SheetsHub\credentials.json echo credentials.json уже лежит в папке сборки
 echo Таблицы нужно открыть для client_email из credentials.json (Редактор)

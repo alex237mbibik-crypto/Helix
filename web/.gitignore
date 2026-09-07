@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+credentials.json
+config.yaml
+ui_cache.json
+.DS_Store
