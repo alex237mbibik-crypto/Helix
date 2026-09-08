@@ -4,6 +4,7 @@ import re
 import sys
 import threading
 from pathlib import Path
+from random import randint
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
@@ -52,10 +53,12 @@ SLOT_BLOCKED = "#eef2f6"
 SLOT_LOCK = "#fff3cd"
 SLOT_TIME = "#e8f2ec"
 SLOT_OUTLINE = "#c8d8d0"
-AUTO_REFRESH_MS = 30_000
+AUTO_REFRESH_MS = 90_000
 # Полный sync списка таблиц не на каждое автообновление — иначе тормозит календарь.
-# Раз в N автообновлений тянем общий список таблиц (30с × N).
-REGISTRY_EVERY_N_REFRESH = 2
+# При многих ПК частый sync бьёт в квоту Google. Раз в N автообновлений (~15 мин).
+REGISTRY_EVERY_N_REFRESH = 10
+# Разброс старта автообновления, чтобы 10 ПК не били Google одновременно.
+AUTO_REFRESH_JITTER_MS = 30_000
 CAL_TIME_W = 88
 CAL_DATE_W = 160
 CAL_ROW_H = 44
@@ -1682,7 +1685,9 @@ class SheetsHubApp(ctk.CTk):
                 self.after_cancel(self._auto_refresh_after_id)
             except Exception:
                 pass
-        self._auto_refresh_after_id = self.after(AUTO_REFRESH_MS, self._auto_refresh_tick)
+        # Jitter: иначе все ПК обновляются в один момент и Google/сеть «ложатся».
+        delay = AUTO_REFRESH_MS + randint(0, AUTO_REFRESH_JITTER_MS)
+        self._auto_refresh_after_id = self.after(delay, self._auto_refresh_tick)
 
     def _auto_refresh_tick(self) -> None:
         self._auto_refresh_after_id = None

@@ -8,8 +8,10 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import tempfile
+import copy
 from dataclasses import replace
 from pathlib import Path
 from typing import Callable
@@ -80,6 +82,24 @@ _PREFERRED_CALENDAR_SHEET: dict[str, str] = {}
 _COLOR_CACHE: dict[str, tuple[float, dict[tuple[int, int], str]]] = {}
 _COLOR_CACHE_TTL_SEC = 900
 _COLOR_CACHE_STALE_SEC = 3600
+# Короткий кэш CSV-календаря между ПК на одном сервере / частыми refresh.
+# Снижает лавину одинаковых запросов при многих операторах.
+_PUBLIC_LOAD_TTL_SEC = 25.0
+_PUBLIC_LOAD_CACHE: dict[str, tuple[float, list]] = {}
+_PUBLIC_LOAD_LOCK = threading.Lock()
+_PUBLIC_LOAD_INFLIGHT: dict[str, threading.Event] = {}
+
+
+def _invalidate_public_load_cache(spreadsheet_id: str = "") -> None:
+    """Сбросить кэш CSV после записи, чтобы другие окна быстрее увидели слот."""
+    sid = (spreadsheet_id or "").strip()
+    with _PUBLIC_LOAD_LOCK:
+        if not sid:
+            _PUBLIC_LOAD_CACHE.clear()
+            return
+        dead = [key for key in _PUBLIC_LOAD_CACHE if key.startswith(f"{sid}|")]
+        for key in dead:
+            _PUBLIC_LOAD_CACHE.pop(key, None)
 
 
 class SheetsError(Exception):
@@ -1166,11 +1186,11 @@ class SheetsClient:
             except Exception:
                 pass
         retry = Retry(
-            total=1,
-            connect=1,
-            read=1,
-            status=1,
-            backoff_factor=0.3,
+            total=4,
+            connect=2,
+            read=2,
+            status=4,
+            backoff_factor=1.2,
             status_forcelist=(429, 500, 502, 503, 504),
             allowed_methods=False,
             raise_on_status=False,
@@ -1385,6 +1405,62 @@ class SheetsClient:
         return _is_network_error(exc)
 
     def _load_source_public(
+        self,
+        source: SheetRef,
+        *,
+        include_colors: bool = True,
+        fast: bool = False,
+    ) -> list[Record]:
+        """Читает календарь через CSV с коротким общим кэшем (anti-stampede)."""
+        try:
+            sid = source.normalized_id()
+        except Exception:
+            sid = str(source.spreadsheet_id or "")
+        preferred = (_PREFERRED_CALENDAR_SHEET.get(sid, "") or "").strip()
+        if not preferred:
+            wanted = (source.sheet or "").strip()
+            if wanted and wanted.lower() not in ("все", "all", "*"):
+                preferred = wanted
+        cache_key = f"{sid}|{preferred}|colors={1 if include_colors else 0}"
+        now = time.time()
+
+        with _PUBLIC_LOAD_LOCK:
+            hit = _PUBLIC_LOAD_CACHE.get(cache_key)
+            if hit and (now - hit[0]) < _PUBLIC_LOAD_TTL_SEC:
+                return copy.deepcopy(hit[1])
+            waiter = _PUBLIC_LOAD_INFLIGHT.get(cache_key)
+            if waiter is None:
+                waiter = threading.Event()
+                _PUBLIC_LOAD_INFLIGHT[cache_key] = waiter
+                leader = True
+            else:
+                leader = False
+
+        if not leader:
+            # Другой поток уже качает тот же лист — ждём и берём кэш.
+            waiter.wait(timeout=45)
+            with _PUBLIC_LOAD_LOCK:
+                hit = _PUBLIC_LOAD_CACHE.get(cache_key)
+                if hit:
+                    return copy.deepcopy(hit[1])
+            # Кэш не появился — грузим сами.
+            return self._load_source_public_uncached(
+                source, include_colors=include_colors, fast=fast
+            )
+
+        try:
+            loaded = self._load_source_public_uncached(
+                source, include_colors=include_colors, fast=fast
+            )
+            with _PUBLIC_LOAD_LOCK:
+                _PUBLIC_LOAD_CACHE[cache_key] = (time.time(), copy.deepcopy(loaded))
+            return loaded
+        finally:
+            with _PUBLIC_LOAD_LOCK:
+                _PUBLIC_LOAD_INFLIGHT.pop(cache_key, None)
+            waiter.set()
+
+    def _load_source_public_uncached(
         self,
         source: SheetRef,
         *,
@@ -1749,6 +1825,8 @@ class SheetsClient:
                 f"{tip}\n"
                 f"Детали:\n- " + "\n- ".join(errors[:6] or ["нет деталей"])
             )
+
+        _invalidate_public_load_cache(record.spreadsheet_id)
 
         expected = str(cell_value or "").strip()
         if confirm:

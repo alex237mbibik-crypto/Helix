@@ -81,6 +81,7 @@
       -webkit-overflow-scrolling: touch;
       overscroll-behavior: contain;
       border-radius: 12px;
+      border: 1px solid #dce4ef;
     }
     .table-wrap::-webkit-scrollbar { width: 10px; height: 10px; }
     .table-wrap::-webkit-scrollbar-thumb {
@@ -88,17 +89,52 @@
     }
     .table-wrap::-webkit-scrollbar-track { background: transparent; }
     .calendar-table {
-      width: 100%; border-collapse: collapse; font-size: 0.9rem;
-      border: 1px solid #dce4ef; border-radius: 12px; overflow: hidden;
+      width: max-content;
+      min-width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      font-size: 0.9rem;
     }
     .calendar-table th {
       text-align: left; font-weight: 600; color: #1d3a58; padding: 0.7rem 0.8rem;
       background: #e8f2ec; border: 1px solid #c8d8d0; font-size: 0.85rem;
+      position: sticky;
+      top: 0;
+      z-index: 3;
+      box-shadow: 0 1px 0 #c8d8d0;
     }
     .calendar-table td {
       padding: 0.5rem 0.8rem; border: 1px solid #c8d8d0; color: #0f2a44; background: #ffffff;
     }
     .calendar-table tr:nth-child(even) td:not(.slot) { background: #f4f9f6; }
+    /* Колонка «Время» — зафиксирована при горизонтальном скролле */
+    .calendar-table th.time-col,
+    .calendar-table td.time-col {
+      position: sticky;
+      left: 0;
+      z-index: 2;
+      min-width: 4.5rem;
+      width: 4.5rem;
+      text-align: center;
+      background: #e8f2ec;
+      box-shadow: 1px 0 0 #c8d8d0;
+    }
+    .calendar-table td.time-col {
+      font-weight: 600;
+      background: #e8f2ec;
+    }
+    .calendar-table tr:nth-child(even) td.time-col {
+      background: #dcebe3;
+    }
+    /* Угол «Время» — поверх и строки дат, и колонки времени */
+    .calendar-table thead th.time-col {
+      z-index: 5;
+      background: #e8f2ec;
+    }
+    .calendar-table th.date-col {
+      min-width: 7.5rem;
+      white-space: nowrap;
+    }
     .calendar-table td.slot {
       cursor: pointer;
       background: #e8f6ee;
@@ -307,7 +343,7 @@
     </div>
     <div class="table-wrap">
       <table class="calendar-table" id="calTable">
-        <thead><tr><th>Время</th></tr></thead>
+        <thead><tr><th class="time-col">Время</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
@@ -505,6 +541,23 @@
     return window.pywebview && window.pywebview.api;
   }
 
+  const TUTORIAL_HIDE_KEY = "sheets_hub_tutorial_hide";
+
+  function tutorialHiddenLocally() {
+    try {
+      return localStorage.getItem(TUTORIAL_HIDE_KEY) === "1";
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function setTutorialHiddenLocally(hide) {
+    try {
+      if (hide) localStorage.setItem(TUTORIAL_HIDE_KEY, "1");
+      else localStorage.removeItem(TUTORIAL_HIDE_KEY);
+    } catch (_) {}
+  }
+
   function renderTutorialStep() {
     const steps = TUTORIAL_STEPS;
     const idx = Math.max(0, Math.min(state.tutorialStep, steps.length - 1));
@@ -520,7 +573,8 @@
       dots.appendChild(s);
     });
     const hideWrap = document.getElementById("tutorialHideWrap");
-    hideWrap.style.display = step.last ? "flex" : "none";
+    // Галочка доступна на всех шагах — иначе легко закрыть без сохранения.
+    hideWrap.style.display = "flex";
     document.getElementById("tutorialBack").style.visibility = idx === 0 ? "hidden" : "visible";
     const nextBtn = document.getElementById("tutorialNext");
     nextBtn.textContent = step.last ? "Готово" : "Далее";
@@ -536,19 +590,34 @@
     modal.setAttribute("aria-hidden", "false");
   }
 
+  async function persistTutorialHide(hide) {
+    setTutorialHiddenLocally(!!hide);
+    const res = await call("set_tutorial", { hide: !!hide });
+    if (res && res.ok === false) return false;
+    if (res && res.tutorial_hide === false && hide) {
+      // Сервер не подтвердил — локально всё равно прячем, чтобы не доставать пользователя.
+      setTutorialHiddenLocally(true);
+    }
+    return true;
+  }
+
   async function closeTutorial(saveHide) {
     const modal = document.getElementById("tutorialModal");
     modal.classList.remove("open");
     modal.setAttribute("aria-hidden", "true");
-    if (saveHide) {
-      const hide = !!document.getElementById("tutorialHide").checked;
-      await call("set_tutorial", { hide: hide });
+    const hide = !!document.getElementById("tutorialHide").checked;
+    if (saveHide || hide) {
+      await persistTutorialHide(hide);
     }
   }
 
   function maybeShowTutorial(snap) {
+    if (tutorialHiddenLocally()) return;
     const ui = (snap && snap.ui) || (state.data && state.data.ui) || {};
-    if (ui.show_tutorial === false) return;
+    if (ui.show_tutorial === false) {
+      setTutorialHiddenLocally(true);
+      return;
+    }
     openTutorial();
   }
 
@@ -591,9 +660,14 @@
     const table = document.getElementById("calTable");
     const thead = table.querySelector("thead tr");
     const tbody = table.querySelector("tbody");
-    thead.innerHTML = "<th>Время</th>";
+    thead.innerHTML = "";
+    const thTime = document.createElement("th");
+    thTime.className = "time-col";
+    thTime.textContent = "Время";
+    thead.appendChild(thTime);
     (cal.dates || []).forEach((d) => {
       const th = document.createElement("th");
+      th.className = "date-col";
       th.textContent = d;
       const mark = doctorByDate[d];
       if (mark && mark.bg) {
@@ -609,6 +683,7 @@
     times.forEach((t, idx) => {
       const tr = document.createElement("tr");
       const tdTime = document.createElement("td");
+      tdTime.className = "time-col";
       tdTime.textContent = shorts[idx] || t;
       tr.appendChild(tdTime);
       (cal.dates || []).forEach((d) => {
@@ -1169,7 +1244,12 @@
     renderTutorialStep();
   });
   document.getElementById("tutorialSkip").addEventListener("click", async () => {
-    await closeTutorial(false);
+    await closeTutorial(true);
+  });
+  document.getElementById("tutorialHide").addEventListener("change", async (e) => {
+    if (e.target && e.target.checked) {
+      await persistTutorialHide(true);
+    }
   });
 
   async function bootApp() {
@@ -1184,23 +1264,34 @@
       await refresh(false);
     }
     maybeShowTutorial(snap || state.data);
+    // Автообновление реже + разброс по времени: иначе много ПК одновременно
+    // бьют в Google и всё зависает. Цвета — только по кнопке «Обновить».
+    const AUTO_MS = 90000;
+    const AUTO_JITTER_MS = 30000;
     let tick = 0;
-    setInterval(() => {
-      if (document.getElementById("bookModal").classList.contains("open")) return;
-      if (document.getElementById("tutorialModal").classList.contains("open")) return;
-      if (state.busy) return;
-      tick += 1;
-      if (tick % 12 === 0) {
-        call("reload", {
-          fast: true,
-          sync_registry: true,
-          colors: "cache",
-          background: true,
-        }).then(() => call("fetch_colors", { force: false }).catch(() => {}));
-      } else {
-        refresh(false);
-      }
-    }, 30000);
+    function scheduleAuto() {
+      const delay = AUTO_MS + Math.floor(Math.random() * AUTO_JITTER_MS);
+      setTimeout(async () => {
+        try {
+          if (document.hidden) return;
+          if (document.getElementById("bookModal").classList.contains("open")) return;
+          if (document.getElementById("tutorialModal").classList.contains("open")) return;
+          if (state.busy) return;
+          tick += 1;
+          // Реестр таблиц — редко (~15 мин), без fetch_colors.
+          const syncReg = tick % 10 === 0;
+          await call("reload", {
+            fast: true,
+            sync_registry: syncReg,
+            colors: "cache",
+            background: true,
+          });
+        } finally {
+          scheduleAuto();
+        }
+      }, delay);
+    }
+    scheduleAuto();
   }
 
   window.addEventListener("pywebviewready", () => {

@@ -14,6 +14,7 @@ from sheets_hub.config import (
     KIND_INFO,
     SheetRef,
     TelegramConfig,
+    app_root,
     find_credentials_file,
     install_credentials,
     is_info_title,
@@ -75,26 +76,65 @@ def _soft_sheet_color(raw: str) -> tuple[str, str]:
     return bg, contrast_fg(bg)
 
 
+def _ui_cache_candidates() -> list[Path]:
+    """Где может лежать ui_cache: AppData и рядом с программой (exe/репозиторий)."""
+    paths: list[Path] = []
+    for folder in (user_data_dir(), writable_data_dir(), app_root()):
+        try:
+            path = folder / "ui_cache.json"
+        except Exception:
+            continue
+        if path not in paths:
+            paths.append(path)
+    return paths
+
+
 def _ui_cache_path() -> Path:
-    return user_data_dir() / "ui_cache.json"
+    """Основной файл — рядом с credentials, если можно писать; иначе AppData."""
+    primary = writable_data_dir() / "ui_cache.json"
+    return primary
 
 
 def _load_ui_cache() -> dict[str, Any]:
-    path = _ui_cache_path()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    merged: dict[str, Any] = {}
+    for path in _ui_cache_candidates():
+        try:
+            if not path.is_file():
+                continue
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                continue
+            # Поздний файл с tutorial_hide=true важнее пустого старого кэша.
+            for key, value in data.items():
+                if key == "tutorial_hide":
+                    merged[key] = bool(merged.get(key)) or bool(value)
+                elif key == "preferred_sheets" and isinstance(value, dict):
+                    prefs = dict(merged.get("preferred_sheets") or {})
+                    prefs.update({str(k): str(v) for k, v in value.items() if str(k) and str(v)})
+                    merged["preferred_sheets"] = prefs
+                elif key == "filters" and isinstance(value, dict):
+                    if not isinstance(merged.get("filters"), dict):
+                        merged["filters"] = {}
+                    for fk, fv in value.items():
+                        if str(fv or "").strip():
+                            merged["filters"][str(fk)] = str(fv)
+                else:
+                    merged[key] = value
+        except Exception:
+            continue
+    return merged
 
 
 def _save_ui_cache(data: dict[str, Any]) -> None:
-    path = _ui_cache_path()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=0), encoding="utf-8")
-    except Exception:
-        pass
+    payload = dict(data or {})
+    text = json.dumps(payload, ensure_ascii=False, indent=0)
+    # Пишем во все доступные места — чтобы галочка не терялась при смене пути.
+    for path in _ui_cache_candidates():
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        except Exception:
+            continue
 
 
 def _ref_to_dict(ref: SheetRef) -> dict[str, str]:
@@ -547,12 +587,40 @@ class HelixApi:
     def get_state(self) -> dict[str, Any]:
         return self.snapshot()
 
-    def set_tutorial(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    def set_tutorial(self, payload: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
         """Сохранить выбор «не показывать туториал»."""
-        data = payload if isinstance(payload, dict) else {}
-        self._tutorial_hide = bool(data.get("hide"))
+        data: dict[str, Any]
+        if isinstance(payload, dict):
+            data = payload
+        elif payload is None:
+            data = {}
+        else:
+            # pywebview иногда передаёт сразу bool/строку вместо {hide: ...}
+            data = {"hide": payload}
+        if "hide" in kwargs:
+            data = {**data, "hide": kwargs.get("hide")}
+        raw = data.get("hide", False)
+        if isinstance(raw, str):
+            hide = raw.strip().lower() in {"1", "true", "yes", "on", "да"}
+        else:
+            hide = bool(raw)
+        self._tutorial_hide = hide
         self._persist_ui_cache()
-        return {"ok": True, "show_tutorial": not self._tutorial_hide}
+        # Перечитать с диска — убедиться, что запись реально сохранилась.
+        try:
+            saved = bool(_load_ui_cache().get("tutorial_hide"))
+            if hide and not saved:
+                # Повторная попытка прямой записью
+                self._persist_ui_cache()
+                saved = bool(_load_ui_cache().get("tutorial_hide"))
+            self._tutorial_hide = bool(self._tutorial_hide or saved)
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "show_tutorial": not self._tutorial_hide,
+            "tutorial_hide": bool(self._tutorial_hide),
+        }
 
     def connect(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         data = payload if isinstance(payload, dict) else {}
