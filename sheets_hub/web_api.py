@@ -577,8 +577,11 @@ class HelixApi:
             except Exception:
                 pass
             self.status = f"Подключено: {self.client.service_email}"
-            if do_reload:
-                return self.reload({"fast": True, "sync_registry": False})
+            # По умолчанию при подключении тянем список таблиц из облака.
+            if data.get("reload", True) or do_reload:
+                return self.reload(
+                    {"fast": True, "sync_registry": True, "colors": "cache"}
+                )
         except Exception as exc:
             self.client = None
             self.status = str(exc).split("\n")[0]
@@ -654,6 +657,23 @@ class HelixApi:
             self.status = "Обновление ещё идёт…"
             return self.snapshot()
         try:
+            # Сначала облачный реестр — иначе при пустом локальном кэше sync не успевал.
+            if sync_registry and self._registry_ready():
+                try:
+                    self.status = "Загружаю список таблиц из облака…"
+                    remote = self.client.pull_table_registry(
+                        self.config.registry_spreadsheet_id,
+                        self.config.registry_sheet or DEFAULT_REGISTRY_SHEET,
+                    )
+                    if remote:
+                        self.config.sources = remote
+                        self.config.destinations = list(remote)
+                        try:
+                            self._persist()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
             sources = self._selected_sources()
             if not sources:
                 self.records = []
@@ -666,18 +686,6 @@ class HelixApi:
                 else:
                     self.status = "Нет таблиц. Откройте настройки и загрузите список из облака."
                 return self.snapshot()
-            if sync_registry and self._registry_ready():
-                try:
-                    remote = self.client.pull_table_registry(
-                        self.config.registry_spreadsheet_id,
-                        self.config.registry_sheet or DEFAULT_REGISTRY_SHEET,
-                    )
-                    if remote:
-                        self.config.sources = remote
-                        self.config.destinations = list(remote)
-                        sources = self._selected_sources() or sources
-                except Exception:
-                    pass
             self._apply_preferred_sheet()
             sheet_titles: list[str] = []
             sid = ""

@@ -1173,8 +1173,16 @@
   });
 
   async function bootApp() {
-    const snap = await call("connect");
-    await refresh(false);
+    const status = document.getElementById("statusLine");
+    if (status) {
+      status.innerHTML =
+        '<i class="fas fa-cloud-download-alt" style="color:#2a7d5a;"></i> Загружаю таблицы из облака…';
+    }
+    // connect сам тянет реестр из облака и календарь (sync_registry).
+    const snap = await call("connect", { reload: true });
+    if (!(snap && (snap.calendar || snap.status !== undefined))) {
+      await refresh(false);
+    }
     maybeShowTutorial(snap || state.data);
     let tick = 0;
     setInterval(() => {
