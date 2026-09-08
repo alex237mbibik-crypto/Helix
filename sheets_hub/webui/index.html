@@ -257,7 +257,6 @@
     <div class="card-header">
       <i class="fas fa-table"></i>
       <h2>Sheets Hub</h2>
-      <span class="badge-soft" id="badgeMonth"><i class="far fa-calendar-alt"></i> календарь</span>
       <span style="margin-left: auto; font-size: 0.8rem; opacity: 0.7;" id="emailTop">
         <i class="fas fa-cloud"></i> нет ключа
       </span>
@@ -737,8 +736,6 @@
       '<i class="far fa-clock"></i> ' + (cal.slots || 0) + " слотов";
     document.getElementById("chipTitle").innerHTML =
       '<i class="fas fa-user-md"></i> ' + (cal.title || "—");
-    document.getElementById("badgeMonth").innerHTML =
-      '<i class="far fa-calendar-alt"></i> ' + ((cal.dates && cal.dates[0]) || "календарь");
     renderCalendar(cal);
     renderInfo(data.info || []);
 

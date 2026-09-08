@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Sheets Hub · календарь</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" media="print" onload="this.media='all'" />
   <noscript><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" /></noscript>
   <style>
@@ -257,7 +258,6 @@
     <div class="card-header">
       <i class="fas fa-table"></i>
       <h2>Sheets Hub</h2>
-      <span class="badge-soft" id="badgeMonth"><i class="far fa-calendar-alt"></i> календарь</span>
       <span style="margin-left: auto; font-size: 0.8rem; opacity: 0.7;" id="emailTop">
         <i class="fas fa-cloud"></i> нет ключа
       </span>
@@ -737,8 +737,6 @@
       '<i class="far fa-clock"></i> ' + (cal.slots || 0) + " слотов";
     document.getElementById("chipTitle").innerHTML =
       '<i class="fas fa-user-md"></i> ' + (cal.title || "—");
-    document.getElementById("badgeMonth").innerHTML =
-      '<i class="far fa-calendar-alt"></i> ' + ((cal.dates && cal.dates[0]) || "календарь");
     renderCalendar(cal);
     renderInfo(data.info || []);
 
@@ -765,6 +763,18 @@
     }
   }
 
+  function networkErrorText(err) {
+    const msg = String(err || "");
+    if (/Failed to fetch|NetworkError|Load failed|fetch/i.test(msg)) {
+      return (
+        "Нет связи с сервером Sheets Hub.\n" +
+        "Откройте http://127.0.0.1:8790/ и обновите страницу.\n" +
+        "Если уже открыт — подождите: Nextcloud мог временно ограничить запросы."
+      );
+    }
+    return msg;
+  }
+
   async function call(name, payload) {
     const a = api();
     if (a && a[name]) {
@@ -777,9 +787,16 @@
         if (result && (result.calendar || result.status !== undefined)) applyState(result);
         return result;
       } catch (err) {
+        const text = networkErrorText(err);
         const chip = document.getElementById("cloudStatus");
-        if (chip && state.settingsOpen) chip.textContent = String(err);
-        return null;
+        if (chip && state.settingsOpen) chip.textContent = text;
+        const status = document.getElementById("statusLine");
+        if (status) {
+          status.innerHTML =
+            '<i class="fas fa-exclamation-triangle" style="color:#b13e3e;"></i> ' +
+            text.split("\n")[0];
+        }
+        return { ok: false, error: text };
       }
     }
     // Веб-режим: HTTP API вместо pywebview
@@ -794,7 +811,7 @@
       if (!result) {
         const chip = document.getElementById("cloudStatus");
         if (chip && state.settingsOpen) chip.textContent = "ошибка ответа сервера";
-        return null;
+        return { ok: false, error: "Пустой ответ сервера" };
       }
       if (result.error && result.ok === false) {
         const chip = document.getElementById("cloudStatus");
@@ -803,9 +820,16 @@
       if (result.calendar || result.status !== undefined) applyState(result);
       return result;
     } catch (err) {
+      const text = networkErrorText(err);
       const chip = document.getElementById("cloudStatus");
-      if (chip && state.settingsOpen) chip.textContent = String(err);
-      return null;
+      if (chip && state.settingsOpen) chip.textContent = text;
+      const status = document.getElementById("statusLine");
+      if (status) {
+        status.innerHTML =
+          '<i class="fas fa-exclamation-triangle" style="color:#b13e3e;"></i> ' +
+          text.split("\n")[0];
+      }
+      return { ok: false, error: text };
     }
   }
 
@@ -827,7 +851,7 @@
         alert((result && result.error) || "Не удалось загрузить credentials.json");
       }
     } catch (err) {
-      alert(String(err));
+      alert(networkErrorText(err));
     } finally {
       if (chip && state.settingsOpen) {
         chip.innerHTML = '<i class="fas fa-cloud"></i> готово';
@@ -858,15 +882,22 @@
     }
     if (full) state.lastCalSig = "";
     try {
-      // 1) Быстрый CSV + кэш цветов
-      await call("reload", {
+      const res = await call("reload", {
         fast: true,
         sync_registry: false,
         colors: "cache",
         refresh_sheets: false,
       });
-      // 2) Узкий запрос заливок Google — не блокирует первый кадр
-      call("fetch_colors", { force: !!full }).catch(() => {});
+      if (res && res.ok === false && res.error) {
+        if (status) {
+          status.innerHTML =
+            '<i class="fas fa-exclamation-triangle" style="color:#b13e3e;"></i> ' +
+            String(res.error).split("\n")[0];
+        }
+      } else if (full) {
+        // Цвета — только при полном «Обновить», не при каждом смене фильтра.
+        call("fetch_colors", { force: true }).catch(() => {});
+      }
     } finally {
       state.busy = false;
       if (btn) {
@@ -1179,23 +1210,8 @@
     const snap = await call("connect");
     await refresh(false);
     maybeShowTutorial(snap || state.data);
-    let tick = 0;
-    setInterval(() => {
-      if (document.getElementById("bookModal").classList.contains("open")) return;
-      if (document.getElementById("tutorialModal").classList.contains("open")) return;
-      if (state.busy) return;
-      tick += 1;
-      if (tick % 12 === 0) {
-        call("reload", {
-          fast: true,
-          sync_registry: true,
-          colors: "cache",
-          background: true,
-        }).then(() => call("fetch_colors", { force: false }).catch(() => {}));
-      } else {
-        refresh(false);
-      }
-    }, 30000);
+    // Автообновление отключено: каждый reload качает .xlsx с Nextcloud
+    // и легко ловит 429 Too Many Requests. Обновляйте кнопкой «Обновить».
   }
 
   window.addEventListener("pywebviewready", () => {

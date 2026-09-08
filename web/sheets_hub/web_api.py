@@ -240,18 +240,29 @@ class HelixApi:
         names = sorted({r.name.strip() for r in items if r.name.strip()})
         sheets: list[str] = []
         if after_city:
-            # Сначала из уже загруженных слотов — без лишнего htmlview при каждом snapshot.
+            # Сначала из уже загруженных слотов.
             seen: list[str] = []
             for record in self.records:
                 if record.layout == "calendar" and record.sheet and record.sheet not in seen:
                     seen.append(record.sheet)
             sheets = seen
-            if not sheets and self.client:
-                sid = after_city[0].spreadsheet_id
+            sid = after_city[0].spreadsheet_id
+            # Дополняем/берём из кэша вкладок книги (после fetch_all уже есть).
+            if self.client and sid:
                 try:
-                    sheets = self.client.list_calendar_sheet_titles(sid)
+                    from_book = self.client.list_calendar_sheet_titles(sid)
                 except Exception:
-                    sheets = []
+                    from_book = []
+                if from_book:
+                    # Сохраняем порядок книги, не теряем уже виденные.
+                    merged: list[str] = []
+                    for title in from_book:
+                        if title not in merged:
+                            merged.append(title)
+                    for title in sheets:
+                        if title not in merged:
+                            merged.append(title)
+                    sheets = merged
         return {
             "names": names,
             "services": services,
@@ -557,14 +568,29 @@ class HelixApi:
     def connect(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         data = payload if isinstance(payload, dict) else {}
         do_reload = bool(data.get("reload"))
+        # Подтянуть список таблиц с диска — не затирать config старой сессией.
+        try:
+            fresh = load_config()
+            self.config.sources = list(fresh.sources)
+            self.config.destinations = list(fresh.destinations)
+            self.config.registry_spreadsheet_id = fresh.registry_spreadsheet_id
+            self.config.registry_sheet = fresh.registry_sheet
+            self.config.credentials = fresh.credentials
+        except Exception:
+            pass
         path = find_credentials_file(self.config.credentials)
         if path is None:
             self.client = None
-            self.status = f"Нет credentials.json — нужен файл: {writable_data_dir() / 'credentials.json'}"
+            self.status = (
+                f"Нет credentials.json — нужен файл Nextcloud: "
+                f"{writable_data_dir() / 'credentials.json'}"
+            )
             return self.snapshot()
-        if credential_kind(path) != "service_account":
+        if credential_kind(path) != "nextcloud":
             self.client = None
-            self.status = "Нужен JSON сервисного аккаунта (type: service_account)."
+            self.status = (
+                "Нужен JSON Nextcloud (type: nextcloud, url, username, app_password)."
+            )
             return self.snapshot()
         try:
             from sheets_hub.client import SheetsClient
@@ -572,10 +598,6 @@ class HelixApi:
             self.client = SheetsClient(path)
             self.config.credentials = path
             self._apply_cached_preferred()
-            try:
-                self._persist()
-            except Exception:
-                pass
             self.status = f"Подключено: {self.client.service_email}"
             if do_reload:
                 return self.reload({"fast": True, "sync_registry": False})
@@ -640,8 +662,9 @@ class HelixApi:
         if colors_mode not in {"skip", "cache", "fetch"}:
             colors_mode = "cache"
         refresh_sheets = bool(data.get("refresh_sheets", False))
+        del refresh_sheets  # список вкладок всегда обновляем из кэша после fetch
         if not self.client:
-            self.status = "Нет подключения — укажите credentials.json"
+            self.status = "Нет подключения — укажите credentials.json (Nextcloud)"
             return self.snapshot()
         if data.get("background"):
             got_lock = self._lock.acquire(blocking=False)
@@ -694,22 +717,21 @@ class HelixApi:
                 if known_sheet:
                     self.filters["sheet"] = known_sheet
                     self._apply_preferred_sheet()
-            if (not known_sheet) or refresh_sheets:
-                try:
-                    sheet_titles = self.client.list_calendar_sheet_titles(
-                        sid or sources[0].spreadsheet_id
-                    )
-                except Exception:
-                    sheet_titles = []
-                if not known_sheet and sheet_titles:
-                    self.filters["sheet"] = sheet_titles[0]
-                    self._apply_preferred_sheet()
-            # CSV сразу; цвета Google — отдельно (узкий диапазон), чтобы UI не ждал.
             raw, errors = self.client.fetch_all(
                 sources,
                 include_colors=False,
                 fast=True,
             )
+            # Вкладки берём из кэша после fetch (expand уже скачал книгу).
+            try:
+                sheet_titles = self.client.list_calendar_sheet_titles(
+                    sid or sources[0].spreadsheet_id
+                )
+            except Exception:
+                sheet_titles = []
+            if (not known_sheet) and sheet_titles:
+                self.filters["sheet"] = sheet_titles[0]
+                self._apply_preferred_sheet()
             booking = [item for item in raw if item.kind != KIND_INFO]
             self.records = explode_records(booking)
             infos = [i for i in raw if i.kind == KIND_INFO or is_info_title(i.sheet)]
@@ -762,6 +784,9 @@ class HelixApi:
                     f"{(' · ' + sheet_note) if sheet_note else ''}: "
                     f"{cal_n} слотов, занято {booked}"
                 )
+            notes = list(getattr(self.client, "read_notes", None) or [])
+            if notes and not errors:
+                self.status = f"{self.status} · {notes[0].split(':')[0]}: кэш Nextcloud"
         except Exception as exc:
             self.status = str(exc).split("\n")[0]
         finally:
@@ -789,7 +814,7 @@ class HelixApi:
         """Открытие слота: защита «не записывать» + маркер «записывают» для чужих ПК."""
         data = payload or {}
         if not self.client:
-            return {"ok": False, "error": "Нет подключения к Google"}
+            return {"ok": False, "error": "Нет подключения к Nextcloud"}
         record = self._find_record(
             str(data.get("spreadsheet_id") or ""),
             str(data.get("sheet") or ""),
@@ -989,7 +1014,7 @@ class HelixApi:
     def book_slot(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         data = payload or {}
         if not self.client:
-            return {"ok": False, "error": "Нет подключения к Google"}
+            return {"ok": False, "error": "Нет подключения к Nextcloud"}
         record = self._find_record(
             str(data.get("spreadsheet_id") or ""),
             str(data.get("sheet") or ""),

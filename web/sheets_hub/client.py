@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import threading
 import time
@@ -7,7 +8,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import quote, unquote
 
 import requests
 from openpyxl import Workbook, load_workbook
@@ -33,6 +34,7 @@ from sheets_hub.config import (
     parse_spreadsheet_id,
     prefer_sheet_title,
     requested_sheet_titles,
+    writable_data_dir,
 )
 from sheets_hub.models import Record
 from sheets_hub.registry import (
@@ -50,8 +52,64 @@ MAX_CALENDAR_WITH_NOTES_ROWS = 80
 _COLOR_CACHE: dict[str, tuple[float, dict[tuple[int, int], str]]] = {}
 _COLOR_CACHE_TTL_SEC = 900
 _PREFERRED_CALENDAR_SHEET: dict[str, str] = {}
+_SHEET_TITLES_CACHE: dict[str, tuple[float, list[str]]] = {}
+_SHEET_TITLES_TTL_SEC = 600
 _WB_LOCKS: dict[str, threading.Lock] = {}
 _WB_LOCKS_GUARD = threading.Lock()
+_ALL_SHEET_ALIASES = {"", "*", "все", "all", "все листы"}
+_NC_BACKOFF_UNTIL = 0.0
+_NC_BACKOFF_LOCK = threading.Lock()
+_NC_BACKOFF_SEC = 90.0
+
+
+def _nc_in_backoff() -> bool:
+    return time.time() < _NC_BACKOFF_UNTIL
+
+
+def _nc_trip_backoff(seconds: float = _NC_BACKOFF_SEC) -> None:
+    global _NC_BACKOFF_UNTIL
+    with _NC_BACKOFF_LOCK:
+        _NC_BACKOFF_UNTIL = max(_NC_BACKOFF_UNTIL, time.time() + seconds)
+
+
+def _file_cache_dir() -> Path:
+    path = writable_data_dir() / "nc_file_cache"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _cache_key(remote_path: str) -> str:
+    return hashlib.sha256(parse_spreadsheet_id(remote_path).encode("utf-8")).hexdigest()[:40]
+
+
+def _read_file_cache(remote_path: str) -> tuple[bytes, str] | None:
+    key = _cache_key(remote_path)
+    bin_path = _file_cache_dir() / f"{key}.xlsx"
+    meta_path = _file_cache_dir() / f"{key}.etag"
+    if not bin_path.is_file() or bin_path.stat().st_size < 32:
+        return None
+    etag = ""
+    if meta_path.is_file():
+        try:
+            etag = meta_path.read_text(encoding="utf-8").strip()
+        except Exception:
+            etag = ""
+    return bin_path.read_bytes(), etag
+
+
+def _write_file_cache(remote_path: str, data: bytes, etag: str = "") -> None:
+    if not data:
+        return
+    key = _cache_key(remote_path)
+    bin_path = _file_cache_dir() / f"{key}.xlsx"
+    meta_path = _file_cache_dir() / f"{key}.etag"
+    tmp = bin_path.with_suffix(".tmp")
+    tmp.write_bytes(data)
+    tmp.replace(bin_path)
+    try:
+        meta_path.write_text(etag or "", encoding="utf-8")
+    except Exception:
+        pass
 
 
 class SheetsError(Exception):
@@ -292,12 +350,13 @@ class SheetsClient:
         self._session.verify = session_verify_target()
         self._session.headers["User-Agent"] = "SheetsHub-Nextcloud/1.0"
         retry = Retry(
-            total=2,
-            connect=2,
-            read=2,
-            status=2,
-            backoff_factor=0.4,
-            status_forcelist=(429, 500, 502, 503, 504),
+            total=1,
+            connect=1,
+            read=1,
+            status=1,
+            backoff_factor=0.3,
+            # 429 не ретраим через urllib3 — иначе ещё сильнее бьём лимит Nextcloud.
+            status_forcelist=(500, 502, 503, 504),
             allowed_methods=False,
             raise_on_status=False,
         )
@@ -342,21 +401,34 @@ class SheetsClient:
         url: str,
         *,
         what: str,
-        retries: int = 3,
+        retries: int = 1,
         **kwargs,
     ) -> requests.Response:
+        if _nc_in_backoff() and method.upper() in {"GET", "PROPFIND", "PUT"}:
+            # Во время паузы после 429 не долбим Nextcloud.
+            class _Fake:
+                status_code = 429
+                text = "backoff"
+                reason = "Too Many Requests"
+                headers: dict = {}
+                content = b""
+
+            return _Fake()  # type: ignore[return-value]
         last: requests.Response | None = None
         for attempt in range(max(1, retries)):
             resp = self._session.request(method, url, **kwargs)
             last = resp
             if resp.status_code != 429:
                 return resp
-            # Nextcloud rate-limit — подождать и повторить.
-            time.sleep(1.5 * (attempt + 1))
+            _nc_trip_backoff()
+            if attempt + 1 < retries:
+                time.sleep(1.2)
         assert last is not None
         return last
 
     def probe_api(self, spreadsheet_id: str = "") -> bool:
+        if _nc_in_backoff():
+            return False
         try:
             target = self._dav_url(spreadsheet_id) if spreadsheet_id else self._dav_root()
             resp = self._request_with_retry(
@@ -365,7 +437,7 @@ class SheetsClient:
                 what=spreadsheet_id or "/",
                 headers={"Depth": "0"},
                 timeout=(4, 12),
-                retries=2,
+                retries=1,
             )
             ok = resp.status_code in (207, 200)
             self._api_ok = ok
@@ -375,23 +447,59 @@ class SheetsClient:
             return False
 
     def _download_bytes(self, remote_path: str) -> tuple[bytes, str]:
-        url = self._dav_url(remote_path)
+        path = parse_spreadsheet_id(remote_path)
+        # Пока действует пауза 429 — сразу из локального кэша.
+        if _nc_in_backoff():
+            cached = _read_file_cache(path)
+            if cached:
+                note = f"{path}: показан локальный кэш (Nextcloud временно ограничил запросы)."
+                if note not in self.read_notes:
+                    self.read_notes.append(note)
+                return cached
+            raise SheetsError(
+                "Nextcloud временно ограничил запросы (429).\n"
+                "Локального кэша файла ещё нет — подождите 1–2 минуты.\n"
+                f"Файл: {path}"
+            )
+
+        url = self._dav_url(path)
         resp = self._request_with_retry(
             "GET",
             url,
-            what=parse_spreadsheet_id(remote_path),
+            what=path,
             timeout=(5, 60),
-            retries=3,
+            retries=1,
         )
+        if resp.status_code == 429:
+            _nc_trip_backoff()
+            cached = _read_file_cache(path)
+            if cached:
+                note = f"{path}: показан локальный кэш (Nextcloud 429)."
+                if note not in self.read_notes:
+                    self.read_notes.append(note)
+                return cached
+            self._raise_http(resp, what=path)
         if resp.status_code >= 400:
-            self._raise_http(resp, what=parse_spreadsheet_id(remote_path))
+            self._raise_http(resp, what=path)
         etag = (resp.headers.get("ETag") or resp.headers.get("OC-Etag") or "").strip()
         if etag:
-            self._etag_cache[parse_spreadsheet_id(remote_path)] = etag
-        return resp.content, etag
+            self._etag_cache[path] = etag
+        data = resp.content
+        try:
+            _write_file_cache(path, data, etag)
+        except Exception:
+            pass
+        return data, etag
 
     def _upload_bytes(self, remote_path: str, data: bytes, *, etag: str = "") -> None:
-        url = self._dav_url(remote_path)
+        path = parse_spreadsheet_id(remote_path)
+        if _nc_in_backoff():
+            raise SheetsError(
+                "Nextcloud временно ограничил запросы (429).\n"
+                "Подождите 1–2 минуты перед сохранением.\n"
+                f"Файл: {path}"
+            )
+        url = self._dav_url(path)
         headers: dict[str, str] = {
             "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         }
@@ -400,11 +508,11 @@ class SheetsClient:
         resp = self._request_with_retry(
             "PUT",
             url,
-            what=parse_spreadsheet_id(remote_path),
+            what=path,
             data=data,
             headers=headers,
             timeout=(5, 90),
-            retries=3,
+            retries=1,
         )
         if resp.status_code == 412:
             raise SheetsError(
@@ -412,10 +520,16 @@ class SheetsClient:
                 "Обновите календарь и повторите."
             )
         if resp.status_code >= 400:
-            self._raise_http(resp, what=parse_spreadsheet_id(remote_path))
+            if resp.status_code == 429:
+                _nc_trip_backoff()
+            self._raise_http(resp, what=path)
         new_etag = (resp.headers.get("ETag") or resp.headers.get("OC-Etag") or "").strip()
         if new_etag:
-            self._etag_cache[parse_spreadsheet_id(remote_path)] = new_etag
+            self._etag_cache[path] = new_etag
+        try:
+            _write_file_cache(path, data, new_etag)
+        except Exception:
+            pass
 
     def _ensure_parent_dirs(self, remote_path: str) -> None:
         path = parse_spreadsheet_id(remote_path).lstrip("/")
@@ -455,9 +569,25 @@ class SheetsClient:
         self._ensure_parent_dirs(remote_path)
         self._upload_bytes(remote_path, buf.getvalue(), etag=etag)
 
+    def _cache_sheet_titles(self, remote_path: str, titles: list[str]) -> None:
+        sid = parse_spreadsheet_id(remote_path)
+        clean = [t for t in titles if (t or "").strip()]
+        if sid and clean:
+            _SHEET_TITLES_CACHE[sid] = (time.time(), clean)
+
+    def _cached_sheet_titles(self, remote_path: str) -> list[str]:
+        sid = parse_spreadsheet_id(remote_path)
+        hit = _SHEET_TITLES_CACHE.get(sid)
+        if not hit:
+            return []
+        ts, titles = hit
+        if time.time() - ts > _SHEET_TITLES_TTL_SEC:
+            return list(titles)  # stale still better than empty for UI
+        return list(titles)
+
     def _match_sheet_title(self, available: list[str], wanted: str) -> str | None:
         raw = (wanted or "").strip()
-        if not raw:
+        if not raw or raw.lower() in _ALL_SHEET_ALIASES:
             return None
         for title in available:
             if title.lower() == raw.lower():
@@ -474,12 +604,15 @@ class SheetsClient:
         with _workbook_lock(path):
             wb, path = self._load_workbook(path)
             available = list(wb.sheetnames)
+            self._cache_sheet_titles(path, available)
             if not available:
                 raise SheetsError(f"В «{ref.name}» нет листов")
             match = self._match_sheet_title(available, ref.sheet)
+            if match is None:
+                match = prefer_sheet_title(available, ref.sheet)
             if match is None and len(available) == 1:
                 match = available[0]
-            if match is None:
+            if not match or match not in available:
                 raise SheetsError(
                     f"В «{ref.name}» нет листа «{ref.sheet}». "
                     f"В файле есть: {', '.join(available)}."
@@ -812,10 +945,17 @@ class SheetsClient:
 
     def list_sheets(self, url_or_id: str) -> list[str]:
         path = self._normalize_xlsx_path(url_or_id)
+        cached = self._cached_sheet_titles(path)
+        # Свежий кэш — без лишнего скачивания (важно при 429).
+        hit = _SHEET_TITLES_CACHE.get(parse_spreadsheet_id(path))
+        if hit and (time.time() - hit[0]) < _SHEET_TITLES_TTL_SEC and cached:
+            return cached
         with _workbook_lock(path):
             wb, _path = self._load_workbook(path)
             try:
-                return list(wb.sheetnames)
+                titles = list(wb.sheetnames)
+                self._cache_sheet_titles(path, titles)
+                return titles
             finally:
                 wb.close()
 
@@ -823,7 +963,9 @@ class SheetsClient:
         try:
             titles = self.list_sheets(spreadsheet_id)
         except Exception:
-            return []
+            titles = self._cached_sheet_titles(spreadsheet_id)
+            if not titles:
+                return []
         return [title for title in titles if title and not is_info_title(title)]
 
     def preferred_calendar_sheet(self, spreadsheet_id: str) -> str:
