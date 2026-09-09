@@ -17,11 +17,37 @@ def app_root() -> Path:
 
 
 def user_data_dir() -> Path:
-    """Папка с правами на запись (AppData), без запросов админа."""
+    """Папка с правами на запись (AppData), без запросов админа.
+
+    На временных профилях Windows (TEMP.xxx) AppData часто «ломаный» —
+    тогда пишем рядом с программой или в %TEMP%/SheetsHub.
+    """
     if sys.platform == "win32":
-        base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or str(Path.home())
-        path = Path(base) / "SheetsHub"
-    elif sys.platform == "darwin":
+        markers = " ".join(
+            [
+                os.environ.get("USERNAME") or "",
+                os.environ.get("USERPROFILE") or "",
+                str(Path.home()),
+                os.environ.get("LOCALAPPDATA") or "",
+            ]
+        ).upper()
+        temp_profile = "TEMP." in markers
+        if not temp_profile:
+            base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or str(Path.home())
+            path = Path(base) / "SheetsHub"
+            if _dir_is_writable(path):
+                return path
+        # Временный профиль / битый AppData → стабильные запасные пути.
+        for path in (
+            app_root() / "SheetsHub_data",
+            Path(os.environ.get("TEMP") or os.environ.get("TMP") or Path.home()) / "SheetsHub",
+            Path(os.environ.get("ProgramData") or r"C:\ProgramData") / "SheetsHub",
+            Path.home() / "SheetsHub",
+        ):
+            if _dir_is_writable(path):
+                return path
+        return app_root()
+    if sys.platform == "darwin":
         path = Path.home() / "Library" / "Application Support" / "SheetsHub"
     else:
         path = Path.home() / ".config" / "SheetsHub"
