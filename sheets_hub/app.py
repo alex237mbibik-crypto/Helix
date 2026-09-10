@@ -416,6 +416,12 @@ class SheetsHubApp(ctk.CTk):
         self._fit_to_screen()
 
         self.config_data: AppConfig = load_config()
+        if self.config_data._persist_telegram_defaults:
+            try:
+                save_config(self.config_data)
+                self.config_data._persist_telegram_defaults = False
+            except Exception:
+                pass
         self.client: SheetsClient | None = None
         self.records: list[Record] = []
         self.info_records: list[Record] = []
@@ -1484,7 +1490,8 @@ class SheetsHubApp(ctk.CTk):
 
         preferred = ""
         if self.client and sid:
-            preferred = self.client.preferred_calendar_sheet(sid)
+            service = (self.service_filter_var.get() or "").strip()
+            preferred = self.client.preferred_calendar_sheet(sid, service=service)
         current = preferred or self._current_calendar_sheet()
         if current and current not in values:
             values = [current, *[v for v in values if v != current]]
@@ -1511,9 +1518,10 @@ class SheetsHubApp(ctk.CTk):
         sid = self._active_spreadsheet_id()
         if not sid:
             return
-        if self.client.preferred_calendar_sheet(sid) == title:
+        service = (self.service_filter_var.get() or "").strip()
+        if self.client.preferred_calendar_sheet(sid, service=service) == title:
             return
-        self.client.set_preferred_calendar_sheet(sid, title)
+        self.client.set_preferred_calendar_sheet(sid, title, service=service)
         self._calendar_fp = None
         self._calendar_struct_fp = None
         self.reload_all()

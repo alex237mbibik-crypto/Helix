@@ -186,6 +186,13 @@ class HelixApi:
         self._active_lock: dict[str, Any] | None = None
         self._tutorial_hide = False
         self._restore_ui_cache()
+        # Одноразовая миграция: включить Telegram на старых ПК с токеном.
+        if self.config._persist_telegram_defaults:
+            try:
+                self._persist()
+                self.config._persist_telegram_defaults = False
+            except Exception:
+                pass
 
     def set_window(self, window) -> None:
         self._window = window
@@ -275,11 +282,11 @@ class HelixApi:
         preferred = ""
         if self.client and sid:
             preferred = (
-                self.client.preferred_calendar_sheet(sid)
-                or self._preferred_cache.get(sid, "")
+                self.client.preferred_calendar_sheet(sid, service=self._active_service())
+                or self._preferred_cache.get(self._pref_cache_key(sid), "")
             ).strip()
         elif sid:
-            preferred = (self._preferred_cache.get(sid) or "").strip()
+            preferred = (self._preferred_cache.get(self._pref_cache_key(sid)) or "").strip()
         if preferred and preferred not in out:
             out.insert(0, preferred)
         return out
@@ -287,9 +294,13 @@ class HelixApi:
     def _apply_cached_preferred(self) -> None:
         if not self.client or not self._preferred_cache:
             return
-        for sid, title in self._preferred_cache.items():
+        for key, title in self._preferred_cache.items():
             try:
-                self.client.set_preferred_calendar_sheet(sid, title)
+                if "::" in key:
+                    sid, service = key.split("::", 1)
+                else:
+                    sid, service = key, ""
+                self.client.set_preferred_calendar_sheet(sid, title, service=service)
             except Exception:
                 pass
 
@@ -395,18 +406,42 @@ class HelixApi:
             return ""
 
     def _apply_preferred_sheet(self) -> None:
-        """Лист месяца из фильтра → preferred в клиенте (иначе CSV тянет не тот лист)."""
+        """Лист месяца из фильтра → preferred в клиенте (иначе CSV тянет не тот лист).
+
+        Важно: ключ = spreadsheet + услуга. Иначе «Запись» и «Консультация»
+        на одной ссылке перетирают друг другу выбранный месяц.
+        """
         if not self.client:
             return
-        sid = self._active_spreadsheet_id()
+        sources = self._selected_sources()
+        if not sources:
+            return
+        try:
+            sid = sources[0].normalized_id()
+        except ValueError:
+            sid = ""
+        if not sid:
+            return
+        service = (sources[0].service or self.filters.get("service") or "").strip()
         title = (self.filters.get("sheet") or "").strip()
-        if sid and title and title.lower() not in {"лист", "—", "-"}:
-            self.client.set_preferred_calendar_sheet(sid, title)
-            self._preferred_cache[sid] = title
+        cache_key = self._pref_cache_key(sid, service)
+        if title and title.lower() not in {"лист", "—", "-"}:
+            self.client.set_preferred_calendar_sheet(sid, title, service=service)
+            self._preferred_cache[cache_key] = title
+            return
+        # Фильтр листа сброшен (смена услуги) — не тянуть чужой preferred.
+        reg_sheet = (sources[0].sheet or "").strip()
+        if reg_sheet and reg_sheet.lower() not in {"", "*", "все", "all", "все листы"}:
+            self.client.set_preferred_calendar_sheet(sid, reg_sheet, service=service)
+            self._preferred_cache[cache_key] = reg_sheet
+            return
+        self.client.set_preferred_calendar_sheet(sid, "", service=service)
+        self._preferred_cache.pop(cache_key, None)
 
     def _sync_sheet_filter(self, titles: list[str] | None = None) -> None:
         """После загрузки выставить лист месяца (preferred / первый календарный)."""
         sid = self._active_spreadsheet_id()
+        service = self._active_service()
         values = list(titles or [])
         if not values and self.client and sid:
             # Не ходим в сеть повторно на fast-старте — только из уже загруженных записей.
@@ -420,7 +455,10 @@ class HelixApi:
                     break
         preferred = ""
         if self.client and sid:
-            preferred = self.client.preferred_calendar_sheet(sid) or self._preferred_cache.get(sid, "")
+            preferred = (
+                self.client.preferred_calendar_sheet(sid, service=service)
+                or self._preferred_cache.get(self._pref_cache_key(sid, service), "")
+            )
         current = (self.filters.get("sheet") or "").strip()
         if current and values and current not in values:
             current = ""
@@ -429,9 +467,19 @@ class HelixApi:
         if current:
             self.filters["sheet"] = current
             if self.client and sid:
-                self.client.set_preferred_calendar_sheet(sid, current)
-                self._preferred_cache[sid] = current
+                self.client.set_preferred_calendar_sheet(sid, current, service=service)
+                self._preferred_cache[self._pref_cache_key(sid, service)] = current
         self._persist_ui_cache()
+
+    def _active_service(self) -> str:
+        sources = self._selected_sources()
+        if sources and (sources[0].service or "").strip():
+            return str(sources[0].service).strip()
+        return (self.filters.get("service") or "").strip()
+
+    def _pref_cache_key(self, sid: str, service: str = "") -> str:
+        svc = (service or self._active_service() or "").strip().lower()
+        return f"{sid}::{svc}" if svc else sid
 
     def _calendar_records(self) -> list[Record]:
         sheet = (self.filters.get("sheet") or "").strip()
@@ -869,11 +917,16 @@ class HelixApi:
             except ValueError:
                 sid = ""
             known_sheet = (self.filters.get("sheet") or "").strip()
+            service = (sources[0].service or self.filters.get("service") or "").strip()
             if not known_sheet and sid:
-                known_sheet = (
-                    self.client.preferred_calendar_sheet(sid)
-                    or self._preferred_cache.get(sid, "")
-                ).strip()
+                reg_sheet = (sources[0].sheet or "").strip()
+                if reg_sheet and reg_sheet.lower() not in {"", "*", "все", "all", "все листы"}:
+                    known_sheet = reg_sheet
+                else:
+                    known_sheet = (
+                        self.client.preferred_calendar_sheet(sid, service=service)
+                        or self._preferred_cache.get(self._pref_cache_key(sid, service), "")
+                    ).strip()
                 if known_sheet:
                     self.filters["sheet"] = known_sheet
                     self._apply_preferred_sheet()
@@ -885,7 +938,10 @@ class HelixApi:
                 except Exception:
                     sheet_titles = []
                 if not known_sheet and sheet_titles:
-                    self.filters["sheet"] = sheet_titles[0]
+                    from sheets_hub.config import prefer_sheet_title
+
+                    known_sheet = prefer_sheet_title(sheet_titles, sources[0].sheet) or sheet_titles[0]
+                    self.filters["sheet"] = known_sheet
                     self._apply_preferred_sheet()
             # CSV сразу; цвета Google — отдельно (узкий диапазон), чтобы UI не ждал.
             raw, errors = self.client.fetch_all(

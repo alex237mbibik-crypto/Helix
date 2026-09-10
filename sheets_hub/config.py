@@ -491,7 +491,7 @@ Source = SheetRef
 
 @dataclass
 class TelegramConfig:
-    enabled: bool = False
+    enabled: bool = True
     bot_token: str = ""
     chat_id: str = ""
 
@@ -532,6 +532,10 @@ class AppConfig:
     registry_sheet: str = "SheetsHub"
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     ui: UiConfig = field(default_factory=UiConfig)
+    # Одноразовая миграция: старые конфиги писали enabled: false по умолчанию.
+    telegram_default_on_v1: bool = True
+    # Нужно перезаписать config.yaml после миграции «вкл. уведомления».
+    _persist_telegram_defaults: bool = False
 
 
 def usable_refs(refs: list[SheetRef]) -> list[SheetRef]:
@@ -654,11 +658,26 @@ def load_config(path: Path | None = None) -> AppConfig:
         ).strip()
         registry_sheet = str((registry or {}).get("sheet") or "SheetsHub").strip() or "SheetsHub"
     tg_raw = raw.get("telegram") or {}
+    # По умолчанию уведомления включены (раньше было false — из‑за этого на ПК часто «молчали»).
+    if "enabled" in tg_raw:
+        tg_enabled = bool(tg_raw.get("enabled"))
+    else:
+        tg_enabled = True
     telegram = TelegramConfig(
-        enabled=bool(tg_raw.get("enabled")),
+        enabled=tg_enabled,
         bot_token=str(tg_raw.get("bot_token") or "").strip(),
         chat_id=str(tg_raw.get("chat_id") or "").strip(),
     )
+    # Одноразово: старые YAML с enabled: false + уже прописанным ботом → включить.
+    # После сохранения telegram_default_on_v1 галочку можно снова выключить насовсем.
+    already_migrated = bool(raw.get("telegram_default_on_v1"))
+    persist_telegram_defaults = False
+    if not already_migrated:
+        if TelegramConfig._is_real(telegram.bot_token) and TelegramConfig._is_real(
+            telegram.chat_id
+        ):
+            telegram.enabled = True
+        persist_telegram_defaults = True
     ui_raw = raw.get("ui") or {}
     # Поддержка плоских ключей из старых конфигов / ручного редактирования.
     show_tables = ui_raw.get("show_tables_button")
@@ -683,6 +702,8 @@ def load_config(path: Path | None = None) -> AppConfig:
         registry_sheet=registry_sheet,
         telegram=telegram,
         ui=ui,
+        telegram_default_on_v1=True,
+        _persist_telegram_defaults=persist_telegram_defaults,
     )
 
 
@@ -718,6 +739,8 @@ def save_config(config: AppConfig, path: Path | None = None) -> None:
         "bot_token": config.telegram.bot_token,
         "chat_id": config.telegram.chat_id,
     }
+    if config.telegram_default_on_v1:
+        payload["telegram_default_on_v1"] = True
     payload["ui"] = {
         "show_tables_button": bool(config.ui.show_tables_button),
         "tables_password": config.ui.tables_password or "",

@@ -26,11 +26,12 @@ destinations: []
 # 1) @BotFather → токен бота
 # 2) Напишите боту сообщение
 # 3) https://api.telegram.org/bot<TOKEN>/getUpdates → chat.id
-# Затем поставьте enabled: true (или включите в окне Таблицы).
+# Уведомления включены по умолчанию (enabled: true).
 telegram:
-  enabled: false
+  enabled: true
   bot_token: "PASTE_BOT_TOKEN_HERE"
   chat_id: "PASTE_CHAT_ID_HERE"
+telegram_default_on_v1: true
 
 # Кнопка «Таблицы» скрыта — открыть окно: Ctrl+Shift+T
 # (пароль не нужен; при желании задайте tables_password)

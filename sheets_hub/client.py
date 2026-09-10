@@ -78,6 +78,43 @@ _SHEET_GID_CACHE: dict[str, dict[str, str]] = {}
 # Какой способ скачивания CSV сработал в этот раз — пробуем его первым.
 _PUBLIC_FETCH_PREF: str = ""
 _PREFERRED_CALENDAR_SHEET: dict[str, str] = {}
+_ALL_SHEET_ALIASES = {"", "*", "все", "all", "все листы"}
+
+
+def _preferred_sheet_key(spreadsheet_id: str, service: str = "") -> str:
+    """Ключ preferred-листа: одна книга + разные услуги (Запись/Консультация) — разные листы."""
+    try:
+        sid = parse_spreadsheet_id(spreadsheet_id)
+    except Exception:
+        sid = (spreadsheet_id or "").strip()
+    svc = (service or "").strip().lower()
+    if svc:
+        return f"{sid}::{svc}"
+    return sid
+
+
+def _get_preferred_sheet(spreadsheet_id: str, service: str = "") -> str:
+    key = _preferred_sheet_key(spreadsheet_id, service)
+    hit = (_PREFERRED_CALENDAR_SHEET.get(key) or "").strip()
+    if hit:
+        return hit
+    # Без услуги — старый ключ только по sid (обратная совместимость).
+    if not (service or "").strip():
+        try:
+            sid = parse_spreadsheet_id(spreadsheet_id)
+        except Exception:
+            sid = (spreadsheet_id or "").strip()
+        return (_PREFERRED_CALENDAR_SHEET.get(sid) or "").strip()
+    return ""
+
+
+def _set_preferred_sheet(spreadsheet_id: str, sheet: str, service: str = "") -> None:
+    key = _preferred_sheet_key(spreadsheet_id, service)
+    title = (sheet or "").strip()
+    if title:
+        _PREFERRED_CALENDAR_SHEET[key] = title
+    else:
+        _PREFERRED_CALENDAR_SHEET.pop(key, None)
 # Цвета заливки: spreadsheet_id|sheet → (ts, {(row, col): "#rrggbb"})
 _COLOR_CACHE: dict[str, tuple[float, dict[tuple[int, int], str]]] = {}
 _COLOR_CACHE_TTL_SEC = 900
@@ -1416,12 +1453,12 @@ class SheetsClient:
             sid = source.normalized_id()
         except Exception:
             sid = str(source.spreadsheet_id or "")
-        preferred = (_PREFERRED_CALENDAR_SHEET.get(sid, "") or "").strip()
+        preferred = _get_preferred_sheet(sid, source.service)
         if not preferred:
             wanted = (source.sheet or "").strip()
-            if wanted and wanted.lower() not in ("все", "all", "*"):
+            if wanted and wanted.lower() not in _ALL_SHEET_ALIASES:
                 preferred = wanted
-        cache_key = f"{sid}|{preferred}|colors={1 if include_colors else 0}"
+        cache_key = f"{sid}|{preferred}|svc={(source.service or '').strip().lower()}|colors={1 if include_colors else 0}"
         now = time.time()
 
         with _PUBLIC_LOAD_LOCK:
@@ -1470,10 +1507,10 @@ class SheetsClient:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         sid = source.normalized_id()
-        preferred = (_PREFERRED_CALENDAR_SHEET.get(sid, "") or "").strip()
+        preferred = _get_preferred_sheet(sid, source.service)
         if not preferred:
             wanted = (source.sheet or "").strip()
-            if wanted and wanted.lower() not in ("все", "all", "*"):
+            if wanted and wanted.lower() not in _ALL_SHEET_ALIASES:
                 preferred = wanted
 
         # Быстрый путь: уже знаем лист месяца — один CSV, без htmlview.
@@ -1546,7 +1583,7 @@ class SheetsClient:
         if has_calendar:
             for item in loaded:
                 if item.layout == "calendar" and item.sheet:
-                    _PREFERRED_CALENDAR_SHEET[sid] = item.sheet
+                    _set_preferred_sheet(sid, item.sheet, source.service)
                     break
         # Если взяли только «УСЛУГИ», а календарь на другой вкладке — догружаем.
         if not has_calendar and available:
@@ -1562,7 +1599,7 @@ class SheetsClient:
                 if any(item.layout == "calendar" for item in extra):
                     loaded.extend(extra)
                     has_calendar = True
-                    _PREFERRED_CALENDAR_SHEET[sid] = title
+                    _set_preferred_sheet(sid, title, source.service)
                     info_parts = [
                         replace(source, sheet=info_title, kind=KIND_INFO)
                         for info_title in companion_info_titles(available, title)
@@ -2006,23 +2043,13 @@ class SheetsClient:
             return []
         return [title for title, _gid in cached[1] if title and not is_info_title(title)]
 
-    def preferred_calendar_sheet(self, spreadsheet_id: str) -> str:
-        try:
-            sid = parse_spreadsheet_id(spreadsheet_id)
-        except ValueError:
-            return ""
-        return _PREFERRED_CALENDAR_SHEET.get(sid, "")
+    def preferred_calendar_sheet(self, spreadsheet_id: str, *, service: str = "") -> str:
+        return _get_preferred_sheet(spreadsheet_id, service)
 
-    def set_preferred_calendar_sheet(self, spreadsheet_id: str, sheet: str) -> None:
-        try:
-            sid = parse_spreadsheet_id(spreadsheet_id)
-        except ValueError:
-            return
-        title = (sheet or "").strip()
-        if title:
-            _PREFERRED_CALENDAR_SHEET[sid] = title
-        else:
-            _PREFERRED_CALENDAR_SHEET.pop(sid, None)
+    def set_preferred_calendar_sheet(
+        self, spreadsheet_id: str, sheet: str, *, service: str = ""
+    ) -> None:
+        _set_preferred_sheet(spreadsheet_id, sheet, service)
 
     def pull_table_registry(self, spreadsheet_id: str, sheet_title: str = "") -> list[SheetRef]:
         """Читает общий список таблиц из Google Sheets (на Windows сначала curl -k)."""
