@@ -151,12 +151,34 @@ def is_calendar_matrix(rows: list[list[str]]) -> bool:
 
 def parse_corner(text: str) -> tuple[str, str]:
     raw = (text or "").strip()
-    if not raw:
+    if not raw or looks_like_notice_text(raw):
         return "", ""
     parts = [part.strip() for part in raw.split(",") if part.strip()]
     if len(parts) >= 2 and not re.search(r"\d", parts[-1]) and len(parts[-1]) < 48:
         return ", ".join(parts[:-1]), parts[-1]
     return raw, ""
+
+
+def looks_like_notice_text(text: str) -> bool:
+    """Скрипт оператора / общая информация — не адрес и не услуга."""
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    if len(raw) > 140:
+        return True
+    if raw.count("\n") >= 2:
+        return True
+    low = raw.lower().replace("ё", "е")
+    markers = (
+        "оператор:",
+        "вариант ответа",
+        "записываем на услугу",
+        "по направлению врача",
+        "клиент: хочу",
+        "подскажите, пожалуйста",
+    )
+    hits = sum(1 for marker in markers if marker in low)
+    return hits >= 1
 
 
 def extract_phone(text: str) -> tuple[str, str]:
@@ -408,17 +430,31 @@ def parse_calendar_rows(
     day_doctors = _find_day_doctors(rows, header_idx, time_col, date_cols, header)
     corner = ""
     for row in rows[: header_idx + 1]:
-        if time_col < len(row) and (row[time_col] or "").strip() and not is_time(row[time_col]):
-            corner = row[time_col].strip()
+        candidates: list[str] = []
+        if time_col < len(row):
+            candidates.append((row[time_col] or "").strip())
+        if row:
+            candidates.append((row[0] or "").strip())
+        for cell in candidates:
+            if not cell or is_time(cell) or looks_like_notice_text(cell):
+                continue
+            # Короткая пометка в углу (адрес/филиал), не простыня текста.
+            if len(cell) > 80:
+                continue
+            corner = cell
             break
-        if row and (row[0] or "").strip() and not is_time(row[0]):
-            corner = row[0].strip()
+        if corner:
             break
     address, service = parse_corner(corner)
     if source.address:
         address = source.address
     if source.service:
         service = source.service
+    # На всякий случай: скрипт не должен стать адресом слота.
+    if looks_like_notice_text(address):
+        address = (source.address or "").strip()
+    if looks_like_notice_text(service):
+        service = (source.service or "").strip()
 
     records: list[Record] = parse_info_rows(
         rows,

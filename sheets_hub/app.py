@@ -2299,7 +2299,15 @@ class SheetsHubApp(ctk.CTk):
         times.sort(key=_time_sort_key)
         cell_map = {(item.values.get("Время", ""), item.values.get("Дата", "")): item for item in items}
         sample = items[0].values
-        title = " · ".join(part for part in (name, sample.get("Адрес", ""), sample.get("Тип услуги", "")) if part)
+        from sheets_hub.calendar_sheet import looks_like_notice_text
+
+        addr = str(sample.get("Адрес", "") or "").strip()
+        svc = str(sample.get("Тип услуги", "") or "").strip()
+        if looks_like_notice_text(addr):
+            addr = ""
+        if looks_like_notice_text(svc):
+            svc = ""
+        title = " · ".join(part for part in (name, addr, svc) if part)
         self.cal_header_title.configure(text=title)
         try:
             self.cal_badge.configure(text=f"  {title}  " if title else "")

@@ -46,6 +46,17 @@ def format_booking_message(record: Record, client_text: str) -> str:
 
     service = str(record.values.get("Тип услуги") or record.values.get("Услуга") or "").strip()
     address = str(record.values.get("Адрес") or "").strip()
+    # Скрипт из «Общей информации» иногда ошибочно попадает в Адрес ячейки.
+    try:
+        from sheets_hub.calendar_sheet import looks_like_notice_text
+
+        if looks_like_notice_text(address):
+            address = ""
+        if looks_like_notice_text(service):
+            service = ""
+    except Exception:
+        if len(address) > 140 or address.count("\n") >= 2:
+            address = ""
     if service:
         lines.append(f"Услуга: {service}")
     if address:

@@ -321,6 +321,9 @@
       </div>
       <span class="chip"><i class="far fa-circle"></i> пустое поле не учитывается</span>
     </div>
+    <div class="chip" id="geoHint" style="display:none; margin-top:0.55rem; color:#8a6d1d; background:#fff8e6;">
+      <i class="fas fa-info-circle"></i> <span id="geoHintText"></span>
+    </div>
 
     <div class="divider-light"></div>
 
@@ -798,6 +801,13 @@
     fillSelect(document.getElementById("fCity"), o.cities, f.city);
     fillSelect(document.getElementById("fAddress"), o.addresses, f.address);
     fillSelect(document.getElementById("fSheet"), o.sheets, f.sheet);
+    const geoHint = document.getElementById("geoHint");
+    const geoText = document.getElementById("geoHintText");
+    if (geoHint && geoText) {
+      const hint = (o.geo_hint || "").trim();
+      geoText.textContent = hint;
+      geoHint.style.display = hint ? "inline-flex" : "none";
+    }
     if (document.activeElement !== document.getElementById("fSearch")) {
       document.getElementById("fSearch").value = f.search || "";
     }

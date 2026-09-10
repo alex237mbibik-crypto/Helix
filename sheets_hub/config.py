@@ -288,8 +288,30 @@ class SheetRef:
     def resolved_city(self) -> str:
         explicit = (self.city or "").strip()
         if explicit:
-            return explicit
-        return extract_city(self.address)
+            # «г. Витебск» в колонке Город → «Витебск»
+            return extract_city(explicit) or explicit
+        found = extract_city(self.address)
+        if found:
+            return found
+        # Из названия/пути книги — только явный «г. …» (не путать с «Гинеколог»).
+        for text in (self.name, self.spreadsheet_id):
+            raw = (text or "").strip()
+            if not raw:
+                continue
+            match = re.search(
+                r"(?:^|[\s,;/_\-])(?:г\.|город)\s*([А-ЯЁA-Z][А-Яа-яЁёA-Za-z\-]{1,39})",
+                f" {raw}",
+                flags=re.IGNORECASE,
+            )
+            if match:
+                return match.group(1).strip(" .")
+            glued = re.search(
+                r"(?:^|[\s,;/_\-])г\.([А-ЯЁA-Z][А-Яа-яЁёA-Za-z\-]{1,39})",
+                f" {raw}",
+            )
+            if glued:
+                return glued.group(1).strip(" .")
+        return ""
 
     def label(self) -> str:
         parts = [self.name]
@@ -314,6 +336,22 @@ def extract_city(address: str) -> str:
     raw = (address or "").strip()
     if not raw:
         return ""
+    # «… г. Витебск …» / «город Витебск» — где угодно в строке.
+    anywhere = re.search(
+        r"(?:^|[\s,;/])(?:г\.|город)\s*([А-ЯЁA-Z][А-Яа-яЁёA-Za-z\-]{1,39})",
+        f" {raw}",
+        flags=re.IGNORECASE,
+    )
+    if anywhere:
+        return anywhere.group(1).strip(" .")
+    # «г.Витебск» без пробела после точки.
+    glued = re.search(
+        r"(?:^|[\s,;/])г\.([А-ЯЁA-Z][А-Яа-яЁёA-Za-z\-]{1,39})",
+        f" {raw}",
+    )
+    if glued:
+        return glued.group(1).strip(" .")
+
     head = raw.split(",")[0].strip()
     prefixed = re.match(r"^(?:г\.|город)\s*(.+)$", head, flags=re.IGNORECASE)
     if prefixed:
@@ -323,7 +361,41 @@ def extract_city(address: str) -> str:
         low = head.lower()
         if not low.startswith(("ул", "пр", "пер", "бул", "наб", "пл", "мкр")):
             return head
+    # Только название города в ячейке: «Витебск».
+    if "," not in raw and not re.search(r"\d", raw):
+        if re.fullmatch(r"[А-ЯЁA-Z][А-Яа-яЁёA-Za-z\-]{1,39}", raw):
+            low = raw.lower().replace("ё", "е")
+            if low not in _NOT_A_CITY and not low.startswith(
+                ("ул", "пр", "пер", "бул", "наб", "пл", "мкр")
+            ):
+                return raw
     return ""
+
+
+_NOT_A_CITY = {
+    "гинеколог",
+    "гинекология",
+    "узи",
+    "запись",
+    "консультация",
+    "терапевт",
+    "хирург",
+    "лор",
+    "невролог",
+    "кардиолог",
+    "окулист",
+    "офтальмолог",
+    "стоматолог",
+    "педиатр",
+    "маммлог",
+    "маммолог",
+    "эндокринолог",
+    "дерматолог",
+    "уролог",
+    "таблица",
+    "календарь",
+    "листы",
+}
 
 
 _ALL_SHEETS = {"", "*", "все", "all", "все листы"}

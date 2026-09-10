@@ -292,12 +292,19 @@ class HelixApi:
                     sheets = self.client.list_calendar_sheet_titles(sid)
                 except Exception:
                     sheets = []
+        missing_geo = bool(after_service) and not cities and not addresses
         return {
             "names": names,
             "services": services,
             "cities": cities,
             "addresses": addresses,
             "sheets": sheets,
+            "geo_hint": (
+                "В реестре таблиц не заполнены «Город» и «Адрес» — "
+                "откройте настройки и укажите их для выбранной услуги."
+                if missing_geo
+                else ""
+            ),
         }
 
     def _selected_sources(self) -> list[SheetRef]:
@@ -502,10 +509,18 @@ class HelixApi:
             sample = cal[0] if cal else None
             title_parts = []
             if sample:
+                from sheets_hub.calendar_sheet import looks_like_notice_text
+
+                addr = str(sample.values.get("Адрес", "") or "").strip()
+                svc = str(sample.values.get("Тип услуги", "") or "").strip()
+                if looks_like_notice_text(addr):
+                    addr = ""
+                if looks_like_notice_text(svc):
+                    svc = ""
                 title_parts = [
                     sample.source_name,
-                    sample.values.get("Адрес", ""),
-                    sample.values.get("Тип услуги", ""),
+                    addr,
+                    svc,
                 ]
             title = " · ".join(p for p in title_parts if p)
             booked = sum(1 for r in cal if r.values.get("Статус") == "Занято")
