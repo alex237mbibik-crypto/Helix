@@ -1995,6 +1995,17 @@ class SheetsClient:
                 return []
         return [title for title in titles if title and not is_info_title(title)]
 
+    def cached_calendar_sheet_titles(self, spreadsheet_id: str) -> list[str]:
+        """Только из памяти — без сети (для мгновенных фильтров)."""
+        try:
+            sid = parse_spreadsheet_id(spreadsheet_id)
+        except ValueError:
+            return []
+        cached = _SHEET_LIST_CACHE.get(sid)
+        if not cached:
+            return []
+        return [title for title, _gid in cached[1] if title and not is_info_title(title)]
+
     def preferred_calendar_sheet(self, spreadsheet_id: str) -> str:
         try:
             sid = parse_spreadsheet_id(spreadsheet_id)

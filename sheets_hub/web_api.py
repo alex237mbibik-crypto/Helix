@@ -20,6 +20,7 @@ from sheets_hub.config import (
     is_info_title,
     load_config,
     merge_tables,
+    parse_spreadsheet_id,
     resolve_config_path,
     save_config,
     usable_refs,
@@ -181,6 +182,7 @@ class HelixApi:
         self._lock = threading.RLock()
         self._auto_tick = 0
         self._preferred_cache: dict[str, str] = {}
+        self._sheet_titles_cache: dict[str, list[str]] = {}
         self._active_lock: dict[str, Any] | None = None
         self._tutorial_hide = False
         self._restore_ui_cache()
@@ -195,6 +197,17 @@ class HelixApi:
             self._preferred_cache = {
                 str(k): str(v).strip() for k, v in prefs.items() if str(k).strip() and str(v).strip()
             }
+        titles = cache.get("sheet_titles")
+        if isinstance(titles, dict):
+            restored: dict[str, list[str]] = {}
+            for key, value in titles.items():
+                sid = str(key or "").strip()
+                if not sid or not isinstance(value, list):
+                    continue
+                clean = [str(item).strip() for item in value if str(item).strip()]
+                if clean:
+                    restored[sid] = list(dict.fromkeys(clean))
+            self._sheet_titles_cache = restored
         saved = cache.get("filters")
         if isinstance(saved, dict):
             for key in ("name", "service", "city", "address", "sheet"):
@@ -207,6 +220,11 @@ class HelixApi:
         _save_ui_cache(
             {
                 "preferred_sheets": dict(self._preferred_cache),
+                "sheet_titles": {
+                    sid: list(titles)
+                    for sid, titles in self._sheet_titles_cache.items()
+                    if sid and titles
+                },
                 "filters": {
                     k: self.filters.get(k, "")
                     for k in ("name", "service", "city", "address", "sheet")
@@ -214,6 +232,57 @@ class HelixApi:
                 "tutorial_hide": bool(self._tutorial_hide),
             }
         )
+
+    def _remember_sheet_titles(self, spreadsheet_id: str, titles: list[str]) -> None:
+        sid = str(spreadsheet_id or "").strip()
+        clean = [str(t).strip() for t in (titles or []) if str(t).strip()]
+        if not sid or not clean:
+            return
+        merged = list(dict.fromkeys(clean))
+        prev = self._sheet_titles_cache.get(sid) or []
+        if merged != prev:
+            self._sheet_titles_cache[sid] = merged
+
+    def _sheet_titles_for(self, spreadsheet_id: str) -> list[str]:
+        """Мгновенный список листов: записи + кэш, без сетевых запросов."""
+        sid = str(spreadsheet_id or "").strip()
+        out: list[str] = []
+        if sid:
+            for title in self._sheet_titles_cache.get(sid) or []:
+                if title and title not in out:
+                    out.append(title)
+            if self.client:
+                try:
+                    for title in self.client.cached_calendar_sheet_titles(sid):
+                        if title and title not in out:
+                            out.append(title)
+                except Exception:
+                    pass
+        for record in self.records:
+            if record.layout != "calendar" or not record.sheet:
+                continue
+            if sid:
+                try:
+                    rec_sid = parse_spreadsheet_id(record.spreadsheet_id)
+                    want_sid = parse_spreadsheet_id(sid)
+                    if rec_sid != want_sid:
+                        continue
+                except Exception:
+                    if str(record.spreadsheet_id) != sid:
+                        continue
+            if record.sheet not in out:
+                out.append(record.sheet)
+        preferred = ""
+        if self.client and sid:
+            preferred = (
+                self.client.preferred_calendar_sheet(sid)
+                or self._preferred_cache.get(sid, "")
+            ).strip()
+        elif sid:
+            preferred = (self._preferred_cache.get(sid) or "").strip()
+        if preferred and preferred not in out:
+            out.insert(0, preferred)
+        return out
 
     def _apply_cached_preferred(self) -> None:
         if not self.client or not self._preferred_cache:
@@ -280,18 +349,12 @@ class HelixApi:
         names = sorted({r.name.strip() for r in items if r.name.strip()})
         sheets: list[str] = []
         if after_city:
-            # Сначала из уже загруженных слотов — без лишнего htmlview при каждом snapshot.
-            seen: list[str] = []
-            for record in self.records:
-                if record.layout == "calendar" and record.sheet and record.sheet not in seen:
-                    seen.append(record.sheet)
-            sheets = seen
-            if not sheets and self.client:
-                sid = after_city[0].spreadsheet_id
-                try:
-                    sheets = self.client.list_calendar_sheet_titles(sid)
-                except Exception:
-                    sheets = []
+            sid = ""
+            try:
+                sid = after_city[0].normalized_id()
+            except Exception:
+                sid = str(after_city[0].spreadsheet_id or "")
+            sheets = self._sheet_titles_for(sid)
         missing_geo = bool(after_service) and not cities and not addresses
         return {
             "names": names,
@@ -714,7 +777,36 @@ class HelixApi:
             self.filters["sheet"] = ""
         self._apply_preferred_sheet()
         self._persist_ui_cache()
+        # В фоне подтянуть список листов, если кэш пуст — UI уже показал фильтры.
+        try:
+            sid = self._active_spreadsheet_id()
+            if self.client and sid and not self._sheet_titles_cache.get(sid):
+                threading.Thread(
+                    target=self._warm_sheet_titles,
+                    args=(sid,),
+                    daemon=True,
+                ).start()
+        except Exception:
+            pass
         return self.snapshot()
+
+    def _warm_sheet_titles(self, spreadsheet_id: str) -> None:
+        if not self.client:
+            return
+        sid = str(spreadsheet_id or "").strip()
+        if not sid:
+            return
+        try:
+            titles = self.client.list_calendar_sheet_titles(sid)
+        except Exception:
+            return
+        if not titles:
+            return
+        self._remember_sheet_titles(sid, titles)
+        try:
+            self._persist_ui_cache()
+        except Exception:
+            pass
 
     def reload(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         data = payload if isinstance(payload, dict) else {}
@@ -840,6 +932,17 @@ class HelixApi:
                 except Exception:
                     pass
             self._sync_sheet_filter(sheet_titles)
+            if sid:
+                remembered = list(sheet_titles or [])
+                for record in self.records:
+                    if record.layout == "calendar" and record.sheet:
+                        if record.sheet not in remembered:
+                            remembered.append(record.sheet)
+                self._remember_sheet_titles(sid, remembered)
+                try:
+                    self._persist_ui_cache()
+                except Exception:
+                    pass
             if errors:
                 self.status = "; ".join(errors[:2])
             else:

@@ -625,17 +625,22 @@
   }
 
   function fillSelect(el, values, current) {
-    if (document.activeElement === el) return;
+    if (!el) return;
     const cur = current || "";
     const next = ["", ...(values || [])];
-    // Не оставляем устаревшее значение вне каскада — иначе «залипает» старый адрес.
+    // Раньше при открытом select опции не обновлялись — список «залипал» пустым.
     const same =
       el.options.length === next.length &&
       Array.from(el.options).every((o, i) => o.value === next[i]);
     if (same) {
-      el.value = next.includes(cur) ? cur : "";
+      if (next.includes(cur)) {
+        if (el.value !== cur) el.value = cur;
+      } else if (el.value && !next.includes(el.value)) {
+        el.value = "";
+      }
       return;
     }
+    const keepFocus = document.activeElement === el;
     el.innerHTML = "";
     next.forEach((v) => {
       const o = document.createElement("option");
@@ -644,7 +649,15 @@
       if (v === cur) o.selected = true;
       el.appendChild(o);
     });
-    if (cur && !next.includes(cur)) el.value = "";
+    if (cur && next.includes(cur)) el.value = cur;
+    else if (cur && !next.includes(cur)) el.value = "";
+    if (keepFocus) {
+      try {
+        el.focus({ preventScroll: true });
+      } catch (_) {
+        el.focus();
+      }
+    }
   }
 
   function renderCalendar(cal) {
@@ -1031,6 +1044,7 @@
 
 
   async function pushFilters() {
+    // Сначала мгновенно обновить каскад фильтров, календарь — следом.
     await call("set_filters", {
       name: document.getElementById("fName").value,
       service: document.getElementById("fService").value,
@@ -1268,12 +1282,21 @@
       status.innerHTML =
         '<i class="fas fa-cloud-download-alt" style="color:#2a7d5a;"></i> Загружаю таблицы из облака…';
     }
-    // connect сам тянет реестр из облака и календарь (sync_registry).
-    const snap = await call("connect", { reload: true });
+    // 1) Быстрый кадр: фильтры из локального реестра, без ожидания Google.
+    const quick = await call("connect", { reload: false });
+    if (quick && (quick.options || quick.status !== undefined)) {
+      applyState(quick);
+    }
+    maybeShowTutorial(quick || state.data);
+    // 2) Реестр из облака + календарь.
+    const snap = await call("reload", {
+      fast: true,
+      sync_registry: true,
+      colors: "cache",
+    });
     if (!(snap && (snap.calendar || snap.status !== undefined))) {
       await refresh(false);
     }
-    maybeShowTutorial(snap || state.data);
     // Автообновление реже + разброс по времени: иначе много ПК одновременно
     // бьют в Google и всё зависает. Цвета — только по кнопке «Обновить».
     const AUTO_MS = 90000;
