@@ -519,16 +519,17 @@ def parse_calendar_rows(
         for col_idx in date_cols:
             cell = row[col_idx].strip() if col_idx < len(row) else ""
             status = classify_slot(cell)
-            display = "" if status in {"Свободно", "Записывают"} else cell
-            name, phone = extract_phone(display) if status == "Занято" else (display, "")
-            if status in {"Свободно", "Записывают"}:
+            # Для lock оставляем сырой текст ячейки — там имя оператора Windows.
+            display = "" if status == "Свободно" else cell
+            name, phone = extract_phone(display) if status == "Занято" else ("", "")
+            if status == "Свободно":
                 name, phone = "", ""
             date_label = header[col_idx] if col_idx < len(header) else ""
             values = _with_tags(
                 {
                     "Дата": date_label,
                     "Время": time_text,
-                    "Клиент": name or display,
+                    "Клиент": cell if status == "Записывают" else (name or display),
                     "Телефон": phone,
                     "Статус": status,
                     "Адрес": address,
