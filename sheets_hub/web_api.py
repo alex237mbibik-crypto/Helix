@@ -9,7 +9,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from sheets_hub.auth import credential_kind
-from sheets_hub.calendar_sheet import classify_slot, extract_phone, is_lock_text
+from sheets_hub.calendar_sheet import (
+    classify_slot,
+    extract_phone,
+    format_lock_label,
+    is_lock_text,
+    lock_operator,
+)
 from sheets_hub.config import (
     KIND_INFO,
     SheetRef,
@@ -538,7 +544,7 @@ class HelixApi:
             label, css = "не записывать", "blocked"
             bg, fg = "#eef2f6", "#5a6f84"
         elif status == "Записывают":
-            label, css = "записывают…", "lock"
+            label, css = format_lock_label(client), "lock"
             bg, fg = "#fff3cd", "#3e2723"
         elif status == "Занято":
             label = f"{client}" + (f" {phone}" if phone and phone not in client else "")
@@ -1058,10 +1064,12 @@ class HelixApi:
                 "error": "В эту ячейку нельзя записывать.",
             }
         if status == "Записывают":
+            who = lock_operator(str(record.values.get("Клиент") or ""))
+            who_line = f" ({who})" if who else ""
             return {
                 "ok": False,
                 "locked": True,
-                "error": "Этот слот сейчас заполняет другой оператор.\n"
+                "error": f"Этот слот сейчас заполняет другой оператор{who_line}.\n"
                 "Подождите или нажмите «Обновить».",
             }
         if status == "Занято":
@@ -1090,10 +1098,12 @@ class HelixApi:
             }
         if live == "Записывают":
             record.values["Статус"] = "Записывают"
+            who = lock_operator(previous)
+            who_line = f" ({who})" if who else ""
             return {
                 "ok": False,
                 "locked": True,
-                "error": "Этот слот сейчас заполняет другой оператор.\n"
+                "error": f"Этот слот сейчас заполняет другой оператор{who_line}.\n"
                 "Подождите или нажмите «Обновить».",
             }
         if live == "Занято":

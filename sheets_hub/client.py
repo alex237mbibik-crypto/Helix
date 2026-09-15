@@ -1973,8 +1973,12 @@ class SheetsClient:
         else:
             current = self.read_cell(record, "Клиент")
             if is_lock_text(current) and lock_is_fresh(current):
+                from sheets_hub.calendar_sheet import lock_operator
+
+                who = lock_operator(current)
+                who_line = f" ({who})" if who else ""
                 raise SheetsError(
-                    "Этот слот сейчас заполняет другой оператор.\n"
+                    f"Этот слот сейчас заполняет другой оператор{who_line}.\n"
                     "Подождите немного или нажмите «Обновить»."
                 )
         lock_text, _token = make_lock_text()
@@ -1988,8 +1992,12 @@ class SheetsClient:
         if current == lock_text:
             return
         if is_lock_text(current) and lock_is_fresh(current):
+            from sheets_hub.calendar_sheet import lock_operator
+
+            who = lock_operator(current)
+            who_line = f" ({who})" if who else ""
             raise SheetsError(
-                "Слот перехватил другой оператор. Ваша запись не сохранена.\n"
+                f"Слот перехватил другой оператор{who_line}. Ваша запись не сохранена.\n"
                 "Обновите календарь."
             )
         raise SheetsError(

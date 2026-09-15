@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import getpass
+import os
 import re
 import secrets
 import time
@@ -11,6 +13,25 @@ from sheets_hub.split import address_key, service_key
 # Маркер в ячейке, пока оператор держит диалог записи. Виден другим после обновления.
 LOCK_TTL_SEC = 120
 _LOCK_PREFIX = "⏳"
+
+
+def current_operator_name() -> str:
+    """Имя текущего оператора ПК (логин Windows / пользователя ОС)."""
+    for key in ("USERNAME", "USER", "LOGNAME"):
+        value = (os.environ.get(key) or "").strip()
+        if value:
+            return value
+    try:
+        value = (getpass.getuser() or "").strip()
+        if value:
+            return value
+    except Exception:
+        pass
+    return ""
+
+
+def _sanitize_lock_part(value: str) -> str:
+    return re.sub(r"[|\r\n]+", " ", (value or "").strip())[:48]
 
 _TIME_RE = re.compile(
     r"^\s*(?:\d{4}-\d{2}-\d{2}\s+)?(\d{1,2})[:.\-](\d{2})(?:[:.\-]\d{2})?\s*(?:am|pm)?\s*$",
@@ -191,10 +212,14 @@ def extract_phone(text: str) -> tuple[str, str]:
     return name, phone
 
 
-def make_lock_text() -> tuple[str, str]:
-    """Возвращает (текст для ячейки, token)."""
+def make_lock_text(operator: str = "") -> tuple[str, str]:
+    """Возвращает (текст для ячейки, token). Формат: ⏳|ts|token|записывает|оператор."""
     token = secrets.token_hex(3)
-    return f"{_LOCK_PREFIX}|{int(time.time())}|{token}|записывает", token
+    op = _sanitize_lock_part(operator or current_operator_name())
+    base = f"{_LOCK_PREFIX}|{int(time.time())}|{token}|записывает"
+    if op:
+        return f"{base}|{op}", token
+    return base, token
 
 
 def is_lock_text(text: str) -> bool:
@@ -204,6 +229,25 @@ def is_lock_text(text: str) -> bool:
     if raw.startswith(_LOCK_PREFIX):
         return True
     return _norm(raw).startswith("записывает")
+
+
+def lock_operator(text: str) -> str:
+    """Имя оператора из маркера блокировки (если есть)."""
+    raw = (text or "").strip()
+    if not is_lock_text(raw):
+        return ""
+    parts = raw.split("|")
+    # ⏳ | ts | token | записывает | оператор
+    if len(parts) >= 5 and parts[0].startswith(_LOCK_PREFIX):
+        return parts[4].strip()
+    return ""
+
+
+def format_lock_label(text: str = "") -> str:
+    op = lock_operator(text)
+    if op:
+        return f"записывает: {op}"
+    return "записывают…"
 
 
 def lock_age_sec(text: str) -> float | None:

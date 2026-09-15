@@ -12,7 +12,7 @@ from typing import Callable
 
 import requests
 
-from sheets_hub.calendar_sheet import extract_phone
+from sheets_hub.calendar_sheet import current_operator_name, extract_phone
 from sheets_hub.config import TelegramConfig
 from sheets_hub.models import Record
 
@@ -29,7 +29,9 @@ def is_booking_value(value: str) -> bool:
     return True
 
 
-def format_booking_message(record: Record, client_text: str) -> str:
+def format_booking_message(
+    record: Record, client_text: str, *, operator: str = ""
+) -> str:
     date = str(record.values.get("Дата") or "").strip()
     time = str(record.values.get("Время") or "").strip()
     when = " · ".join(part for part in (date, time) if part)
@@ -66,10 +68,15 @@ def format_booking_message(record: Record, client_text: str) -> str:
     sheet = (record.sheet or "").strip()
     if sheet:
         lines.append(f"Лист: {sheet}")
+    op = (operator or current_operator_name() or "").strip()
+    if op:
+        lines.append(f"Оператор: {op}")
     return "\n".join(lines)
 
 
-def format_free_message(record: Record, previous_client: str = "") -> str:
+def format_free_message(
+    record: Record, previous_client: str = "", *, operator: str = ""
+) -> str:
     date = str(record.values.get("Дата") or "").strip()
     time = str(record.values.get("Время") or "").strip()
     when = " · ".join(part for part in (date, time) if part)
@@ -87,6 +94,9 @@ def format_free_message(record: Record, previous_client: str = "") -> str:
     sheet = (record.sheet or "").strip()
     if sheet:
         lines.append(f"Лист: {sheet}")
+    op = (operator or current_operator_name() or "").strip()
+    if op:
+        lines.append(f"Оператор: {op}")
     return "\n".join(lines)
 
 

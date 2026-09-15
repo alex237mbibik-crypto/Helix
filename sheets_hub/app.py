@@ -12,7 +12,14 @@ import customtkinter as ctk
 import tkinter as tk
 
 from sheets_hub.auth import credential_kind
-from sheets_hub.calendar_sheet import classify_slot, extract_phone, info_tone, is_lock_text
+from sheets_hub.calendar_sheet import (
+    classify_slot,
+    extract_phone,
+    format_lock_label,
+    info_tone,
+    is_lock_text,
+    lock_operator,
+)
 from sheets_hub.client import SheetsClient, SheetsError, contrast_fg, soften_fill
 from sheets_hub.config import (
     KIND_INFO,
@@ -2014,7 +2021,8 @@ class SheetsHubApp(ctk.CTk):
         if status == "Не записывать":
             return "не записывать", SLOT_BLOCKED, MUTED, False
         if status == "Записывают":
-            return "записывают…", SLOT_LOCK, "#3e2723", True
+            client = record.values.get("Клиент", "").strip()
+            return format_lock_label(client), SLOT_LOCK, "#3e2723", True
         if status == "Занято":
             name = record.values.get("Клиент", "").strip() or "занято"
             phone = record.values.get("Телефон", "").strip()
@@ -2511,9 +2519,11 @@ class SheetsHubApp(ctk.CTk):
             messagebox.showinfo("Слот закрыт", "В эту ячейку нельзя записывать.")
             return
         if record.values.get("Статус") == "Записывают":
+            who = lock_operator(str(record.values.get("Клиент") or ""))
+            who_line = f" ({who})" if who else ""
             messagebox.showwarning(
                 "Слот занят",
-                "Этот слот сейчас заполняет другой оператор.\n"
+                f"Этот слот сейчас заполняет другой оператор{who_line}.\n"
                 "Подождите или нажмите «Обновить».",
             )
             return
