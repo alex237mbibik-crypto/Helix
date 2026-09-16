@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from sheets_hub.auth import credential_kind
 from sheets_hub.calendar_sheet import (
+    LOCK_TTL_SEC,
     classify_slot,
     extract_phone,
     format_lock_label,
@@ -1139,6 +1140,7 @@ class HelixApi:
             "mode": "book",
             "lock_text": lock_text,
             "lock_prev": lock_prev,
+            "lock_ttl_sec": LOCK_TTL_SEC,
             "ask_pregnancy": self._is_gyn(record),
         }
 

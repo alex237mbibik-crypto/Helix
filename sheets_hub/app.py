@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import sys
 import threading
+import time
 from pathlib import Path
 from random import randint
 from tkinter import filedialog, messagebox, ttk
@@ -13,6 +14,7 @@ import tkinter as tk
 
 from sheets_hub.auth import credential_kind
 from sheets_hub.calendar_sheet import (
+    LOCK_TTL_SEC,
     classify_slot,
     extract_phone,
     format_lock_label,
@@ -2993,6 +2995,15 @@ class SheetsHubApp(ctk.CTk):
             text=when or f"{record.source_name} · строка {record.row}",
             text_color=MUTED,
         ).pack(padx=16, pady=(16, 4), anchor="w")
+        timer_label = None
+        if calendar and (lock_state is not None or lock_text):
+            timer_label = ctk.CTkLabel(
+                dialog,
+                text="",
+                text_color=MUTED,
+                font=ctk.CTkFont(size=12),
+            )
+            timer_label.pack(padx=16, pady=(0, 2), anchor="w")
         box = _input_box(dialog, "Имя клиента" if calendar else field, "сохранится в ту же ячейку таблицы")
         box.pack(fill="x", padx=16, pady=8)
         entry = _styled_entry(box, "Иванова А. +79001234567" if calendar else "Иванова А.")
@@ -3095,6 +3106,12 @@ class SheetsHubApp(ctk.CTk):
             sync_warn()
 
         state = {"closed": False, "saved": False}
+        timer_job: list[str | None] = [None]
+        lock_deadline = (
+            time.time() + LOCK_TTL_SEC
+            if calendar and (lock_state is not None or lock_text)
+            else 0.0
+        )
 
         def active_lock_text() -> str | None:
             if lock_state is not None:
@@ -3132,6 +3149,12 @@ class SheetsHubApp(ctk.CTk):
             self._run_bg(work, done, alert=False)
 
         def close_dialog(*, restore: bool) -> None:
+            if timer_job[0] is not None:
+                try:
+                    dialog.after_cancel(timer_job[0])
+                except Exception:
+                    pass
+                timer_job[0] = None
             if state["saved"]:
                 release_booking_counter()
                 try:
@@ -3157,6 +3180,33 @@ class SheetsHubApp(ctk.CTk):
 
         if lock_state is not None:
             lock_state["dialog_close"] = lambda restore=True: close_dialog(restore=restore)
+
+        def tick_lock_timer() -> None:
+            if state["closed"] or state["saved"] or not lock_deadline:
+                return
+            left = max(0, int(lock_deadline - time.time()))
+            if timer_label is not None:
+                try:
+                    if left <= 0:
+                        timer_label.configure(text="")
+                    else:
+                        timer_label.configure(
+                            text=f"Слот освободится через {left // 60}:{left % 60:02d}"
+                        )
+                except Exception:
+                    return
+            if left <= 0:
+                messagebox.showinfo(
+                    "Время истекло",
+                    "Время записи истекло (2 мин). Слот снова свободен.",
+                    parent=dialog,
+                )
+                close_dialog(restore=True)
+                return
+            timer_job[0] = dialog.after(500, tick_lock_timer)
+
+        if lock_deadline:
+            timer_job[0] = dialog.after(200, tick_lock_timer)
 
         def save(*, freeing: bool = False) -> None:
             value = entry.get()

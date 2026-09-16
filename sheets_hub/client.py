@@ -1981,6 +1981,9 @@ class SheetsClient:
                     f"Этот слот сейчас заполняет другой оператор{who_line}.\n"
                     "Подождите немного или нажмите «Обновить»."
                 )
+        # Просроченный lock при отмене должен вернуть пустую «запись», а не старый маркер.
+        if is_lock_text(current) and not lock_is_fresh(current):
+            current = ""
         lock_text, _token = make_lock_text()
         # confirm=False — иначе клик ждёт ещё одно чтение (~секунды). Проверка при сохранении.
         self.update_cell(record, "Клиент", lock_text, confirm=False)

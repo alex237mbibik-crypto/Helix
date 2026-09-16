@@ -437,6 +437,7 @@
 <div class="modal-back" id="bookModal">
   <div class="modal">
     <h3 id="bookWhen">Запись</h3>
+    <div id="bookTimer" class="text-muted" style="font-size:0.85rem;margin:-0.35rem 0 0.55rem;"></div>
     <label>Имя клиента</label>
     <input id="bookClient" placeholder="Иванова А. +79001234567" />
     <div id="pregBlock" style="display:none;">
@@ -484,6 +485,8 @@
     slot: null,
     lockText: "",
     lockPrev: "",
+    lockTimer: null,
+    lockDeadline: 0,
     data: null,
     settingsOpen: false,
     infoOpen: false,
@@ -523,7 +526,7 @@
     {
       title: "Заполнение ячеек",
       body:
-        "Кликните по свободной ячейке <strong>«запись»</strong> — откроется окно. Введите имя клиента (и телефон, если нужно) и нажмите «Сохранить». " +
+        "Кликните по свободной ячейке <strong>«запись»</strong> — откроется окно. Введите имя клиента (и телефон, если нужно) и нажмите «Сохранить» (на это есть 2 минуты, иначе слот снова свободен). " +
         "По занятой ячейке можно изменить данные или нажать «Освободить». " +
         "Серые ячейки <strong>«не записывать»</strong> закрыты. Если видите «записывает: Имя» — слот сейчас заполняет этот оператор Windows.",
     },
@@ -979,6 +982,47 @@
     }
   }
 
+  function clearLockTimer() {
+    if (state.lockTimer) {
+      clearInterval(state.lockTimer);
+      state.lockTimer = null;
+    }
+    state.lockDeadline = 0;
+    const el = document.getElementById("bookTimer");
+    if (el) el.textContent = "";
+  }
+
+  function startLockTimer(ttlSec) {
+    clearLockTimer();
+    const ttl = Math.max(10, Number(ttlSec) || 120);
+    state.lockDeadline = Date.now() + ttl * 1000;
+    const el = document.getElementById("bookTimer");
+    const tick = () => {
+      const left = Math.max(0, Math.ceil((state.lockDeadline - Date.now()) / 1000));
+      if (el) {
+        if (left <= 0) {
+          el.textContent = "";
+        } else {
+          const m = Math.floor(left / 60);
+          const s = String(left % 60).padStart(2, "0");
+          el.textContent = "Слот освободится через " + m + ":" + s;
+        }
+      }
+      if (left <= 0) {
+        clearLockTimer();
+        if (
+          document.getElementById("bookModal").classList.contains("open") &&
+          state.lockText
+        ) {
+          alert("Время записи истекло (2 мин). Слот снова свободен.");
+          closeBook();
+        }
+      }
+    };
+    state.lockTimer = setInterval(tick, 500);
+    tick();
+  }
+
   async function openBook(cell) {
     if (!cell) return;
     if (cell.css === "blocked") {
@@ -1024,9 +1068,15 @@
       res.mode === "edit" ? "inline-flex" : "none";
     document.getElementById("bookModal").classList.add("open");
     document.getElementById("bookClient").focus();
+    if (state.lockText) {
+      startLockTimer(res.lock_ttl_sec || 120);
+    } else {
+      clearLockTimer();
+    }
   }
 
   async function closeBook() {
+    clearLockTimer();
     const slot = state.slot;
     const lockText = state.lockText;
     const lockPrev = state.lockPrev;
@@ -1204,6 +1254,7 @@
       return;
     }
     // Уже сохранено — не снимаем lock через cancel.
+    clearLockTimer();
     state.lockText = "";
     state.lockPrev = "";
     state.slot = null;
@@ -1227,6 +1278,7 @@
       alert(res.error || "Ошибка");
       return;
     }
+    clearLockTimer();
     state.lockText = "";
     state.lockPrev = "";
     state.slot = null;

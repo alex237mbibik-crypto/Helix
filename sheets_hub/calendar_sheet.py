@@ -274,7 +274,10 @@ def lock_is_fresh(text: str) -> bool:
 def classify_slot(text: str) -> str:
     raw = _norm(text)
     if is_lock_text(text):
-        return "Записывают"
+        # Просроченный lock = снова свободно («запись»).
+        if lock_is_fresh(text):
+            return "Записывают"
+        return "Свободно"
     if raw in _BLOCKED_MARKERS or raw.startswith("не запис"):
         return "Не записывать"
     if raw in _FREE_MARKERS:
@@ -519,17 +522,23 @@ def parse_calendar_rows(
         for col_idx in date_cols:
             cell = row[col_idx].strip() if col_idx < len(row) else ""
             status = classify_slot(cell)
-            # Для lock оставляем сырой текст ячейки — там имя оператора Windows.
+            # Для свежего lock оставляем сырой текст (имя оператора).
+            # Просроченный lock classify уже считает «Свободно» — ячейка снова «запись».
             display = "" if status == "Свободно" else cell
             name, phone = extract_phone(display) if status == "Занято" else ("", "")
             if status == "Свободно":
                 name, phone = "", ""
             date_label = header[col_idx] if col_idx < len(header) else ""
+            client_value = ""
+            if status == "Записывают":
+                client_value = cell
+            elif status != "Свободно":
+                client_value = name or display
             values = _with_tags(
                 {
                     "Дата": date_label,
                     "Время": time_text,
-                    "Клиент": cell if status == "Записывают" else (name or display),
+                    "Клиент": client_value,
                     "Телефон": phone,
                     "Статус": status,
                     "Адрес": address,
