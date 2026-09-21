@@ -250,18 +250,34 @@ def format_lock_label(text: str = "") -> str:
     return "записывают…"
 
 
+def _lock_written_at(text: str) -> float | None:
+    """Unix-время постановки lock. None — битый/старый формат (считаем просроченным)."""
+    raw = (text or "").strip()
+    if not is_lock_text(raw):
+        return None
+    parts = raw.split("|")
+    if len(parts) < 2 or not parts[0].startswith(_LOCK_PREFIX):
+        return None
+    try:
+        ts = float(parts[1])
+    except ValueError:
+        return None
+    now = time.time()
+    # Часы «в будущем» или мусорная дата — не держим слот вечно.
+    if ts > now + 30 or ts < now - 7 * 24 * 3600:
+        return None
+    return ts
+
+
 def lock_age_sec(text: str) -> float | None:
     """Возраст блокировки в секундах; None если это не lock."""
     raw = (text or "").strip()
     if not is_lock_text(raw):
         return None
-    parts = raw.split("|")
-    if len(parts) >= 2 and parts[0].startswith(_LOCK_PREFIX):
-        try:
-            return max(0.0, time.time() - float(parts[1]))
-        except ValueError:
-            return 0.0
-    return 0.0
+    written = _lock_written_at(raw)
+    if written is None:
+        return float(LOCK_TTL_SEC)
+    return max(0.0, time.time() - written)
 
 
 def lock_is_fresh(text: str) -> bool:
@@ -269,6 +285,24 @@ def lock_is_fresh(text: str) -> bool:
     if age is None:
         return False
     return age < LOCK_TTL_SEC
+
+
+def lock_deadline_unix(text: str) -> float | None:
+    """Когда lock истекает (unix). 0 — уже просрочен. None — это не lock."""
+    raw = (text or "").strip()
+    if not is_lock_text(raw):
+        return None
+    written = _lock_written_at(raw)
+    if written is None:
+        return 0.0
+    return written + LOCK_TTL_SEC
+
+
+def slot_status_now(text: str, status: str = "") -> str:
+    """Актуальный статус слота с учётом TTL, без ожидания перечитывания таблицы."""
+    if is_lock_text(text) or status == "Записывают":
+        return classify_slot(text)
+    return status or classify_slot(text)
 
 
 def classify_slot(text: str) -> str:

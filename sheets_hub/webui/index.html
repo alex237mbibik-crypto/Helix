@@ -496,6 +496,8 @@
     lastInfoSig: "",
     lastTablesSig: "",
     tutorialStep: 0,
+    lockWatch: null,
+    stateWatch: null,
   };
 
   const TUTORIAL_STEPS = [
@@ -545,6 +547,22 @@
 
   function api() {
     return window.pywebview && window.pywebview.api;
+  }
+
+  function isBrowserWeb() {
+    return !api();
+  }
+
+  function operatorName() {
+    try {
+      let name = (localStorage.getItem("helix_operator") || "").trim();
+      if (name) return name.slice(0, 48);
+      name = "web-" + Math.random().toString(36).slice(2, 8);
+      localStorage.setItem("helix_operator", name);
+      return name;
+    } catch (_) {
+      return "web";
+    }
   }
 
   const TUTORIAL_HIDE_KEY = "sheets_hub_tutorial_hide";
@@ -661,6 +679,38 @@
         el.focus();
       }
     }
+  }
+
+  function expireLocksInCalendar() {
+    const cal = state.data && state.data.calendar;
+    if (!cal || !cal.cells) return false;
+    const now = Date.now() / 1000;
+    let changed = false;
+    Object.keys(cal.cells).forEach((key) => {
+      const cell = cal.cells[key];
+      if (!cell || cell.css !== "lock") return;
+      const until = Number(cell.lock_until || 0);
+      if (!until || now < until) return;
+      cell.css = "free";
+      cell.label = "запись";
+      cell.status = "Свободно";
+      cell.lock_until = 0;
+      changed = true;
+    });
+    return changed;
+  }
+
+  function watchLockExpiry() {
+    if (state.lockWatch) {
+      clearInterval(state.lockWatch);
+      state.lockWatch = null;
+    }
+    expireLocksInCalendar();
+    state.lockWatch = setInterval(() => {
+      if (expireLocksInCalendar()) {
+        renderCalendar((state.data && state.data.calendar) || {});
+      }
+    }, 4000);
   }
 
   function renderCalendar(cal) {
@@ -839,6 +889,7 @@
       '<i class="fas fa-user-md"></i> ' + (cal.title || "—");
     renderCalendar(cal);
     renderInfo(data.info || []);
+    watchLockExpiry();
 
     if (state.settingsOpen || options.forceSettings) {
       document.getElementById("saLine").innerHTML =
@@ -1030,14 +1081,22 @@
       return;
     }
     if (cell.css === "lock") {
-      const who = (cell.label || "").replace(/^записывает:\s*/i, "").trim();
-      const whoLine = who && who !== "записывают…" ? ` (${who})` : "";
-      alert(
-        "Этот слот сейчас заполняет другой оператор" +
-          whoLine +
-          ".\nПодождите или нажмите «Обновить»."
-      );
-      return;
+      const until = Number(cell.lock_until || 0);
+      const stillFresh = until && Date.now() / 1000 < until;
+      if (stillFresh) {
+        const who = (cell.label || "").replace(/^записывает:\s*/i, "").trim();
+        const whoLine = who && who !== "записывают…" ? ` (${who})` : "";
+        alert(
+          "Этот слот сейчас заполняет другой оператор" +
+            whoLine +
+            ".\nПодождите или нажмите «Обновить»."
+        );
+        return;
+      }
+      cell.css = "free";
+      cell.label = "запись";
+      cell.status = "Свободно";
+      cell.lock_until = 0;
     }
     const res = await call("begin_slot", {
       spreadsheet_id: cell.spreadsheet_id,
@@ -1046,6 +1105,7 @@
       col: cell.col || 0,
       date: cell.date || "",
       time: cell.time || "",
+      operator: operatorName(),
     });
     if (!res || res.ok === false) {
       alert((res && res.error) || "Не удалось открыть слот");
@@ -1075,6 +1135,47 @@
     }
   }
 
+  function cancelSlotPayload(slot, lockText, lockPrev) {
+    return {
+      spreadsheet_id: slot.spreadsheet_id,
+      sheet: slot.sheet,
+      row: slot.row,
+      col: slot.col || 0,
+      date: slot.date || "",
+      time: slot.time || "",
+      lock_text: lockText,
+      lock_prev: lockPrev,
+    };
+  }
+
+  function releaseLockKeepalive(slot, lockText, lockPrev) {
+    if (!slot || !lockText) return;
+    const payload = cancelSlotPayload(slot, lockText, lockPrev);
+    const a = api();
+    if (a && a.cancel_slot) {
+      try {
+        a.cancel_slot(payload);
+      } catch (_) {}
+      return;
+    }
+    const body = JSON.stringify(payload);
+    try {
+      navigator.sendBeacon(
+        "/api/cancel_slot",
+        new Blob([body], { type: "application/json" })
+      );
+    } catch (_) {}
+    try {
+      fetch("/api/cancel_slot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        keepalive: true,
+        body,
+      });
+    } catch (_) {}
+  }
+
   async function closeBook() {
     clearLockTimer();
     const slot = state.slot;
@@ -1085,16 +1186,7 @@
     state.lockText = "";
     state.lockPrev = "";
     if (slot && lockText) {
-      await call("cancel_slot", {
-        spreadsheet_id: slot.spreadsheet_id,
-        sheet: slot.sheet,
-        row: slot.row,
-        col: slot.col || 0,
-        date: slot.date || "",
-        time: slot.time || "",
-        lock_text: lockText,
-        lock_prev: lockPrev,
-      });
+      await call("cancel_slot", cancelSlotPayload(slot, lockText, lockPrev));
     }
   }
 
@@ -1248,6 +1340,7 @@
       freeing: false,
       lock_text: state.lockText,
       lock_prev: state.lockPrev,
+      operator: operatorName(),
     });
     if (res && res.ok === false) {
       alert(res.error || "Ошибка");
@@ -1383,7 +1476,32 @@
       }, delay);
     }
     scheduleAuto();
+    if (isBrowserWeb()) {
+      if (state.stateWatch) clearInterval(state.stateWatch);
+      state.stateWatch = setInterval(async () => {
+        try {
+          if (document.hidden) return;
+          if (document.getElementById("bookModal").classList.contains("open")) return;
+          if (state.busy) return;
+          await call("get_state");
+        } catch (_) {}
+      }, 15000);
+    }
   }
+
+  window.addEventListener("pagehide", () => {
+    if (state.lockText && state.slot) {
+      releaseLockKeepalive(state.slot, state.lockText, state.lockPrev);
+      state.lockText = "";
+      state.lockPrev = "";
+      state.slot = null;
+    }
+  });
+  window.addEventListener("beforeunload", () => {
+    if (state.lockText && state.slot) {
+      releaseLockKeepalive(state.slot, state.lockText, state.lockPrev);
+    }
+  });
 
   window.addEventListener("pywebviewready", () => {
     bootApp();

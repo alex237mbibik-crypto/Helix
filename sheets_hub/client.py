@@ -1741,7 +1741,33 @@ class SheetsClient:
                 else:
                     msg = str(exc) if isinstance(exc, SheetsError) else str(_friendly_error(exc))
                     errors.append(f"{source.name}: {msg}")
+        try:
+            self.release_expired_calendar_locks(records)
+        except Exception:
+            pass
         return records, errors
+
+    def release_expired_calendar_locks(self, records: list[Record], *, limit: int = 4) -> int:
+        """Стирает просроченные «записывает: …» в Google, чтобы ячейка снова стала «запись»."""
+        cleared = 0
+        for record in records:
+            if cleared >= limit:
+                break
+            if getattr(record, "layout", "") != "calendar":
+                continue
+            raw = str(record.values.get("Клиент") or "")
+            if not is_lock_text(raw) or lock_is_fresh(raw):
+                continue
+            try:
+                self.update_cell(record, "Клиент", "", confirm=False)
+                record.values["Статус"] = "Свободно"
+                record.values["Клиент"] = ""
+                record.values["Телефон"] = ""
+                cleared += 1
+            except Exception:
+                record.values["Статус"] = "Свободно"
+                break
+        return cleared
 
     def update_cell(self, record: Record, field: str, value: str, *, confirm: bool = True) -> None:
         try:
@@ -1964,6 +1990,7 @@ class SheetsClient:
         record: Record,
         *,
         previous_hint: str | None = None,
+        operator: str = "",
     ) -> tuple[str, str]:
         """Ставит маркер «записывают». Быстрый путь: без лишних чтений до/после записи."""
         if previous_hint is not None and not (
@@ -1984,7 +2011,7 @@ class SheetsClient:
         # Просроченный lock при отмене должен вернуть пустую «запись», а не старый маркер.
         if is_lock_text(current) and not lock_is_fresh(current):
             current = ""
-        lock_text, _token = make_lock_text()
+        lock_text, _token = make_lock_text(operator)
         # confirm=False — иначе клик ждёт ещё одно чтение (~секунды). Проверка при сохранении.
         self.update_cell(record, "Клиент", lock_text, confirm=False)
         return current, lock_text

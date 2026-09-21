@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -15,7 +16,9 @@ from sheets_hub.calendar_sheet import (
     extract_phone,
     format_lock_label,
     is_lock_text,
+    lock_deadline_unix,
     lock_operator,
+    slot_status_now,
 )
 from sheets_hub.config import (
     KIND_INFO,
@@ -191,6 +194,7 @@ class HelixApi:
         self._preferred_cache: dict[str, str] = {}
         self._sheet_titles_cache: dict[str, list[str]] = {}
         self._active_lock: dict[str, Any] | None = None
+        self._last_lock_sweep = 0.0
         self._tutorial_hide = False
         self._restore_ui_cache()
         # Одноразовая миграция: включить Telegram на старых ПК с токеном.
@@ -538,9 +542,13 @@ class HelixApi:
         *,
         day_colors: dict[str, tuple[str, str]] | None = None,
     ) -> dict[str, Any]:
-        status = record.values.get("Статус", "")
         client = record.values.get("Клиент", "").strip()
+        status = slot_status_now(client, record.values.get("Статус", ""))
         phone = record.values.get("Телефон", "").strip()
+        lock_until = 0
+        deadline = lock_deadline_unix(client)
+        if status == "Записывают" and deadline:
+            lock_until = int(deadline)
         if status == "Не записывать":
             label, css = "не записывать", "blocked"
             bg, fg = "#eef2f6", "#5a6f84"
@@ -579,6 +587,7 @@ class HelixApi:
             "source_name": record.source_name,
             "ask_pregnancy": self._is_gyn(record),
             "editable": css in {"free", "occupied"},
+            "lock_until": lock_until,
         }
 
     def _shift_mark_colors(
@@ -718,6 +727,13 @@ class HelixApi:
     # --- public API for JS ---
 
     def get_state(self) -> dict[str, Any]:
+        now = time.time()
+        if self.client and now - self._last_lock_sweep >= 20:
+            self._last_lock_sweep = now
+            try:
+                self.client.release_expired_calendar_locks(self.records)
+            except Exception:
+                pass
         return self.snapshot()
 
     def set_tutorial(self, payload: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
@@ -1057,23 +1073,17 @@ class HelixApi:
         )
         if record is None:
             return {"ok": False, "error": "Слот не найден — обновите календарь"}
-        status = record.values.get("Статус", "")
-        if status == "Не записывать":
+        cached = slot_status_now(
+            str(record.values.get("Клиент") or ""),
+            str(record.values.get("Статус") or ""),
+        )
+        if cached == "Не записывать":
             return {
                 "ok": False,
                 "blocked": True,
                 "error": "В эту ячейку нельзя записывать.",
             }
-        if status == "Записывают":
-            who = lock_operator(str(record.values.get("Клиент") or ""))
-            who_line = f" ({who})" if who else ""
-            return {
-                "ok": False,
-                "locked": True,
-                "error": f"Этот слот сейчас заполняет другой оператор{who_line}.\n"
-                "Подождите или нажмите «Обновить».",
-            }
-        if status == "Занято":
+        if cached == "Занято":
             return {
                 "ok": True,
                 "mode": "edit",
@@ -1087,9 +1097,9 @@ class HelixApi:
             previous = self.client.read_cell(record, "Клиент")
         except Exception:
             pass
-        from sheets_hub.calendar_sheet import classify_slot
 
         live = classify_slot(previous)
+        # Просроченный lock в кэше не блокирует слот — смотрим живую ячейку.
         if live == "Не записывать":
             record.values["Статус"] = "Не записывать"
             return {
@@ -1119,7 +1129,9 @@ class HelixApi:
             }
         try:
             lock_prev, lock_text = self.client.acquire_calendar_lock(
-                record, previous_hint=previous
+                record,
+                previous_hint=previous,
+                operator=str(data.get("operator") or ""),
             )
         except Exception as exc:
             return {"ok": False, "locked": True, "error": str(exc)}
@@ -1310,7 +1322,9 @@ class HelixApi:
                     self.client.update_cell(record, "Клиент", to_write)
                 else:
                     acquired_prev, acquired_lock = self.client.acquire_calendar_lock(
-                        record, previous_hint=previous
+                        record,
+                        previous_hint=previous,
+                        operator=str(data.get("operator") or ""),
                     )
                     try:
                         to_write = write_back_value(record, "Клиент", client_text)

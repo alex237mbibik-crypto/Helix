@@ -20,7 +20,9 @@ from sheets_hub.calendar_sheet import (
     format_lock_label,
     info_tone,
     is_lock_text,
+    lock_is_fresh,
     lock_operator,
+    slot_status_now,
 )
 from sheets_hub.client import SheetsClient, SheetsError, contrast_fg, soften_fill
 from sheets_hub.config import (
@@ -470,6 +472,7 @@ class SheetsHubApp(ctk.CTk):
         self._cal_draw_after_id: str | None = None
         self._cal_draw_gen = 0
         self._auto_refresh_after_id: str | None = None
+        self._lock_watch_after_id: str | None = None
         self._booking_open = 0
         self._lock_busy = False
         self._tables_dialog_open = False
@@ -481,6 +484,7 @@ class SheetsHubApp(ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self._on_app_close)
         self.after(200, self._try_connect)
         self._schedule_auto_refresh()
+        self._schedule_lock_watch()
 
     def _persist_config(self, *, quiet: bool = True) -> bool:
         """Пишет config.yaml (рядом с exe или в AppData без запросов прав)."""
@@ -1730,6 +1734,36 @@ class SheetsHubApp(ctk.CTk):
         finally:
             self._schedule_auto_refresh()
 
+    def _schedule_lock_watch(self) -> None:
+        if self._lock_watch_after_id is not None:
+            try:
+                self.after_cancel(self._lock_watch_after_id)
+            except Exception:
+                pass
+        self._lock_watch_after_id = self.after(5000, self._lock_watch_tick)
+
+    def _lock_watch_tick(self) -> None:
+        self._lock_watch_after_id = None
+        try:
+            changed = False
+            for record in self.records:
+                if getattr(record, "layout", "") != "calendar":
+                    continue
+                raw = str(record.values.get("Клиент") or "")
+                if not is_lock_text(raw):
+                    continue
+                if record.values.get("Статус") != "Записывают":
+                    continue
+                if lock_is_fresh(raw):
+                    continue
+                record.values["Статус"] = "Свободно"
+                self._refresh_slot_label(record)
+                changed = True
+            if changed:
+                self._set_status("Просроченные блокировки слотов сняты")
+        finally:
+            self._schedule_lock_watch()
+
     def _registry_configured(self) -> bool:
         text = (self.config_data.registry_spreadsheet_id or "").strip()
         return bool(text) and not text.upper().startswith("PASTE_")
@@ -2016,14 +2050,14 @@ class SheetsHubApp(ctk.CTk):
         )
 
     def _slot_visual(self, record: Record) -> tuple[str, str, str, bool]:
-        status = record.values.get("Статус", "")
+        client = record.values.get("Клиент", "").strip()
+        status = slot_status_now(client, record.values.get("Статус", ""))
         sheet_bg = str(record.values.get("_bg") or "").strip()
         if sheet_bg:
             sheet_bg = soften_fill(sheet_bg, fallback=SLOT_GREEN)
         if status == "Не записывать":
             return "не записывать", SLOT_BLOCKED, MUTED, False
         if status == "Записывают":
-            client = record.values.get("Клиент", "").strip()
             return format_lock_label(client), SLOT_LOCK, "#3e2723", True
         if status == "Занято":
             name = record.values.get("Клиент", "").strip() or "занято"
@@ -2071,7 +2105,10 @@ class SheetsHubApp(ctk.CTk):
             record = getattr(label, "_record", None)
             if record is None:
                 continue
-            status = record.values.get("Статус", "")
+            status = slot_status_now(
+                str(record.values.get("Клиент") or ""),
+                str(record.values.get("Статус") or ""),
+            )
             blob = " ".join(
                 [
                     record.values.get("Клиент", ""),
@@ -2520,7 +2557,11 @@ class SheetsHubApp(ctk.CTk):
         if record.values.get("Статус") == "Не записывать":
             messagebox.showinfo("Слот закрыт", "В эту ячейку нельзя записывать.")
             return
-        if record.values.get("Статус") == "Записывают":
+        live_status = slot_status_now(
+            str(record.values.get("Клиент") or ""),
+            str(record.values.get("Статус") or ""),
+        )
+        if live_status == "Записывают":
             who = lock_operator(str(record.values.get("Клиент") or ""))
             who_line = f" ({who})" if who else ""
             messagebox.showwarning(
@@ -2529,6 +2570,12 @@ class SheetsHubApp(ctk.CTk):
                 "Подождите или нажмите «Обновить».",
             )
             return
+        if live_status != record.values.get("Статус"):
+            record.values["Статус"] = live_status
+            if live_status == "Свободно":
+                record.values["Клиент"] = ""
+                record.values["Телефон"] = ""
+            self._refresh_slot_label(record)
         if not self.client:
             messagebox.showerror("Нет подключения", "Сначала подключите ключ в «Таблицы».")
             return

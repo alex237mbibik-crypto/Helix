@@ -103,7 +103,10 @@ def create_app() -> FastAPI:
 
     @app.get("/")
     async def index() -> FileResponse:
-        return FileResponse(_ui_index(), media_type="text/html; charset=utf-8")
+        response = FileResponse(_ui_index(), media_type="text/html; charset=utf-8")
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        return response
 
     @app.get("/health")
     async def health() -> dict[str, bool]:
