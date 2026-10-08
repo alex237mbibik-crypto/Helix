@@ -3238,11 +3238,15 @@ class SheetsHubApp(ctk.CTk):
                         timer_label.configure(text="")
                     else:
                         timer_label.configure(
-                            text=f"Слот освободится через {left // 60}:{left % 60:02d}"
+                            text=f"Время на запись: {left // 60}:{left % 60:02d}"
                         )
                 except Exception:
                     return
             if left <= 0:
+                typed = entry.get().strip()
+                if typed and typed.lower() != "запись":
+                    save(freeing=False, on_expire=True)
+                    return
                 messagebox.showinfo(
                     "Время истекло",
                     "Время записи истекло (2 мин). Слот снова свободен.",
@@ -3255,7 +3259,7 @@ class SheetsHubApp(ctk.CTk):
         if lock_deadline:
             timer_job[0] = dialog.after(200, tick_lock_timer)
 
-        def save(*, freeing: bool = False) -> None:
+        def save(*, freeing: bool = False, on_expire: bool = False) -> None:
             value = entry.get()
             if not self.client:
                 messagebox.showerror("Нет подключения", "Сначала подключите ключ в «Таблицы».")
@@ -3274,7 +3278,12 @@ class SheetsHubApp(ctk.CTk):
             if calendar and not freeing:
                 typed = value.strip()
                 booking = typed and typed.lower() != "запись" and "не запис" not in typed.lower()
-                if ask_pregnancy and booking and pregnant_var.get() not in {"yes", "no"}:
+                if (
+                    ask_pregnancy
+                    and booking
+                    and not on_expire
+                    and pregnant_var.get() not in {"yes", "no"}
+                ):
                     messagebox.showwarning(
                         "Беременность",
                         "Выберите: беременна или не беременна.",
@@ -3285,7 +3294,9 @@ class SheetsHubApp(ctk.CTk):
             def work():
                 lt = active_lock_text()
                 if lt:
-                    self.client.assert_calendar_lock(record, lt)
+                    self.client.assert_calendar_lock(
+                        record, lt, previous=active_previous()
+                    )
                 to_write = write_back_value(record, field, value)
                 self.client.update_cell(record, field, to_write)
                 record.values[field] = value
@@ -3361,6 +3372,12 @@ class SheetsHubApp(ctk.CTk):
                 else:
                     self._schedule_render(immediate=True)
                 self._set_status(f"Сохранено в таблицу: {when or record.source_name}")
+                if on_expire:
+                    messagebox.showinfo(
+                        "Время истекло",
+                        "Введённые данные записаны в таблицу.",
+                        parent=self,
+                    )
                 close_dialog(restore=False)
                 self.reload_all()
 

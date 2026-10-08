@@ -28,6 +28,7 @@ from urllib3.util.retry import Retry
 
 from sheets_hub.auth import AuthError, account_label, credential_kind, load_gspread_credentials
 from sheets_hub.calendar_sheet import (
+    classify_slot,
     is_calendar_matrix,
     is_lock_text,
     lock_is_fresh,
@@ -1178,6 +1179,17 @@ def _read_cell_via_requests_insecure(
     return str(values[0][0] or "").strip()
 
 
+def _cell_still_ours(current: str, previous: str) -> bool:
+    """Ячейка всё ещё наша: пометку сняли и вернули прежнее свободное значение."""
+    cur = (current or "").strip()
+    prev = (previous or "").strip()
+    if cur == prev:
+        return True
+    if classify_slot(cur) != "Свободно":
+        return False
+    return (not prev) or classify_slot(prev) == "Свободно" or is_lock_text(prev)
+
+
 def _can_try_public_read(source: SheetRef) -> bool:
     spreadsheet_id = source.normalized_id()
     return bool(spreadsheet_id) and not spreadsheet_id.upper().startswith("PASTE_")
@@ -1748,7 +1760,11 @@ class SheetsClient:
         return records, errors
 
     def release_expired_calendar_locks(self, records: list[Record], *, limit: int = 4) -> int:
-        """Стирает просроченные «записывает: …» в Google, чтобы ячейка снова стала «запись»."""
+        """Стирает просроченные «записывает: …» в Google, чтобы ячейка снова стала «запись».
+
+        Только если в самой таблице всё ещё эта пометка. Иначе кэш другого ПК
+        затирает уже сохранённое имя клиента.
+        """
         cleared = 0
         for record in records:
             if cleared >= limit:
@@ -1759,13 +1775,32 @@ class SheetsClient:
             if not is_lock_text(raw) or lock_is_fresh(raw):
                 continue
             try:
+                live = self.read_cell(record, "Клиент")
+            except Exception:
+                continue
+            if live != raw or not is_lock_text(live) or lock_is_fresh(live):
+                record.values["Клиент"] = live
+                record.values["Статус"] = classify_slot(live)
+                if classify_slot(live) == "Свободно":
+                    record.values["Телефон"] = ""
+                continue
+            try:
+                again = self.read_cell(record, "Клиент")
+            except Exception:
+                continue
+            if again != live or not is_lock_text(again) or lock_is_fresh(again):
+                record.values["Клиент"] = again
+                record.values["Статус"] = classify_slot(again)
+                if classify_slot(again) == "Свободно":
+                    record.values["Телефон"] = ""
+                continue
+            try:
                 self.update_cell(record, "Клиент", "", confirm=False)
                 record.values["Статус"] = "Свободно"
                 record.values["Клиент"] = ""
                 record.values["Телефон"] = ""
                 cleared += 1
             except Exception:
-                record.values["Статус"] = "Свободно"
                 break
         return cleared
 
@@ -2016,10 +2051,18 @@ class SheetsClient:
         self.update_cell(record, "Клиент", lock_text, confirm=False)
         return current, lock_text
 
-    def assert_calendar_lock(self, record: Record, lock_text: str) -> None:
-        """Перед сохранением: слот всё ещё наш."""
+    def assert_calendar_lock(
+        self, record: Record, lock_text: str, *, previous: str | None = None
+    ) -> None:
+        """Перед сохранением: слот всё ещё наш.
+
+        Срок пометки «записывают» мог истечь, и ячейку уже вернули в «запись».
+        Имя клиента всё равно можно записать, если слот никто другой не занял.
+        """
         current = self.read_cell(record, "Клиент")
         if current == lock_text:
+            return
+        if previous is not None and _cell_still_ours(current, previous):
             return
         if is_lock_text(current) and lock_is_fresh(current):
             from sheets_hub.calendar_sheet import lock_operator

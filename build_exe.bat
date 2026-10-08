@@ -9,7 +9,7 @@ if not exist ".venv\Scripts\python.exe" (
 echo Собираю SheetsHub.exe ...
 ".venv\Scripts\pyinstaller.exe" --noconfirm --clean --windowed --onedir --name SheetsHub --noupx --collect-all customtkinter --collect-all certifi --collect-all gspread --collect-all google_auth_oauthlib --collect-all webview --hidden-import=certifi --hidden-import=google_auth_oauthlib --hidden-import=google_auth_oauthlib.flow --hidden-import=webview --add-data "config.example.yaml;." --add-data "sheets_hub/webui;webui" launcher.py
 copy /Y config.example.yaml dist\SheetsHub\ >nul
-copy /Y config.example.yaml dist\SheetsHub\config.yaml >nul
+if exist dist\SheetsHub\config.yaml del /F /Q dist\SheetsHub\config.yaml >nul
 if not exist dist\SheetsHub\webui mkdir dist\SheetsHub\webui
 xcopy /E /I /Y sheets_hub\webui dist\SheetsHub\webui >nul
 if exist credentials.example.json copy /Y credentials.example.json dist\SheetsHub\ >nul

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -196,6 +197,14 @@ class HelixApi:
         self._active_lock: dict[str, Any] | None = None
         self._last_lock_sweep = 0.0
         self._tutorial_hide = False
+        self.updater = None
+        try:
+            from sheets_hub.updater import UpdateController
+
+            self.updater = UpdateController()
+            self.updater.start_background_check()
+        except Exception:
+            self.updater = None
         self._restore_ui_cache()
         # Одноразовая миграция: включить Telegram на старых ПК с токеном.
         if self.config._persist_telegram_defaults:
@@ -722,6 +731,7 @@ class HelixApi:
                     "has_password": bool((self.config.ui.tables_password or "").strip()),
                     "show_tutorial": not bool(self._tutorial_hide),
                 },
+                "update": self.updater.snapshot() if self.updater else {"status": "idle", "frozen": False},
             }
 
     # --- public API for JS ---
@@ -735,6 +745,36 @@ class HelixApi:
             except Exception:
                 pass
         return self.snapshot()
+
+    def check_update(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        data = payload or {}
+        if not self.updater:
+            return {"ok": False, "error": "Обновления недоступны", **self.snapshot()}
+        try:
+            self.updater.check(download=bool(data.get("download")))
+        except Exception as exc:
+            return {"ok": False, "error": str(exc).split("\n")[0], **self.snapshot()}
+        return {"ok": True, **self.snapshot()}
+
+    def apply_update(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if not self.updater:
+            return {"ok": False, "error": "Обновления недоступны"}
+        try:
+            result = self.updater.apply()
+        except Exception as exc:
+            return {"ok": False, "error": str(exc).split("\n")[0], **self.snapshot()}
+
+        def _exit() -> None:
+            time.sleep(1.2)
+            try:
+                if self._window:
+                    self._window.destroy()
+            except Exception:
+                pass
+            os._exit(0)
+
+        threading.Thread(target=_exit, daemon=True).start()
+        return {"ok": True, "restarting": True, "update": result, **self.snapshot()}
 
     def set_tutorial(self, payload: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
         """Сохранить выбор «не показывать туториал»."""
@@ -1280,9 +1320,11 @@ class HelixApi:
         client_text = str(data.get("client") or "").strip()
         pregnant = str(data.get("pregnant") or "").strip()
         freeing = bool(data.get("freeing"))
+        # Срок вышел — имя всё равно пишем, даже если не успели отметить беременность.
+        on_expire = bool(data.get("expired"))
         lock_text = str(data.get("lock_text") or "").strip()
         lock_prev = data.get("lock_prev")
-        if not freeing and self._is_gyn(record):
+        if not freeing and not on_expire and self._is_gyn(record):
             if client_text and client_text.lower() != "запись" and "не запис" not in client_text.lower():
                 if pregnant not in {"yes", "no"}:
                     return {"ok": False, "error": "Выберите: беременна или не беременна.", "need_pregnancy": True}
@@ -1315,7 +1357,11 @@ class HelixApi:
 
                 if lock_text:
                     try:
-                        self.client.assert_calendar_lock(record, lock_text)
+                        self.client.assert_calendar_lock(
+                            record,
+                            lock_text,
+                            previous=None if lock_prev is None else str(lock_prev),
+                        )
                     except Exception as exc:
                         return {"ok": False, "error": str(exc), "locked": True}
                     to_write = write_back_value(record, "Клиент", client_text)
@@ -1328,7 +1374,9 @@ class HelixApi:
                     )
                     try:
                         to_write = write_back_value(record, "Клиент", client_text)
-                        self.client.assert_calendar_lock(record, acquired_lock)
+                        self.client.assert_calendar_lock(
+                            record, acquired_lock, previous=acquired_prev
+                        )
                         self.client.update_cell(record, "Клиент", to_write)
                     except Exception:
                         try:

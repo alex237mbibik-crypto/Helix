@@ -38,6 +38,8 @@ _API_METHODS = frozenset(
         "save_registry",
         "load_cloud_tables",
         "save_cloud_tables",
+        "check_update",
+        "apply_update",
     }
 )
 

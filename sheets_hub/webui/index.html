@@ -277,9 +277,24 @@
       white-space: pre-wrap;
     }
     .footer-meta {
-      display: flex; justify-content: flex-end; gap: 1.2rem; font-size: 0.8rem; color: #5e7b98;
+      display: flex; justify-content: flex-end; gap: 1.2rem;       font-size: 0.8rem; color: #5e7b98;
       padding: 0.2rem 0.5rem;
     }
+    #updateBar {
+      display: none;
+      margin: 0 0 1rem;
+      padding: 0.7rem 1rem;
+      border-radius: 16px;
+      background: #fff8e6;
+      border: 1px solid #ead7a0;
+      color: #5c4a12;
+      font-size: 0.9rem;
+      align-items: center;
+      gap: 0.8rem;
+      flex-wrap: wrap;
+    }
+    #updateBar.show { display: flex; }
+    #updateBar button { margin: 0; }
     @media (max-width: 720px) {
       .card { padding: 1.2rem 1rem; border-radius: 32px; }
       .calendar-table td, .calendar-table th { font-size: 0.75rem; padding: 0.3rem 0.4rem; }
@@ -296,6 +311,10 @@
       <span style="margin-left: auto; font-size: 0.8rem; opacity: 0.7;" id="emailTop">
         <i class="fas fa-cloud"></i> нет ключа
       </span>
+    </div>
+    <div id="updateBar">
+      <span id="updateText">Проверяю обновление…</span>
+      <button class="btn btn-primary" id="btnUpdate" type="button" style="display:none;">Обновить и перезапустить</button>
     </div>
 
     <div class="flex-row" id="filtersRow">
@@ -528,7 +547,7 @@
     {
       title: "Заполнение ячеек",
       body:
-        "Кликните по свободной ячейке <strong>«запись»</strong> — откроется окно. Введите имя клиента (и телефон, если нужно) и нажмите «Сохранить» (на это есть 2 минуты, иначе слот снова свободен). " +
+        "Кликните по свободной ячейке <strong>«запись»</strong> — откроется окно. Введите имя клиента (и телефон, если нужно) и нажмите «Сохранить». На это есть 2 минуты: если не успели нажать кнопку, введённое имя всё равно попадёт в таблицу. " +
         "По занятой ячейке можно изменить данные или нажать «Освободить». " +
         "Серые ячейки <strong>«не записывать»</strong> закрыты. Если видите «записывает: Имя» — слот сейчас заполняет этот оператор Windows.",
     },
@@ -856,6 +875,46 @@
     return rows;
   }
 
+  function renderUpdate(info) {
+    const bar = document.getElementById("updateBar");
+    const text = document.getElementById("updateText");
+    const btn = document.getElementById("btnUpdate");
+    if (!bar || !text || !btn) return;
+    const u = info || {};
+    const status = u.status || "idle";
+    if (!u.frozen && status === "idle") {
+      bar.classList.remove("show");
+      return;
+    }
+    if (status === "idle" || status === "current") {
+      bar.classList.remove("show");
+      btn.style.display = "none";
+      return;
+    }
+    bar.classList.add("show");
+    if (status === "downloading") {
+      text.textContent = "Скачиваю обновление… " + (u.percent || 0) + "%";
+      btn.style.display = "none";
+    } else if (status === "available") {
+      text.textContent = "Доступна новая версия (" + (u.latest || "сборка") + "). Можно обновить без обхода ПК.";
+      btn.style.display = "inline-flex";
+      btn.textContent = "Скачать";
+    } else if (status === "ready" || status === "restarting") {
+      text.textContent =
+        status === "restarting"
+          ? "Перезапускаю программу…"
+          : "Обновление скачано. Нажмите, чтобы перезапустить (слоты в Google не пропадут).";
+      btn.style.display = "inline-flex";
+      btn.textContent = "Обновить и перезапустить";
+    } else if (status === "error") {
+      text.textContent = "Не удалось проверить обновление: " + (u.error || "нет сети");
+      btn.style.display = "inline-flex";
+      btn.textContent = "Повторить";
+    } else {
+      bar.classList.remove("show");
+    }
+  }
+
   function applyState(data, opts) {
     if (!data) return;
     const options = opts || {};
@@ -881,6 +940,7 @@
       '<i class="fas fa-stethoscope" style="color:#2a7d5a;"></i> ' + (data.status || "");
     const email = data.email || "нет ключа";
     document.getElementById("emailTop").innerHTML = '<i class="fas fa-cloud"></i> ' + email;
+    renderUpdate(data.update);
     const cal = data.calendar || {};
     document.getElementById("calBadge").textContent = cal.title || "—";
     document.getElementById("chipSlots").innerHTML =
@@ -1056,17 +1116,18 @@
         } else {
           const m = Math.floor(left / 60);
           const s = String(left % 60).padStart(2, "0");
-          el.textContent = "Слот освободится через " + m + ":" + s;
+          el.textContent = "Время на запись: " + m + ":" + s;
         }
       }
       if (left <= 0) {
         clearLockTimer();
         if (
           document.getElementById("bookModal").classList.contains("open") &&
-          state.lockText
+          state.lockText &&
+          !state.expireSave
         ) {
-          alert("Время записи истекло (2 мин). Слот снова свободен.");
-          closeBook();
+          state.expireSave = true;
+          saveExpiredBooking();
         }
       }
     };
@@ -1115,6 +1176,8 @@
     state.slot = cell;
     state.lockText = res.lock_text || "";
     state.lockPrev = res.lock_prev || "";
+    state.expireSave = false;
+    state.leaveFlushed = false;
     document.getElementById("bookWhen").textContent =
       (cell.date || "") + " · " + (cell.time || "");
     document.getElementById("bookClient").value =
@@ -1174,6 +1237,88 @@
         body,
       });
     } catch (_) {}
+  }
+
+  function pendingClientText() {
+    const el = document.getElementById("bookClient");
+    const text = ((el && el.value) || "").trim();
+    if (!text || text.toLowerCase() === "запись") return "";
+    return text;
+  }
+
+  function saveSlotPayload(slot, lockText, lockPrev, clientText) {
+    const preg = document.querySelector('input[name="preg"]:checked');
+    return {
+      spreadsheet_id: slot.spreadsheet_id,
+      sheet: slot.sheet,
+      row: slot.row,
+      col: slot.col || 0,
+      date: slot.date || "",
+      time: slot.time || "",
+      client: clientText,
+      pregnant: preg ? preg.value : "",
+      freeing: false,
+      expired: true,
+      lock_text: lockText,
+      lock_prev: lockPrev,
+      operator: operatorName(),
+    };
+  }
+
+  function saveLockKeepalive(slot, lockText, lockPrev, clientText) {
+    if (!slot || !lockText || !clientText) return;
+    const payload = saveSlotPayload(slot, lockText, lockPrev, clientText);
+    const a = api();
+    if (a && a.book_slot) {
+      try {
+        a.book_slot(payload);
+      } catch (_) {}
+      return;
+    }
+    const body = JSON.stringify(payload);
+    try {
+      navigator.sendBeacon(
+        "/api/book_slot",
+        new Blob([body], { type: "application/json" })
+      );
+    } catch (_) {}
+    try {
+      fetch("/api/book_slot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        keepalive: true,
+        body,
+      });
+    } catch (_) {}
+  }
+
+  async function saveExpiredBooking() {
+    const slot = state.slot;
+    const lockText = state.lockText;
+    const lockPrev = state.lockPrev;
+    const text = pendingClientText();
+    if (!slot || !lockText || !text) {
+      state.expireSave = false;
+      await closeBook();
+      return;
+    }
+    const res = await call("book_slot", saveSlotPayload(slot, lockText, lockPrev, text));
+    state.expireSave = false;
+    if (res && res.ok === false) {
+      alert(
+        (res.error || "Не удалось записать данные") +
+          "\nТекст ещё в окне — нажмите «Сохранить»."
+      );
+      if (state.lockText) startLockTimer(30);
+      return;
+    }
+    clearLockTimer();
+    state.lockText = "";
+    state.lockPrev = "";
+    state.slot = null;
+    document.getElementById("bookModal").classList.remove("open");
+    alert("Время вышло. Введённые данные записаны в таблицу.");
   }
 
   async function closeBook() {
@@ -1255,6 +1400,21 @@
     searchTimer = setTimeout(pushFilters, 450);
   });
   document.getElementById("btnRefresh").addEventListener("click", () => refresh(true));
+  document.getElementById("btnUpdate").addEventListener("click", async () => {
+    const u = (state.data && state.data.update) || {};
+    const status = u.status || "";
+    if (status === "ready" || status === "restarting") {
+      const res = await call("apply_update", {});
+      if (res && res.ok === false) {
+        alert(res.error || "Не удалось применить обновление");
+        return;
+      }
+      document.getElementById("updateText").textContent = "Перезапускаю программу…";
+      setTimeout(() => location.reload(), 8000);
+      return;
+    }
+    await call("check_update", { download: true });
+  });
   document.getElementById("infoToggle").addEventListener("click", () => {
     state.infoOpen = !state.infoOpen;
     const body = document.getElementById("infoBody");
@@ -1476,6 +1636,16 @@
       }, delay);
     }
     scheduleAuto();
+    setInterval(async () => {
+      const u = (state.data && state.data.update) || {};
+      if (!u.frozen && u.status !== "downloading" && u.status !== "available" && u.status !== "ready") {
+        return;
+      }
+      if (document.getElementById("bookModal").classList.contains("open")) return;
+      try {
+        await call("get_state");
+      } catch (_) {}
+    }, 6000);
     if (isBrowserWeb()) {
       if (state.stateWatch) clearInterval(state.stateWatch);
       state.stateWatch = setInterval(async () => {
@@ -1489,19 +1659,19 @@
     }
   }
 
-  window.addEventListener("pagehide", () => {
-    if (state.lockText && state.slot) {
-      releaseLockKeepalive(state.slot, state.lockText, state.lockPrev);
-      state.lockText = "";
-      state.lockPrev = "";
-      state.slot = null;
-    }
-  });
-  window.addEventListener("beforeunload", () => {
-    if (state.lockText && state.slot) {
-      releaseLockKeepalive(state.slot, state.lockText, state.lockPrev);
-    }
-  });
+  function flushOrReleaseOnLeave() {
+    if (!(state.lockText && state.slot) || state.leaveFlushed) return;
+    state.leaveFlushed = true;
+    const text = pendingClientText();
+    if (text) saveLockKeepalive(state.slot, state.lockText, state.lockPrev, text);
+    else releaseLockKeepalive(state.slot, state.lockText, state.lockPrev);
+    state.lockText = "";
+    state.lockPrev = "";
+    state.slot = null;
+  }
+
+  window.addEventListener("pagehide", flushOrReleaseOnLeave);
+  window.addEventListener("beforeunload", flushOrReleaseOnLeave);
 
   window.addEventListener("pywebviewready", () => {
     bootApp();

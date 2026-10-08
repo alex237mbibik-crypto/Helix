@@ -126,6 +126,12 @@ build_exe.bat
 
 Готовый файл: `dist\SheetsHub\SheetsHub.exe`. Нужна **вся папка** `SheetsHub` вместе с `_internal` (один `.exe` без неё не запустится).
 
+### Обновление на всех ПК
+
+Пуш в `main` собирает exe и публикует GitHub Release (`SheetsHub-Windows.zip`). Сборка 0.2+ на компьютере **сама скачивает** обновление; оператор нажимает «Обновить и перезапустить».
+
+Первый раз на 50 машин достаточно раздать `packaging/install_or_update.bat` (ярлык в общей папке): скрипт ставит программу в `%LOCALAPPDATA%\SheetsHub\app` и **не затирает** `config.yaml` и `credentials.json`. Пока окно открыто, exe нельзя перезаписать — смена файлов только при коротком перезапуске.
+
 В CI можно положить `credentials.json` в архив через GitHub Secret `SHEETS_HUB_CREDENTIALS_JSON`. Если секрета нет — положите SA JSON рядом с exe вручную. Локально: скопируйте JSON в `packaging/bundled_credentials.json` перед `build_exe.bat`.
 
 

@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -49,13 +49,15 @@ jobs:
             exit /b 1
           )
           copy /Y config.example.yaml dist\SheetsHub\
-          copy /Y config.example.yaml dist\SheetsHub\config.yaml
+          if exist dist\SheetsHub\config.yaml del /F /Q dist\SheetsHub\config.yaml
           if not exist dist\SheetsHub\webui mkdir dist\SheetsHub\webui
           xcopy /E /I /Y sheets_hub\webui dist\SheetsHub\webui
           if exist credentials.example.json copy /Y credentials.example.json dist\SheetsHub\
           if exist packaging\bundled_credentials.json copy /Y packaging\bundled_credentials.json dist\SheetsHub\credentials.json
           if exist packaging\HOW_TO_RUN.txt copy /Y packaging\HOW_TO_RUN.txt dist\SheetsHub\
           if exist packaging\start_SheetsHub.bat copy /Y packaging\start_SheetsHub.bat dist\SheetsHub\
+          if exist packaging\install_or_update.bat copy /Y packaging\install_or_update.bat dist\SheetsHub\
+          python -c "import json,os; from pathlib import Path; Path('dist/SheetsHub/version.json').write_text(json.dumps({'version':'0.2.0','build':int(os.environ.get('GITHUB_RUN_NUMBER') or '1')}, ensure_ascii=False), encoding='utf-8')"
           if exist packaging\Helix_Front.html copy /Y packaging\Helix_Front.html dist\SheetsHub\
           for /f "delims=" %%i in ('python -c "import certifi; print(certifi.where())"') do copy /Y "%%i" dist\SheetsHub\cacert.pem
           if exist dist\SheetsHub\credentials.json (
@@ -71,3 +73,20 @@ jobs:
           path: dist/SheetsHub/
           if-no-files-found: error
           compression-level: 0
+
+      - name: Zip build for auto-update
+        shell: pwsh
+        run: |
+          if (Test-Path dist/SheetsHub-Windows.zip) { Remove-Item dist/SheetsHub-Windows.zip }
+          Compress-Archive -Path dist/SheetsHub/* -DestinationPath dist/SheetsHub-Windows.zip -Force
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: b${{ github.run_number }}
+          name: Sheets Hub build ${{ github.run_number }}
+          files: dist/SheetsHub-Windows.zip
+          generate_release_notes: true
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

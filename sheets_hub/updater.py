@@ -1,0 +1,318 @@
+"""Автообновление Windows-сборки с GitHub Releases.
+
+Пока программа запущена, exe нельзя перезаписать. Новая сборка качается
+в фоне, затем короткий перезапуск ставит файлы на место.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import zipfile
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+
+import requests
+
+from sheets_hub.config import app_root, user_data_dir
+
+GITHUB_REPO = (os.environ.get("SHEETS_HUB_GITHUB") or "alex237mbibik-crypto/Helix").strip()
+ASSET_NAME = "SheetsHub-Windows.zip"
+
+
+@dataclass
+class LocalVersion:
+    version: str
+    build: int
+    frozen: bool
+
+
+def local_version() -> LocalVersion:
+    frozen = bool(getattr(sys, "frozen", False))
+    version = "0.1.0"
+    build = 0
+    try:
+        from sheets_hub import __version__ as pkg_ver
+
+        version = str(pkg_ver or version)
+    except Exception:
+        pass
+    path = app_root() / "version.json"
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            version = str(data.get("version") or version)
+            build = int(data.get("build") or 0)
+        except Exception:
+            pass
+    return LocalVersion(version=version, build=build, frozen=frozen)
+
+
+def _updates_dir() -> Path:
+    path = user_data_dir() / "updates"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _headers() -> dict[str, str]:
+    return {"User-Agent": "SheetsHub-Updater", "Accept": "application/vnd.github+json"}
+
+
+def _parse_build(tag: str, body: str = "") -> int:
+    text = f"{tag} {body}"
+    match = re.search(r"(?:^|[^\d])b(\d{1,9})\b", text, re.I)
+    if match:
+        return int(match.group(1))
+    match = re.search(r"build\s+(\d{1,9})", text, re.I)
+    if match:
+        return int(match.group(1))
+    digits = re.findall(r"\d+", tag or "")
+    if digits:
+        return int(digits[-1])
+    return 0
+
+
+def fetch_latest_release() -> dict[str, Any]:
+    override = (os.environ.get("SHEETS_HUB_UPDATE_JSON") or "").strip()
+    if override:
+        data = requests.get(override, timeout=20, headers=_headers()).json()
+        return data if isinstance(data, dict) else {}
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+    data = requests.get(url, timeout=20, headers=_headers()).json()
+    if not isinstance(data, dict):
+        raise RuntimeError("Неожиданный ответ GitHub")
+    if str(data.get("message") or "").lower() == "not found":
+        return {"tag_name": "b0", "assets": [], "name": ""}
+    if data.get("message"):
+        raise RuntimeError(str(data.get("message")))
+    return data
+
+
+def _asset_url(release: dict[str, Any]) -> str:
+    env_url = (os.environ.get("SHEETS_HUB_UPDATE_ZIP") or "").strip()
+    if env_url:
+        return env_url
+    for asset in release.get("assets") or []:
+        name = str((asset or {}).get("name") or "")
+        url = str((asset or {}).get("browser_download_url") or "")
+        if name == ASSET_NAME and url:
+            return url
+    for asset in release.get("assets") or []:
+        url = str((asset or {}).get("browser_download_url") or "")
+        if url.endswith(".zip"):
+            return url
+    raise RuntimeError("В релизе нет zip-сборки SheetsHub-Windows.zip")
+
+
+def inspect_latest() -> dict[str, Any]:
+    current = local_version()
+    out: dict[str, Any] = {
+        "ok": True,
+        "status": "current",
+        "current": current.version,
+        "build": current.build,
+        "frozen": current.frozen,
+        "latest": current.version,
+        "latest_build": current.build,
+        "notes": "",
+        "error": "",
+    }
+    try:
+        release = fetch_latest_release()
+    except Exception as exc:
+        out["status"] = "error"
+        out["error"] = str(exc).split("\n")[0]
+        return out
+    tag = str(release.get("tag_name") or "")
+    latest_build = _parse_build(tag, str(release.get("body") or ""))
+    out["latest"] = str(release.get("name") or tag or current.version)
+    out["latest_build"] = latest_build
+    out["tag"] = tag
+    out["notes"] = str(release.get("body") or "")[:800]
+    if latest_build > current.build:
+        out["status"] = "available"
+        try:
+            out["zip_url"] = _asset_url(release)
+        except Exception as exc:
+            out["status"] = "error"
+            out["error"] = str(exc)
+    return out
+
+
+def _payload_dir(extracted: Path) -> Path:
+    exe_here = list(extracted.glob("SheetsHub.exe"))
+    if exe_here:
+        return extracted
+    nested = [p for p in extracted.iterdir() if p.is_dir()]
+    for folder in nested:
+        if (folder / "SheetsHub.exe").exists():
+            return folder
+    raise RuntimeError("В архиве нет SheetsHub.exe")
+
+
+def download_latest(progress: dict[str, Any] | None = None) -> Path:
+    info = inspect_latest()
+    if info.get("status") != "available":
+        raise RuntimeError(info.get("error") or "Нет новой версии")
+    zip_url = str(info.get("zip_url") or "")
+    if not zip_url:
+        raise RuntimeError("Нет ссылки на сборку")
+    dest_zip = _updates_dir() / "pending.zip"
+    dest_dir = _updates_dir() / "pending"
+    if dest_dir.exists():
+        shutil.rmtree(dest_dir, ignore_errors=True)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    if progress is not None:
+        progress["status"] = "downloading"
+        progress["error"] = ""
+    with requests.get(zip_url, stream=True, timeout=120, headers=_headers()) as resp:
+        resp.raise_for_status()
+        total = int(resp.headers.get("content-length") or 0)
+        done = 0
+        with dest_zip.open("wb") as handle:
+            for chunk in resp.iter_content(chunk_size=256 * 1024):
+                if not chunk:
+                    continue
+                handle.write(chunk)
+                done += len(chunk)
+                if progress is not None and total:
+                    progress["percent"] = int(done * 100 / total)
+    with zipfile.ZipFile(dest_zip) as zf:
+        zf.extractall(dest_dir)
+    payload = _payload_dir(dest_dir)
+    for name in ("config.yaml", "credentials.json", "token.json"):
+        junk = payload / name
+        if junk.exists():
+            junk.unlink()
+    ready = _updates_dir() / "ready"
+    if ready.exists():
+        shutil.rmtree(ready, ignore_errors=True)
+    shutil.copytree(payload, ready)
+    marker = _updates_dir() / "ready.json"
+    marker.write_text(
+        json.dumps(
+            {"build": info.get("latest_build"), "tag": info.get("tag"), "when": time.time()},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    if progress is not None:
+        progress["status"] = "ready"
+        progress["percent"] = 100
+        progress["latest"] = info.get("latest")
+        progress["latest_build"] = info.get("latest_build")
+    return ready
+
+
+def pending_ready() -> bool:
+    return (_updates_dir() / "ready" / "SheetsHub.exe").exists()
+
+
+def _apply_script(src: Path, dst: Path, exe: Path) -> str:
+    src_s = str(src)
+    dst_s = str(dst)
+    exe_s = str(exe)
+    return f"""@echo off
+chcp 65001 >nul
+timeout /t 2 /nobreak >nul
+robocopy "{src_s}" "{dst_s}" /E /R:4 /W:2 /NFL /NDL /NJH /NJS /nc /ns /np /XF credentials.json token.json config.yaml /XD webview_data SheetsHub_data updates >nul
+start "" "{exe_s}"
+"""
+
+
+def schedule_apply_and_restart() -> None:
+    src = _updates_dir() / "ready"
+    if not (src / "SheetsHub.exe").exists():
+        raise RuntimeError("Обновление ещё не скачано")
+    dst = app_root()
+    exe = dst / "SheetsHub.exe"
+    if not exe.exists():
+        exe = Path(sys.executable)
+    bat = Path(tempfile.gettempdir()) / "sheetshub_apply_update.bat"
+    bat.write_text(_apply_script(src, dst, exe), encoding="utf-8")
+    flags = 0
+    if sys.platform == "win32":
+        flags = 0x00000008 | 0x00000200
+    subprocess.Popen(
+        ["cmd", "/c", str(bat)],
+        cwd=str(dst),
+        creationflags=flags,
+        close_fds=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+class UpdateController:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.state: dict[str, Any] = {
+            "status": "idle",
+            "percent": 0,
+            "error": "",
+            **asdict(local_version()),
+            "latest": "",
+            "latest_build": 0,
+        }
+        self._started = False
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            data = dict(self.state)
+        local = local_version()
+        data["current"] = local.version
+        data["build"] = local.build
+        data["frozen"] = local.frozen
+        if pending_ready() and data.get("status") in {"idle", "current", "available", "downloading"}:
+            if data.get("status") != "downloading":
+                data["status"] = "ready"
+        return data
+
+    def _merge(self, **kwargs: Any) -> None:
+        with self._lock:
+            self.state.update(kwargs)
+
+    def start_background_check(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        if sys.platform != "win32" or not local_version().frozen:
+            self._merge(status="idle")
+            return
+
+        def work() -> None:
+            time.sleep(8)
+            try:
+                self.check(download=True)
+            except Exception:
+                pass
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def check(self, *, download: bool = False) -> dict[str, Any]:
+        info = inspect_latest()
+        self._merge(**{k: v for k, v in info.items() if k != "notes"})
+        if info.get("status") == "available" and download:
+            try:
+                self._merge(status="downloading", percent=0, error="")
+                download_latest(self.state)
+            except Exception as exc:
+                self._merge(status="error", error=str(exc).split("\n")[0])
+        return self.snapshot()
+
+    def apply(self) -> dict[str, Any]:
+        if not pending_ready():
+            self.check(download=True)
+        if not pending_ready():
+            raise RuntimeError(self.state.get("error") or "Сначала дождитесь скачивания")
+        schedule_apply_and_restart()
+        self._merge(status="restarting")
+        return self.snapshot()
