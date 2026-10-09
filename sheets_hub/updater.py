@@ -66,14 +66,20 @@ def _headers() -> dict[str, str]:
     return {"User-Agent": "SheetsHub-Updater", "Accept": "application/vnd.github+json"}
 
 
-def _parse_build(tag: str, body: str = "") -> int:
-    text = f"{tag} {body}"
-    match = re.search(r"(?:^|[^\d])b(\d{1,9})\b", text, re.I)
-    if match:
-        return int(match.group(1))
-    match = re.search(r"build\s+(\d{1,9})", text, re.I)
-    if match:
-        return int(match.group(1))
+def _parse_build(tag: str, body: str = "", name: str = "") -> int:
+    """Номер сборки берём из тега и названия. В тексте релиза есть ссылка
+    compare/b107...b108 — оттуда нельзя брать первое число, это предыдущая сборка.
+    """
+    for text in (tag or "", name or ""):
+        match = re.search(r"\bb(\d{1,9})\b", text, re.I)
+        if match:
+            return int(match.group(1))
+        match = re.search(r"build\s+(\d{1,9})", text, re.I)
+        if match:
+            return int(match.group(1))
+    found = [int(item) for item in re.findall(r"\bb(\d{1,9})\b", body or "", re.I)]
+    if found:
+        return max(found)
     digits = re.findall(r"\d+", tag or "")
     if digits:
         return int(digits[-1])
@@ -132,8 +138,9 @@ def inspect_latest() -> dict[str, Any]:
         out["error"] = str(exc).split("\n")[0]
         return out
     tag = str(release.get("tag_name") or "")
-    latest_build = _parse_build(tag, str(release.get("body") or ""))
-    out["latest"] = str(release.get("name") or tag or current.version)
+    release_name = str(release.get("name") or "")
+    latest_build = _parse_build(tag, str(release.get("body") or ""), release_name)
+    out["latest"] = release_name or tag or current.version
     out["latest_build"] = latest_build
     out["tag"] = tag
     out["notes"] = str(release.get("body") or "")[:800]
@@ -192,6 +199,10 @@ def download_latest(progress: dict[str, Any] | None = None) -> Path:
         junk = payload / name
         if junk.exists():
             junk.unlink()
+    fresh = inspect_latest()
+    fresh_build = int(fresh.get("latest_build") or 0)
+    if fresh_build > int(info.get("latest_build") or 0):
+        raise RuntimeError("На GitHub появилась более новая сборка")
     ready = _updates_dir() / "ready"
     if ready.exists():
         shutil.rmtree(ready, ignore_errors=True)
@@ -214,6 +225,29 @@ def download_latest(progress: dict[str, Any] | None = None) -> Path:
 
 def pending_ready() -> bool:
     return (_updates_dir() / "ready" / "SheetsHub.exe").exists()
+
+
+def pending_build() -> int:
+    if not pending_ready():
+        return 0
+    marker = _updates_dir() / "ready.json"
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+        return int(data.get("build") or 0)
+    except Exception:
+        return 0
+
+
+def discard_pending() -> None:
+    root = _updates_dir()
+    for name in ("ready", "pending"):
+        path = root / name
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+    for name in ("pending.zip", "ready.json"):
+        path = root / name
+        if path.exists():
+            path.unlink(missing_ok=True)
 
 
 def _apply_script(src: Path, dst: Path, exe: Path) -> str:
@@ -263,6 +297,7 @@ class UpdateController:
             "latest_build": 0,
         }
         self._started = False
+        self._downloading = False
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -271,9 +306,18 @@ class UpdateController:
         data["current"] = local.version
         data["build"] = local.build
         data["frozen"] = local.frozen
-        if pending_ready() and data.get("status") in {"idle", "current", "available", "downloading"}:
-            if data.get("status") != "downloading":
-                data["status"] = "ready"
+        ready_build = pending_build()
+        latest_build = int(data.get("latest_build") or 0)
+        # Скачанный архив старее GitHub — это не то обновление, которое нужно ставить.
+        if ready_build and latest_build and ready_build < latest_build:
+            ready_build = 0
+        if (
+            ready_build
+            and data.get("status") in {"idle", "current", "available", "downloading"}
+            and data.get("status") != "downloading"
+        ):
+            data["status"] = "ready"
+            data["latest_build"] = ready_build
         return data
 
     def _merge(self, **kwargs: Any) -> None:
@@ -288,19 +332,32 @@ class UpdateController:
             self._merge(status="idle")
             return
 
+        auto_download = sys.platform == "win32" and local_version().frozen
+
         def work() -> None:
             time.sleep(8)
-            try:
-                self.check(download=True)
-            except Exception:
-                pass
+            while True:
+                try:
+                    self.check(download=auto_download)
+                except Exception:
+                    pass
+                time.sleep(45)
 
         threading.Thread(target=work, daemon=True).start()
 
     def check(self, *, download: bool = False) -> dict[str, Any]:
         info = inspect_latest()
+        latest_build = int(info.get("latest_build") or 0)
+        ready_build = pending_build()
+        if ready_build and latest_build and ready_build < latest_build:
+            discard_pending()
+            ready_build = 0
         self._merge(**{k: v for k, v in info.items() if k != "notes"})
-        if info.get("status") == "available" and download:
+        if ready_build and latest_build and ready_build >= latest_build and info.get("status") == "available":
+            self._merge(status="ready", percent=100, latest_build=ready_build)
+            return self.snapshot()
+        if info.get("status") == "available" and download and not self._downloading:
+            self._downloading = True
             self._merge(status="downloading", percent=0, error="")
             threading.Thread(target=self._download_bg, daemon=True).start()
         return self.snapshot()
@@ -310,12 +367,23 @@ class UpdateController:
             download_latest(self.state)
         except Exception as exc:
             self._merge(status="error", error=str(exc).split("\n")[0])
+        finally:
+            self._downloading = False
 
     def apply(self) -> dict[str, Any]:
-        if not pending_ready():
+        # Сначала сверить номер с GitHub: скачанная 107 не должна ставиться, если уже есть 108.
+        self.check(download=False)
+        ready = pending_build()
+        latest = int(self.state.get("latest_build") or 0)
+        if ready and latest and ready < latest:
+            discard_pending()
+            ready = 0
+        if not ready:
             self.check(download=True)
-        if not pending_ready():
-            raise RuntimeError(self.state.get("error") or "Сначала дождитесь скачивания")
+            raise RuntimeError(
+                "Скачиваю последнюю сборку с GitHub. "
+                "Нажмите ещё раз, когда кнопка станет «Обновить и перезапустить»."
+            )
         schedule_apply_and_restart()
         self._merge(status="restarting")
         return self.snapshot()
