@@ -883,12 +883,13 @@
     if (!bar || !text || !btn) return;
     const u = info || {};
     const status = u.status || "idle";
+    const newer = Number(u.latest_build || 0) > Number(u.build || 0);
     const visible =
+      newer ||
       status === "available" ||
       status === "downloading" ||
       status === "ready" ||
-      status === "restarting" ||
-      (status === "error" && Number(u.latest_build || 0) > Number(u.build || 0));
+      status === "restarting";
     if (!visible) {
       bar.classList.remove("show");
       btn.style.display = "none";
@@ -900,9 +901,9 @@
     if (status === "downloading") {
       text.textContent = "Скачиваю обновление… " + (u.percent || 0) + "%";
       btn.textContent = "Скачиваю…";
-    } else if (status === "available") {
+    } else if (status === "available" || newer) {
       text.textContent =
-        "Доступна новая версия (" + (u.latest || "сборка") + "). Можно обновить без обхода ПК.";
+        "Доступна новая версия (" + (u.latest || "сборка " + u.latest_build) + "). Можно обновить без обхода ПК.";
       btn.textContent = "Скачать";
     } else if (status === "ready" || status === "restarting") {
       text.textContent =
@@ -1648,10 +1649,6 @@
     }
     scheduleAuto();
     setInterval(async () => {
-      const u = (state.data && state.data.update) || {};
-      if (!u.frozen && u.status !== "downloading" && u.status !== "available" && u.status !== "ready") {
-        return;
-      }
       if (document.getElementById("bookModal").classList.contains("open")) return;
       try {
         await call("get_state");

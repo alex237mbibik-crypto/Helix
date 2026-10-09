@@ -66,6 +66,55 @@ def _headers() -> dict[str, str]:
     return {"User-Agent": "SheetsHub-Updater", "Accept": "application/vnd.github+json"}
 
 
+def _curl_bytes(url: str, dest: Path | None = None, *, timeout: int = 30) -> bytes:
+    """GitHub через curl: на Windows запрос из Python часто не доходит, и кнопка не появляется."""
+    curl = shutil.which("curl.exe") or shutil.which("curl")
+    if not curl:
+        raise OSError("curl не найден")
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
+    cmd = [
+        curl,
+        "-fsSL",
+        "-k",
+        "--max-time",
+        str(timeout),
+        "--connect-timeout",
+        "8",
+        "-H",
+        "User-Agent: SheetsHub-Updater",
+        "-H",
+        "Accept: application/vnd.github+json",
+        "-L",
+        url,
+    ]
+    if dest is not None:
+        cmd.extend(["-o", str(dest)])
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        timeout=timeout + 5,
+        creationflags=flags,
+    )
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or b"").decode("utf-8", errors="replace").strip()
+        raise RuntimeError(err or f"curl завершился с кодом {result.returncode}")
+    if dest is not None:
+        return b""
+    return result.stdout or b""
+
+
+def _github_json(url: str) -> dict[str, Any]:
+    try:
+        raw = _curl_bytes(url, timeout=20)
+        data = json.loads(raw.decode("utf-8-sig"))
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    data = requests.get(url, timeout=20, headers=_headers()).json()
+    return data if isinstance(data, dict) else {}
+
+
 def _parse_build(tag: str, body: str = "", name: str = "") -> int:
     """Номер сборки берём из тега и названия. В тексте релиза есть ссылка
     compare/b107...b108 — оттуда нельзя брать первое число, это предыдущая сборка.
@@ -92,7 +141,7 @@ def fetch_latest_release() -> dict[str, Any]:
         data = requests.get(override, timeout=20, headers=_headers()).json()
         return data if isinstance(data, dict) else {}
     url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-    data = requests.get(url, timeout=20, headers=_headers()).json()
+    data = _github_json(url)
     if not isinstance(data, dict):
         raise RuntimeError("Неожиданный ответ GitHub")
     if str(data.get("message") or "").lower() == "not found":
@@ -180,18 +229,24 @@ def download_latest(progress: dict[str, Any] | None = None) -> Path:
     if progress is not None:
         progress["status"] = "downloading"
         progress["error"] = ""
-    with requests.get(zip_url, stream=True, timeout=120, headers=_headers()) as resp:
-        resp.raise_for_status()
-        total = int(resp.headers.get("content-length") or 0)
-        done = 0
-        with dest_zip.open("wb") as handle:
-            for chunk in resp.iter_content(chunk_size=256 * 1024):
-                if not chunk:
-                    continue
-                handle.write(chunk)
-                done += len(chunk)
-                if progress is not None and total:
-                    progress["percent"] = int(done * 100 / total)
+        progress["percent"] = 0
+    try:
+        _curl_bytes(zip_url, dest_zip, timeout=180)
+        if progress is not None:
+            progress["percent"] = 100
+    except Exception:
+        with requests.get(zip_url, stream=True, timeout=120, headers=_headers()) as resp:
+            resp.raise_for_status()
+            total = int(resp.headers.get("content-length") or 0)
+            done = 0
+            with dest_zip.open("wb") as handle:
+                for chunk in resp.iter_content(chunk_size=256 * 1024):
+                    if not chunk:
+                        continue
+                    handle.write(chunk)
+                    done += len(chunk)
+                    if progress is not None and total:
+                        progress["percent"] = int(done * 100 / total)
     with zipfile.ZipFile(dest_zip) as zf:
         zf.extractall(dest_dir)
     payload = _payload_dir(dest_dir)
@@ -328,25 +383,31 @@ class UpdateController:
         if self._started:
             return
         self._started = True
-        if sys.platform != "win32" or not local_version().frozen:
-            self._merge(status="idle")
-            return
-
         auto_download = sys.platform == "win32" and local_version().frozen
 
         def work() -> None:
-            time.sleep(8)
+            time.sleep(2)
             while True:
                 try:
                     self.check(download=auto_download)
                 except Exception:
                     pass
-                time.sleep(45)
+                time.sleep(90)
 
         threading.Thread(target=work, daemon=True).start()
 
     def check(self, *, download: bool = False) -> dict[str, Any]:
         info = inspect_latest()
+        if info.get("status") == "error":
+            with self._lock:
+                prev_latest = int(self.state.get("latest_build") or 0)
+                prev_build = int(self.state.get("build") or 0)
+                prev_name = str(self.state.get("latest") or "")
+            if prev_latest > prev_build:
+                info["status"] = "available"
+                info["latest_build"] = prev_latest
+                info["latest"] = prev_name or info.get("latest")
+                info["error"] = ""
         latest_build = int(info.get("latest_build") or 0)
         ready_build = pending_build()
         if ready_build and latest_build and ready_build < latest_build:
