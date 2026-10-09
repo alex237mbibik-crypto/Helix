@@ -1505,9 +1505,12 @@ class SheetsHubApp(ctk.CTk):
         if self.client and sid:
             service = (self.service_filter_var.get() or "").strip()
             preferred = self.client.preferred_calendar_sheet(sid, service=service)
-        current = preferred or self._current_calendar_sheet()
-        if current and current not in values:
-            values = [current, *[v for v in values if v != current]]
+        loaded = self._current_calendar_sheet()
+        if preferred and values and values != [""] and preferred not in values:
+            preferred = ""
+        current = preferred or loaded
+        if current and values and values != [""] and current not in values:
+            current = loaded if loaded in values else (values[0] if values and values[0] else "")
 
         self._suppress_sheet_trace = True
         try:
@@ -1888,8 +1891,48 @@ class SheetsHubApp(ctk.CTk):
         except ValueError:
             sid = ""
         cached_titles = list(self._sheet_titles_by_sid.get(sid) or []) if sid else []
+        picked = (
+            self._norm_filter(self.name_filter_var.get()) if hasattr(self, "name_filter_var") else "",
+            self._norm_filter(self.service_filter_var.get()) if hasattr(self, "service_filter_var") else "",
+            self._norm_filter(self.city_filter_var.get()) if hasattr(self, "city_filter_var") else "",
+            self._norm_filter(self.address_filter_var.get()) if hasattr(self, "address_filter_var") else "",
+        )
 
         def work():
+            nonlocal sources
+            # Кнопка «Обновить» заново читает общий список ссылок.
+            if not fast and self._registry_configured():
+                try:
+                    action, payload = self._sync_registry_work()
+                except Exception:
+                    action, payload = ("err", None)
+                if action == "pull" and isinstance(payload, list) and payload:
+                    self.config_data.sources = list(payload)
+                    self.config_data.destinations = list(payload)
+                    try:
+                        save_config(self.config_data)
+                    except Exception:
+                        pass
+                    name_f, service_f, city_f, address_f = picked
+                    matched: list[SheetRef] = []
+                    for ref in payload:
+                        if name_f and self._norm_filter(ref.name) != name_f:
+                            continue
+                        if service_f and self._norm_filter(ref.service) != service_f:
+                            continue
+                        if city_f and self._norm_filter(ref.resolved_city()) != city_f:
+                            continue
+                        if address_f and self._norm_filter(ref.address) != address_f:
+                            continue
+                        matched.append(ref)
+                    sources = [matched[0]] if matched else [payload[0]]
+                    try:
+                        new_sid = sources[0].normalized_id()
+                    except ValueError:
+                        new_sid = ""
+                    if new_sid and new_sid != sid and self.client:
+                        service_name = (sources[0].service or "").strip()
+                        self.client.set_preferred_calendar_sheet(new_sid, "", service=service_name)
             # Автообновление: без цветов (дорого) и без повторного списка вкладок.
             records, errors = self.client.fetch_all(
                 sources,

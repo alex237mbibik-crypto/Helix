@@ -772,6 +772,101 @@ def _access_token_via_curl(credentials_path: Path) -> str:
     return token
 
 
+def _sheet_titles_via_curl(credentials_path: Path, spreadsheet_id: str) -> list[str]:
+    """Имена вкладок через Sheets API и curl. Не зависает, в отличие от gspread на Windows."""
+    token = _access_token_via_curl(credentials_path)
+    url = (
+        "https://sheets.googleapis.com/v4/spreadsheets/"
+        f"{spreadsheet_id}?fields=sheets.properties.title"
+    )
+    data = _curl_json("GET", url, headers={"Authorization": f"Bearer {token}"})
+    titles: list[str] = []
+    for sheet in data.get("sheets") or []:
+        title = str(((sheet or {}).get("properties") or {}).get("title") or "").strip()
+        if title:
+            titles.append(title)
+    return titles
+
+
+def _values_via_curl(
+    credentials_path: Path,
+    spreadsheet_id: str,
+    sheet: str,
+    *,
+    max_rows: int,
+) -> list[list[str]]:
+    token = _access_token_via_curl(credentials_path)
+    safe = (sheet or "Sheet1").replace("'", "''")
+    rng = quote(f"'{safe}'!A1:AZ{max(1, int(max_rows))}", safe="")
+    url = (
+        "https://sheets.googleapis.com/v4/spreadsheets/"
+        f"{spreadsheet_id}/values/{rng}?valueRenderOption=FORMATTED_VALUE"
+    )
+    data = _curl_json("GET", url, headers={"Authorization": f"Bearer {token}"})
+    rows = data.get("values") or []
+    return [
+        [(cell or "").strip() if isinstance(cell, str) else str(cell or "") for cell in row]
+        for row in rows
+    ]
+
+
+_MONTH_KEYS = (
+    "январ",
+    "феврал",
+    "март",
+    "апрел",
+    "май",
+    "июн",
+    "июл",
+    "август",
+    "сентябр",
+    "октябр",
+    "ноябр",
+    "декабр",
+)
+
+
+def _month_key_of(title: str) -> str:
+    low = (title or "").lower()
+    for key in _MONTH_KEYS:
+        if key in low:
+            return key
+    return ""
+
+
+def _pick_month_sheet(titles: list[str], source: SheetRef) -> str:
+    """Текущий месяц. Если на одной книге гинеколог и терапевт — берём нужную вкладку."""
+    wanted = (source.sheet or "").strip()
+    if wanted.lower() in _ALL_SHEET_ALIASES:
+        wanted = ""
+    base = prefer_sheet_title(titles, wanted)
+    if not base:
+        return ""
+    key = _month_key_of(base)
+    year_match = re.search(r"20\d{2}", base)
+    year = year_match.group(0) if year_match else ""
+    family = [
+        title
+        for title in titles
+        if (not key or key in title.lower()) and (not year or year in title)
+    ]
+    if len(family) <= 1:
+        return base
+    blob = f"{source.name} {source.service}".lower().replace("ё", "е")
+    hints: list[str] = []
+    if "гинекол" in blob or "консультац" in blob:
+        hints.append("гинеколог")
+    if "терапевт" in blob:
+        hints.append("терапевт")
+    if "сперм" in blob:
+        hints.append("сперм")
+    for hint in hints:
+        for title in family:
+            if hint in title.lower():
+                return title
+    return base
+
+
 def _access_token_via_requests_insecure(credentials_path: Path) -> str:
     """Запрос токена через requests verify=False, если curl/PowerShell недоступны."""
     creds = Credentials.from_service_account_file(str(credentials_path), scopes=SCOPES)
@@ -1437,7 +1532,17 @@ class SheetsClient:
 
     def expand_source(self, source: SheetRef) -> list[SheetRef]:
         available = self.list_sheets(source.spreadsheet_id)
-        parts = _parts_for_source(source, available)
+        try:
+            sid = source.normalized_id()
+        except ValueError:
+            sid = ""
+        preferred = _get_preferred_sheet(sid, source.service) if sid else ""
+        # После смены ссылки в реестре старое имя месяца на новой книге может отсутствовать.
+        if preferred and available and preferred not in available:
+            _set_preferred_sheet(sid, "", source.service)
+            preferred = ""
+        wanted = preferred or source.sheet
+        parts = _parts_for_source(replace(source, sheet=wanted or source.sheet), available)
         if not parts:
             raise SheetsError(f"В «{source.name}» нет листов")
         return parts
@@ -1545,9 +1650,10 @@ class SheetsClient:
                                 loaded.extend(fut.result())
                             except Exception:
                                 pass
-                if include_colors:
-                    self._attach_sheet_colors(loaded)
-                return loaded
+                if any(item.layout == "calendar" for item in loaded):
+                    if include_colors:
+                        self._attach_sheet_colors(loaded)
+                    return loaded
             except Exception:
                 pass
 
@@ -1730,6 +1836,19 @@ class SheetsClient:
                     continue
                 except Exception:
                     pass
+
+            # Закрытые таблицы: curl с коротким таймаутом, иначе UI остаётся на «Обновляю…».
+            try:
+                batch = self._load_via_sheets_api(source)
+                if include_colors:
+                    self._attach_sheet_colors(batch)
+                records.extend(batch)
+                continue
+            except Exception as api_exc:
+                if sys.platform == "win32":
+                    msg = str(api_exc).split("\n")[0]
+                    errors.append(f"{source.name}: {msg}")
+                    continue
 
             try:
                 batch: list[Record] = []
@@ -2107,11 +2226,58 @@ class SheetsClient:
         except Exception:
             titles = []
         if not titles:
+            # gspread.worksheets() на Windows часто висит, и кнопка «Обновляю…» не отпускается.
+            try:
+                titles = _sheet_titles_via_curl(self._credentials_path, sid)
+                if titles:
+                    _SHEET_LIST_CACHE[sid] = (time.time(), [(title, "") for title in titles])
+            except Exception:
+                titles = []
+        if not titles and sys.platform != "win32":
             try:
                 titles = self.list_sheets(sid)
             except Exception:
                 return []
         return [title for title in titles if title and not is_info_title(title)]
+
+    def _load_via_sheets_api(self, source: SheetRef) -> list[Record]:
+        """Закрытая таблица: один лист месяца через curl, без зависшего gspread."""
+        sid = source.normalized_id()
+        titles = _sheet_titles_via_curl(self._credentials_path, sid)
+        if not titles:
+            raise SheetsError(f"В «{source.name}» нет листов")
+        _SHEET_LIST_CACHE[sid] = (time.time(), [(title, "") for title in titles])
+        calendar_titles = [title for title in titles if not is_info_title(title)]
+        preferred = _get_preferred_sheet(sid, source.service)
+        if preferred and preferred not in (calendar_titles or titles):
+            _set_preferred_sheet(sid, "", source.service)
+            preferred = ""
+        chosen = preferred or _pick_month_sheet(calendar_titles or titles, source)
+        if not chosen:
+            raise SheetsError(f"В «{source.name}» нет листа календаря")
+        limit = _row_limit_for_source(source, sheet_title=chosen)
+        rows = _values_via_curl(self._credentials_path, sid, chosen, max_rows=limit)
+        loaded = self._records_from_rows(replace(source, sheet=chosen), rows)
+        for info_title in companion_info_titles(titles, chosen)[:2]:
+            try:
+                info_rows = _values_via_curl(
+                    self._credentials_path,
+                    sid,
+                    info_title,
+                    max_rows=MAX_INFO_SHEET_ROWS,
+                )
+                loaded.extend(
+                    self._records_from_rows(
+                        replace(source, sheet=info_title, kind=KIND_INFO),
+                        info_rows,
+                    )
+                )
+            except Exception:
+                pass
+        if not any(item.layout == "calendar" for item in loaded):
+            raise SheetsError(f"На листе «{chosen}» нет сетки записи")
+        _set_preferred_sheet(sid, chosen, source.service)
+        return loaded
 
     def cached_calendar_sheet_titles(self, spreadsheet_id: str) -> list[str]:
         """Только из памяти — без сети (для мгновенных фильтров)."""

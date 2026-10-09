@@ -479,11 +479,21 @@ class HelixApi:
                 self.client.preferred_calendar_sheet(sid, service=service)
                 or self._preferred_cache.get(self._pref_cache_key(sid, service), "")
             )
+        loaded_sheets: list[str] = []
+        for item in self.records:
+            if item.layout == "calendar" and item.sheet and item.sheet not in loaded_sheets:
+                loaded_sheets.append(item.sheet)
+        if preferred and values and preferred not in values:
+            preferred = ""
+        if preferred and loaded_sheets and preferred not in loaded_sheets:
+            preferred = ""
         current = (self.filters.get("sheet") or "").strip()
         if current and values and current not in values:
             current = ""
+        if current and loaded_sheets and current not in loaded_sheets:
+            current = ""
         if not current:
-            current = preferred or (values[0] if values else "")
+            current = (loaded_sheets[0] if loaded_sheets else "") or preferred or (values[0] if values else "")
         if current:
             self.filters["sheet"] = current
             if self.client and sid:
@@ -503,13 +513,15 @@ class HelixApi:
 
     def _calendar_records(self) -> list[Record]:
         sheet = (self.filters.get("sheet") or "").strip()
+        if sheet.lower() in {"—", "-", "–", "лист"}:
+            sheet = ""
         query = _norm(self.filters.get("search") or "")
+        calendar = [record for record in self.records if record.layout == "calendar"]
+        # Старый месяц после смены ссылки не должен прятать уже загруженные ячейки.
+        if sheet and any(record.sheet == sheet for record in calendar):
+            calendar = [record for record in calendar if record.sheet == sheet]
         out: list[Record] = []
-        for record in self.records:
-            if record.layout != "calendar":
-                continue
-            if sheet and record.sheet != sheet:
-                continue
+        for record in calendar:
             if query:
                 blob = " ".join(
                     [
@@ -943,6 +955,13 @@ class HelixApi:
             self.status = "Обновление ещё идёт…"
             return self.snapshot()
         try:
+            previous_sid = ""
+            try:
+                previous = self._selected_sources()
+                if previous:
+                    previous_sid = previous[0].normalized_id()
+            except Exception:
+                previous_sid = ""
             # Сначала облачный реестр — иначе при пустом локальном кэше sync не успевал.
             if sync_registry and self._registry_ready():
                 try:
@@ -961,6 +980,18 @@ class HelixApi:
                 except Exception:
                     pass
             sources = self._selected_sources()
+            new_sid = ""
+            try:
+                if sources:
+                    new_sid = sources[0].normalized_id()
+            except Exception:
+                new_sid = ""
+            if previous_sid and new_sid and previous_sid != new_sid:
+                # Новая ссылка — не тащить месяц со старой книги.
+                self.filters["sheet"] = ""
+                service_now = (sources[0].service or self.filters.get("service") or "").strip()
+                self.client.set_preferred_calendar_sheet(new_sid, "", service=service_now)
+                self._preferred_cache.pop(self._pref_cache_key(new_sid, service_now), None)
             if not sources:
                 self.records = []
                 any_filter = any(
@@ -980,6 +1011,9 @@ class HelixApi:
             except ValueError:
                 sid = ""
             known_sheet = (self.filters.get("sheet") or "").strip()
+            if known_sheet.lower() in {"—", "-", "–", "лист"}:
+                known_sheet = ""
+                self.filters["sheet"] = ""
             service = (sources[0].service or self.filters.get("service") or "").strip()
             if not known_sheet and sid:
                 reg_sheet = (sources[0].sheet or "").strip()

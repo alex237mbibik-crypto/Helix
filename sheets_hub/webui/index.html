@@ -1070,9 +1070,9 @@
       // 1) Быстрый CSV + кэш цветов
       await call("reload", {
         fast: true,
-        sync_registry: false,
+        sync_registry: true,
         colors: "cache",
-        refresh_sheets: false,
+        refresh_sheets: !!full,
       });
       // 2) Узкий запрос заливок Google — не блокирует первый кадр
       call("fetch_colors", { force: !!full }).catch(() => {});
