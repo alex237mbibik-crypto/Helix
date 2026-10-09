@@ -1939,7 +1939,13 @@ class SheetsHubApp(ctk.CTk):
                 include_colors=not fast,
                 fast=fast,
             )
-            sheet_titles: list[str] = list(cached_titles) if fast and cached_titles else []
+            sheet_titles: list[str] = []
+            try:
+                sheet_titles = self.client.cached_calendar_sheet_titles(sources[0].normalized_id())
+            except Exception:
+                sheet_titles = []
+            if not sheet_titles:
+                sheet_titles = list(cached_titles) if fast and cached_titles else []
             if not sheet_titles:
                 try:
                     sheet_titles = self.client.list_calendar_sheet_titles(sources[0].normalized_id())
