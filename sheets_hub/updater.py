@@ -301,12 +301,15 @@ class UpdateController:
         info = inspect_latest()
         self._merge(**{k: v for k, v in info.items() if k != "notes"})
         if info.get("status") == "available" and download:
-            try:
-                self._merge(status="downloading", percent=0, error="")
-                download_latest(self.state)
-            except Exception as exc:
-                self._merge(status="error", error=str(exc).split("\n")[0])
+            self._merge(status="downloading", percent=0, error="")
+            threading.Thread(target=self._download_bg, daemon=True).start()
         return self.snapshot()
+
+    def _download_bg(self) -> None:
+        try:
+            download_latest(self.state)
+        except Exception as exc:
+            self._merge(status="error", error=str(exc).split("\n")[0])
 
     def apply(self) -> dict[str, Any]:
         if not pending_ready():

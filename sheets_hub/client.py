@@ -1369,12 +1369,32 @@ class SheetsClient:
             self._api_ok = False
             return False
 
+    def _call_once(self, work, timeout: float = 12):
+        """gspread без своего таймаута вешает «Обновляю…» навсегда. Ждём не дольше timeout."""
+        holder: dict[str, object] = {}
+        done = threading.Event()
+
+        def runner() -> None:
+            try:
+                holder["value"] = work()
+            except BaseException as exc:
+                holder["error"] = exc
+            finally:
+                done.set()
+
+        threading.Thread(target=runner, daemon=True).start()
+        if not done.wait(timeout):
+            raise SheetsError("timeout: Google API не ответил")
+        if "error" in holder:
+            raise holder["error"]  # type: ignore[misc]
+        return holder.get("value")
+
     def _call(self, work):
         last: BaseException | None = None
         rebuilt = False
         for attempt in range(_RETRY_ATTEMPTS):
             try:
-                return work()
+                return self._call_once(work)
             except gspread.exceptions.SpreadsheetNotFound:
                 raise
             except gspread.exceptions.WorksheetNotFound:
@@ -1824,7 +1844,19 @@ class SheetsClient:
             if source.is_placeholder():
                 continue
 
-            # Всегда сначала один лист через CSV — быстрее и без SSL-зависаний.
+            # Закрытые книги: сразу Sheets API через curl. Публичный CSV и gspread
+            # на этих таблицах либо получают 401, либо висят без ответа — кнопка
+            # «Обновляю…» тогда не отпускается.
+            api_error = ""
+            try:
+                batch = self._load_via_sheets_api(source)
+                if include_colors:
+                    self._attach_sheet_colors(batch)
+                records.extend(batch)
+                continue
+            except Exception as exc:
+                api_error = str(exc).split("\n")[0]
+
             if _can_try_public_read(source):
                 try:
                     records.extend(
@@ -1834,48 +1866,21 @@ class SheetsClient:
                     )
                     self._mark_public_read(source.name, source.normalized_id())
                     continue
-                except Exception:
-                    pass
+                except Exception as exc:
+                    if not api_error:
+                        api_error = str(exc).split("\n")[0]
+            if api_error:
+                errors.append(f"{source.name}: {api_error}")
+        # Снятие просроченных «записывает» не должно держать кнопку «Обновляю…».
+        pending = list(records)
 
-            # Закрытые таблицы: curl с коротким таймаутом, иначе UI остаётся на «Обновляю…».
+        def _sweep() -> None:
             try:
-                batch = self._load_via_sheets_api(source)
-                if include_colors:
-                    self._attach_sheet_colors(batch)
-                records.extend(batch)
-                continue
-            except Exception as api_exc:
-                if sys.platform == "win32":
-                    msg = str(api_exc).split("\n")[0]
-                    errors.append(f"{source.name}: {msg}")
-                    continue
+                self.release_expired_calendar_locks(pending)
+            except Exception:
+                pass
 
-            try:
-                batch: list[Record] = []
-                for part in self.expand_source(source):
-                    batch.extend(self.fetch_source(part))
-                if include_colors:
-                    self._attach_sheet_colors(batch)
-                records.extend(batch)
-            except Exception as exc:
-                if _can_try_public_read(source) and self._should_try_public_read(exc):
-                    try:
-                        records.extend(
-                            self._load_source_public(
-                                source, include_colors=include_colors, fast=fast
-                            )
-                        )
-                        self._mark_public_read(source.name, source.normalized_id())
-                    except Exception as pub_exc:
-                        msg = str(pub_exc) if isinstance(pub_exc, SheetsError) else str(_friendly_error(pub_exc))
-                        errors.append(f"{source.name}: {msg}")
-                else:
-                    msg = str(exc) if isinstance(exc, SheetsError) else str(_friendly_error(exc))
-                    errors.append(f"{source.name}: {msg}")
-        try:
-            self.release_expired_calendar_locks(records)
-        except Exception:
-            pass
+        threading.Thread(target=_sweep, daemon=True).start()
         return records, errors
 
     def release_expired_calendar_locks(self, records: list[Record], *, limit: int = 4) -> int:
@@ -2006,16 +2011,12 @@ class SheetsClient:
                 col,
             )
 
+        # curl первым на всех ОС: gspread к Google часто не возвращает ответ.
+        attempts.append(("curl", _do_curl))
         if sys.platform == "win32":
-            attempts.append(("curl", _do_curl))
             attempts.append(("powershell", _do_powershell))
-            attempts.append(("requests insecure", _do_requests_insecure))
-            attempts.append(("gspread insecure", _do_insecure))
-        else:
-            attempts.append(("gspread", _do_gspread))
-            attempts.append(("curl", _do_curl))
-            attempts.append(("requests insecure", _do_requests_insecure))
-            attempts.append(("gspread insecure", _do_insecure))
+        attempts.append(("requests insecure", _do_requests_insecure))
+        attempts.append(("gspread", _do_gspread))
 
         ok = False
         for _label, action in attempts:
@@ -2048,15 +2049,9 @@ class SheetsClient:
         expected = str(cell_value or "").strip()
         if confirm:
             read_attempts: list[Callable[[], str]] = []
-            if sys.platform == "win32":
-                read_attempts.append(lambda: _read_cell_via_curl(self._credentials_path, record.spreadsheet_id, record.sheet, record.row, col))
-                read_attempts.append(_read_requests_insecure)
-                read_attempts.append(_read_insecure)
-            else:
-                read_attempts.append(_read_gspread)
-                read_attempts.append(lambda: _read_cell_via_curl(self._credentials_path, record.spreadsheet_id, record.sheet, record.row, col))
-                read_attempts.append(_read_requests_insecure)
-                read_attempts.append(_read_insecure)
+            read_attempts.append(lambda: _read_cell_via_curl(self._credentials_path, record.spreadsheet_id, record.sheet, record.row, col))
+            read_attempts.append(_read_requests_insecure)
+            read_attempts.append(_read_gspread)
 
             last_read_error = ""
             confirmed = False
@@ -2106,24 +2101,13 @@ class SheetsClient:
                 col,
             )
 
-        attempts: list[Callable[[], str]] = []
-        if sys.platform == "win32":
-            attempts.append(
-                lambda: _read_cell_via_curl(
-                    self._credentials_path, record.spreadsheet_id, record.sheet, record.row, col
-                )
-            )
-            attempts.append(_read_requests_insecure)
-            attempts.append(_read_insecure)
-        else:
-            attempts.append(_read_gspread)
-            attempts.append(
-                lambda: _read_cell_via_curl(
-                    self._credentials_path, record.spreadsheet_id, record.sheet, record.row, col
-                )
-            )
-            attempts.append(_read_requests_insecure)
-            attempts.append(_read_insecure)
+        attempts: list[Callable[[], str]] = [
+            lambda: _read_cell_via_curl(
+                self._credentials_path, record.spreadsheet_id, record.sheet, record.row, col
+            ),
+            _read_requests_insecure,
+            _read_gspread,
+        ]
 
         errors: list[str] = []
         for action in attempts:
@@ -2221,23 +2205,18 @@ class SheetsClient:
         """Вкладки-календари (месяцы), без справок вроде «Услуги»."""
         sid = parse_spreadsheet_id(spreadsheet_id)
         titles: list[str] = []
+        # Сразу API. htmlview у закрытых книг пустой, а gspread.worksheets() висит.
         try:
-            titles = _list_public_sheet_titles(sid)
+            titles = _sheet_titles_via_curl(self._credentials_path, sid)
+            if titles:
+                _SHEET_LIST_CACHE[sid] = (time.time(), [(title, "") for title in titles])
         except Exception:
             titles = []
         if not titles:
-            # gspread.worksheets() на Windows часто висит, и кнопка «Обновляю…» не отпускается.
             try:
-                titles = _sheet_titles_via_curl(self._credentials_path, sid)
-                if titles:
-                    _SHEET_LIST_CACHE[sid] = (time.time(), [(title, "") for title in titles])
+                titles = _list_public_sheet_titles(sid)
             except Exception:
                 titles = []
-        if not titles and sys.platform != "win32":
-            try:
-                titles = self.list_sheets(sid)
-            except Exception:
-                return []
         return [title for title in titles if title and not is_info_title(title)]
 
     def _load_via_sheets_api(self, source: SheetRef) -> list[Record]:
@@ -2302,47 +2281,14 @@ class SheetsClient:
         """Читает общий список таблиц из Google Sheets (на Windows сначала curl -k)."""
         sid = parse_spreadsheet_id(spreadsheet_id)
         title = (sheet_title or DEFAULT_REGISTRY_SHEET).strip() or DEFAULT_REGISTRY_SHEET
-        errors: list[str] = []
-
-        # Windows: gspread/SSL часто зависает — curl первым.
-        if sys.platform == "win32":
-            try:
-                return _pull_registry_via_curl(self._credentials_path, sid, title)
-            except Exception as exc:
-                errors.append(str(exc))
-
+        # Только curl. gspread.worksheets() на общем списке и на книгах с десятками
+        # листов не возвращает управление, и календарь остаётся на «Обновляю…».
         try:
-            spreadsheet = self._call(lambda: self._gc.open_by_key(sid))
-            worksheets = list(spreadsheet.worksheets())
-            available = {ws.title: ws for ws in worksheets}
-            header_by_title: dict[str, list] = {}
-            for ws in worksheets[:8]:
-                try:
-                    first = self._call(lambda w=ws: w.row_values(1))
-                    if first:
-                        header_by_title[ws.title] = first
-                except Exception:
-                    continue
-            actual = _pick_registry_title(title, list(available.keys()), header_by_title)
-            if actual is None:
-                return []
-            worksheet = available[actual]
-            values = self._call(
-                lambda: worksheet.get("A1:Z500", value_render_option="FORMATTED_VALUE")
-            )
-            return refs_from_registry_rows(values or [])
+            return _pull_registry_via_curl(self._credentials_path, sid, title)
         except Exception as exc:
-            errors.append(str(_friendly_error(exc)))
-
-        if sys.platform != "win32":
-            try:
-                return _pull_registry_via_curl(self._credentials_path, sid, title)
-            except Exception as exc:
-                errors.append(str(exc))
-
-        raise SheetsError(
-            "Не удалось загрузить общий список таблиц.\n" + "\n".join(errors[:3])
-        )
+            raise SheetsError(
+                "Не удалось загрузить общий список таблиц.\n" + str(exc).split("\n")[0]
+            ) from exc
 
     def push_table_registry(
         self,

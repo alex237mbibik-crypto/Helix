@@ -281,7 +281,7 @@
       padding: 0.2rem 0.5rem;
     }
     #updateBar {
-      display: flex;
+      display: none;
       margin: 0 0 1rem;
       padding: 0.7rem 1rem;
       border-radius: 16px;
@@ -293,6 +293,7 @@
       gap: 0.8rem;
       flex-wrap: wrap;
     }
+    #updateBar.show { display: flex; }
     #updateBar button { margin: 0; }
     #updateBar button:disabled { opacity: 0.7; cursor: default; transform: none; }
     @media (max-width: 720px) {
@@ -313,8 +314,8 @@
       </span>
     </div>
     <div id="updateBar">
-      <span id="updateText">Обновление программы</span>
-      <button class="btn btn-primary" id="btnUpdate" type="button">Обновить программу</button>
+      <span id="updateText"></span>
+      <button class="btn btn-primary" id="btnUpdate" type="button" style="display:none;">Скачать</button>
     </div>
 
     <div class="flex-row" id="filtersRow">
@@ -882,32 +883,36 @@
     if (!bar || !text || !btn) return;
     const u = info || {};
     const status = u.status || "idle";
-    const buildLabel = u.build ? "сборка " + u.build : "";
+    const visible =
+      status === "available" ||
+      status === "downloading" ||
+      status === "ready" ||
+      status === "restarting" ||
+      (status === "error" && Number(u.latest_build || 0) > Number(u.build || 0));
+    if (!visible) {
+      bar.classList.remove("show");
+      btn.style.display = "none";
+      return;
+    }
+    bar.classList.add("show");
     btn.style.display = "inline-flex";
     btn.disabled = status === "downloading" || status === "restarting";
     if (status === "downloading") {
       text.textContent = "Скачиваю обновление… " + (u.percent || 0) + "%";
       btn.textContent = "Скачиваю…";
     } else if (status === "available") {
-      text.textContent = u.frozen
-        ? "Доступна новая версия (" + (u.latest || "сборка") + "). Можно обновить без обхода ПК."
-        : "Опубликована новая сборка (" + (u.latest || "сборка") + "). В окне SheetsHub.exe эта кнопка скачает её и перезапустит программу.";
-      btn.textContent = u.frozen ? "Скачать" : "Проверить снова";
+      text.textContent =
+        "Доступна новая версия (" + (u.latest || "сборка") + "). Можно обновить без обхода ПК.";
+      btn.textContent = "Скачать";
     } else if (status === "ready" || status === "restarting") {
       text.textContent =
         status === "restarting"
           ? "Перезапускаю программу…"
           : "Обновление скачано. Нажмите, чтобы перезапустить (слоты в Google не пропадут).";
       btn.textContent = "Обновить и перезапустить";
-    } else if (status === "error") {
-      text.textContent = "Не удалось проверить обновление: " + (u.error || "нет сети");
-      btn.textContent = "Повторить";
-    } else if (status === "current") {
-      text.textContent = "Программа актуальна" + (buildLabel ? " (" + buildLabel + ")." : ".");
-      btn.textContent = "Обновить программу";
     } else {
-      text.textContent = "Обновление программы" + (buildLabel ? " (" + buildLabel + ")." : ".");
-      btn.textContent = "Обновить программу";
+      text.textContent = "Не удалось скачать обновление: " + (u.error || "нет сети");
+      btn.textContent = "Повторить";
     }
   }
 
@@ -1410,12 +1415,8 @@
       setTimeout(() => location.reload(), 8000);
       return;
     }
-    if (btn) {
-      btn.disabled = true;
-      btn.textContent = "Проверяю…";
-    }
-    document.getElementById("updateText").textContent = "Проверяю обновление…";
-    const res = await call("check_update", { download: !!u.frozen });
+    if (btn) btn.disabled = true;
+    const res = await call("check_update", { download: true });
     if (res && res.ok === false) {
       document.getElementById("updateText").textContent =
         res.error || "Не удалось проверить обновление";
