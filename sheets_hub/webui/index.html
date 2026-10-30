@@ -889,7 +889,8 @@
       status === "available" ||
       status === "downloading" ||
       status === "ready" ||
-      status === "restarting";
+      status === "restarting" ||
+      (status === "error" && u.error);
     if (!visible) {
       bar.classList.remove("show");
       btn.style.display = "none";

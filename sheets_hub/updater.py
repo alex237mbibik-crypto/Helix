@@ -144,10 +144,15 @@ def fetch_latest_release() -> dict[str, Any]:
     data = _github_json(url)
     if not isinstance(data, dict):
         raise RuntimeError("Неожиданный ответ GitHub")
-    if str(data.get("message") or "").lower() == "not found":
+    message = str(data.get("message") or "")
+    if message.lower() == "not found":
         return {"tag_name": "b0", "assets": [], "name": ""}
-    if data.get("message"):
-        raise RuntimeError(str(data.get("message")))
+    if "rate limit" in message.lower():
+        raise RuntimeError(
+            "GitHub временно ограничил проверку обновлений: слишком много запросов с этого адреса"
+        )
+    if message:
+        raise RuntimeError(message)
     return data
 
 
@@ -386,13 +391,22 @@ class UpdateController:
         auto_download = sys.platform == "win32" and local_version().frozen
 
         def work() -> None:
+            # Сразу при старте, дальше редко. Каждые 90 секунд несколько ПК
+            # с одного адреса упираются в лимит GitHub (60 запросов в час),
+            # проверка падает, и кнопка обновления не появляется.
             time.sleep(2)
+            pause = 20 * 60
             while True:
                 try:
-                    self.check(download=auto_download)
+                    snap = self.check(download=auto_download)
+                    err = str(snap.get("error") or "").lower()
+                    if "ограничил" in err or "rate limit" in err:
+                        pause = 45 * 60
+                    else:
+                        pause = 20 * 60
                 except Exception:
-                    pass
-                time.sleep(90)
+                    pause = 20 * 60
+                time.sleep(pause)
 
         threading.Thread(target=work, daemon=True).start()
 
