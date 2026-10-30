@@ -4,6 +4,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass, field, replace
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -400,20 +401,20 @@ _NOT_A_CITY = {
 
 _ALL_SHEETS = {"", "*", "все", "all", "все листы"}
 
-_MONTH_MARKERS = (
-    "январ",
-    "феврал",
-    "март",
-    "апрел",
-    "мая",
-    "май",
-    "июн",
-    "июл",
-    "август",
-    "сентябр",
-    "октябр",
-    "ноябр",
-    "декабр",
+_RU_MONTHS: tuple[tuple[str, int], ...] = (
+    ("январ", 1),
+    ("феврал", 2),
+    ("март", 3),
+    ("апрел", 4),
+    ("мая", 5),
+    ("май", 5),
+    ("июн", 6),
+    ("июл", 7),
+    ("август", 8),
+    ("сентябр", 9),
+    ("октябр", 10),
+    ("ноябр", 11),
+    ("декабр", 12),
 )
 
 
@@ -426,56 +427,99 @@ def requested_sheet_titles(text: str) -> list[str] | None:
     return parts or None
 
 
+def sheet_year_month(title: str) -> tuple[int, int] | None:
+    """(год, месяц) из «октябрь 2026» / «ОКТЯБРЬ 2026 (ГИНЕКОЛОГ)» / «10.2026».
+
+    Нет года — считаем текущий. Не месяц (справка, «Услуги») — None.
+    """
+    raw = (title or "").strip().lower().replace("ё", "е")
+    if not raw:
+        return None
+    month = 0
+    for key, num in _RU_MONTHS:
+        if key in raw:
+            month = num
+            break
+    year_match = re.search(r"20\d{2}", raw)
+    year = int(year_match.group(0)) if year_match else 0
+    if not month:
+        numeric = re.fullmatch(
+            r"\s*(?:(1[0-2]|0?[1-9])[./-](20\d{2})|(20\d{2})[./-](1[0-2]|0?[1-9]))\s*",
+            raw,
+        )
+        if not numeric:
+            return None
+        if numeric.group(1):
+            month = int(numeric.group(1))
+            year = int(numeric.group(2))
+        else:
+            year = int(numeric.group(3))
+            month = int(numeric.group(4))
+    if not year:
+        year = date.today().year
+    return year, month
+
+
+def is_past_month_title(title: str, *, today: date | None = None) -> bool:
+    """Прошлый месяц. Текущий, будущие и не-месяцы (справки) — нет."""
+    found = sheet_year_month(title)
+    if not found:
+        return False
+    now = today or date.today()
+    return found < (now.year, now.month)
+
+
+def normalize_sheet_title(title: str) -> str:
+    text = (title or "").replace("\u00a0", " ").replace("ё", "е")
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+def resolve_sheet_title(wanted: str, titles: list[str]) -> str:
+    """Точное имя вкладки из списка, без учёта регистра и лишних пробелов."""
+    key = normalize_sheet_title(wanted)
+    if not key:
+        return ""
+    for title in titles or []:
+        if normalize_sheet_title(title) == key:
+            return title
+    return ""
+
+
+def upcoming_sheet_titles(titles: list[str], *, today: date | None = None) -> list[str]:
+    """Текущий месяц и следующие. Прошлые месяцы в список листов не попадают."""
+    out: list[str] = []
+    for title in titles or []:
+        name = (title or "").strip()
+        if name and not is_past_month_title(name, today=today):
+            out.append(name)
+    return out
+
+
 def prefer_sheet_title(available: list[str], wanted: str = "") -> str:
-    """Выбрать один лист: точное имя, иначе текущий месяц, иначе первый."""
+    """Выбрать один лист: точное имя, иначе текущий месяц, иначе ближайший следующий."""
     titles = [title for title in available if (title or "").strip()]
     if not titles:
         return (wanted or "").strip()
     raw = (wanted or "").strip()
-    if raw and raw.lower() not in _ALL_SHEETS:
+    if raw and raw.lower() not in _ALL_SHEETS and not is_past_month_title(raw):
         for title in titles:
-            if title.lower() == raw.lower():
+            if title.lower() == raw.lower() and not is_past_month_title(title):
                 return title
         for title in titles:
-            if raw.lower() in title.lower() or title.lower() in raw.lower():
+            if (
+                raw.lower() in title.lower() or title.lower() in raw.lower()
+            ) and not is_past_month_title(title):
                 return title
-    # Текущий месяц по-русски, например «август 2026»
-    from datetime import datetime
-
-    months = (
-        "январ",
-        "феврал",
-        "март",
-        "апрел",
-        "ма",
-        "июн",
-        "июл",
-        "август",
-        "сентябр",
-        "октябр",
-        "ноябр",
-        "декабр",
-    )
-    now = datetime.now()
-    month_key = months[now.month - 1]
-    year = str(now.year)
-    for title in titles:
-        low = title.lower()
-        if month_key in low and year in low:
+    now = date.today()
+    upcoming = [title for title in titles if not is_past_month_title(title, today=now)]
+    pool = upcoming or titles
+    for title in pool:
+        if sheet_year_month(title) == (now.year, now.month):
             return title
-    for title in titles:
-        if month_key in title.lower():
-            return title
-    # Не брать вкладки-справки, если есть календарные
-    calendarish = [
-        title
-        for title in titles
-        if any(marker in title.lower() for marker in _MONTH_MARKERS)
-        or any(ch.isdigit() for ch in title)
-    ]
+    calendarish = [title for title in pool if sheet_year_month(title)]
     if calendarish:
         return calendarish[0]
-    return titles[0]
+    return pool[0]
 
 
 def expand_ref_locally(ref: SheetRef) -> list[SheetRef]:

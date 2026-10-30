@@ -29,11 +29,14 @@ from sheets_hub.config import (
     find_credentials_file,
     install_credentials,
     is_info_title,
+    is_past_month_title,
     load_config,
+    resolve_sheet_title,
     merge_tables,
     parse_spreadsheet_id,
     resolve_config_path,
     save_config,
+    upcoming_sheet_titles,
     usable_refs,
     user_data_dir,
     writable_data_dir,
@@ -222,7 +225,11 @@ class HelixApi:
         prefs = cache.get("preferred_sheets")
         if isinstance(prefs, dict):
             self._preferred_cache = {
-                str(k): str(v).strip() for k, v in prefs.items() if str(k).strip() and str(v).strip()
+                str(k): str(v).strip()
+                for k, v in prefs.items()
+                if str(k).strip()
+                and str(v).strip()
+                and not is_past_month_title(str(v))
             }
         titles = cache.get("sheet_titles")
         if isinstance(titles, dict):
@@ -231,7 +238,9 @@ class HelixApi:
                 sid = str(key or "").strip()
                 if not sid or not isinstance(value, list):
                     continue
-                clean = [str(item).strip() for item in value if str(item).strip()]
+                clean = upcoming_sheet_titles(
+                    [str(item).strip() for item in value if str(item).strip()]
+                )
                 if clean:
                     restored[sid] = list(dict.fromkeys(clean))
             self._sheet_titles_cache = restored
@@ -239,7 +248,7 @@ class HelixApi:
         if isinstance(saved, dict):
             for key in ("name", "service", "city", "address", "sheet"):
                 val = str(saved.get(key) or "").strip()
-                if val:
+                if val and not (key == "sheet" and is_past_month_title(val)):
                     self.filters[key] = val
         self._tutorial_hide = bool(cache.get("tutorial_hide"))
 
@@ -265,7 +274,7 @@ class HelixApi:
         clean = [str(t).strip() for t in (titles or []) if str(t).strip()]
         if not sid or not clean:
             return
-        merged = list(dict.fromkeys(clean))
+        merged = list(dict.fromkeys(upcoming_sheet_titles(clean)))
         prev = self._sheet_titles_cache.get(sid) or []
         if merged != prev:
             self._sheet_titles_cache[sid] = merged
@@ -289,12 +298,14 @@ class HelixApi:
             except Exception:
                 live = []
             if live:
-                return list(dict.fromkeys(live))
-        return [
-            title
-            for title in (self._sheet_titles_cache.get(sid) or [])
-            if str(title or "").strip()
-        ]
+                return list(dict.fromkeys(upcoming_sheet_titles(live)))
+        return upcoming_sheet_titles(
+            [
+                title
+                for title in (self._sheet_titles_cache.get(sid) or [])
+                if str(title or "").strip()
+            ]
+        )
 
     def _apply_cached_preferred(self) -> None:
         if not self.client or not self._preferred_cache:
@@ -431,13 +442,20 @@ class HelixApi:
         service = (sources[0].service or self.filters.get("service") or "").strip()
         title = (self.filters.get("sheet") or "").strip()
         cache_key = self._pref_cache_key(sid, service)
+        if title and is_past_month_title(title):
+            self.filters["sheet"] = ""
+            title = ""
         if title and title.lower() not in {"лист", "—", "-"}:
             self.client.set_preferred_calendar_sheet(sid, title, service=service)
             self._preferred_cache[cache_key] = title
             return
         # Фильтр листа сброшен (смена услуги) — не тянуть чужой preferred.
         reg_sheet = (sources[0].sheet or "").strip()
-        if reg_sheet and reg_sheet.lower() not in {"", "*", "все", "all", "все листы"}:
+        if (
+            reg_sheet
+            and reg_sheet.lower() not in {"", "*", "все", "all", "все листы"}
+            and not is_past_month_title(reg_sheet)
+        ):
             self.client.set_preferred_calendar_sheet(sid, reg_sheet, service=service)
             self._preferred_cache[cache_key] = reg_sheet
             return
@@ -448,16 +466,23 @@ class HelixApi:
         """После загрузки выставить лист месяца (preferred / первый календарный)."""
         sid = self._active_spreadsheet_id()
         service = self._active_service()
-        values = list(titles or [])
+        values = upcoming_sheet_titles(list(titles or []))
         if not values and self.client and sid:
             # Не ходим в сеть повторно на fast-старте — только из уже загруженных записей.
             for item in self.records:
-                if item.layout == "calendar" and item.sheet and item.sheet not in values:
-                    values.append(item.sheet)
+                sheet = (item.sheet or "").strip()
+                if (
+                    item.layout == "calendar"
+                    and sheet
+                    and sheet not in values
+                    and not is_past_month_title(sheet)
+                ):
+                    values.append(sheet)
         if not values:
             for item in self.records:
-                if item.layout == "calendar" and item.sheet:
-                    values = [item.sheet]
+                sheet = (item.sheet or "").strip()
+                if item.layout == "calendar" and sheet and not is_past_month_title(sheet):
+                    values = [sheet]
                     break
         preferred = ""
         if self.client and sid:
@@ -469,17 +494,21 @@ class HelixApi:
         for item in self.records:
             if item.layout == "calendar" and item.sheet and item.sheet not in loaded_sheets:
                 loaded_sheets.append(item.sheet)
-        if preferred and values and preferred not in values:
-            preferred = ""
-        if preferred and loaded_sheets and preferred not in loaded_sheets:
-            preferred = ""
+        if preferred and values:
+            preferred = resolve_sheet_title(preferred, values)
+        if preferred and loaded_sheets:
+            preferred = resolve_sheet_title(preferred, loaded_sheets)
         current = (self.filters.get("sheet") or "").strip()
-        if current and values and current not in values:
-            current = ""
-        if current and loaded_sheets and current not in loaded_sheets:
+        if current and values:
+            current = resolve_sheet_title(current, values)
+        if current and loaded_sheets:
+            current = resolve_sheet_title(current, loaded_sheets)
+        if current and is_past_month_title(current):
             current = ""
         if not current:
             current = (loaded_sheets[0] if loaded_sheets else "") or preferred or (values[0] if values else "")
+        if current and is_past_month_title(current):
+            current = values[0] if values else ""
         if current:
             self.filters["sheet"] = current
             if self.client and sid:

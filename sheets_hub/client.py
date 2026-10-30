@@ -42,9 +42,14 @@ from sheets_hub.config import (
     companion_info_titles,
     is_info_ref,
     is_info_title,
+    is_past_month_title,
+    normalize_sheet_title,
     parse_spreadsheet_id,
     prefer_sheet_title,
     requested_sheet_titles,
+    resolve_sheet_title,
+    sheet_year_month,
+    upcoming_sheet_titles,
 )
 from sheets_hub.models import Record
 from sheets_hub.registry import (
@@ -97,7 +102,7 @@ def _preferred_sheet_key(spreadsheet_id: str, service: str = "") -> str:
 def _get_preferred_sheet(spreadsheet_id: str, service: str = "") -> str:
     key = _preferred_sheet_key(spreadsheet_id, service)
     hit = (_PREFERRED_CALENDAR_SHEET.get(key) or "").strip()
-    if hit:
+    if hit and not is_past_month_title(hit):
         return hit
     # Без услуги — старый ключ только по sid (обратная совместимость).
     if not (service or "").strip():
@@ -105,7 +110,9 @@ def _get_preferred_sheet(spreadsheet_id: str, service: str = "") -> str:
             sid = parse_spreadsheet_id(spreadsheet_id)
         except Exception:
             sid = (spreadsheet_id or "").strip()
-        return (_PREFERRED_CALENDAR_SHEET.get(sid) or "").strip()
+        legacy = (_PREFERRED_CALENDAR_SHEET.get(sid) or "").strip()
+        if legacy and not is_past_month_title(legacy):
+            return legacy
     return ""
 
 
@@ -546,15 +553,22 @@ def _lookup_sheet_gid(spreadsheet_id: str, sheet: str) -> str:
     if not raw:
         return ""
     mapping = _SHEET_GID_CACHE.get(spreadsheet_id) or {}
-    if raw in mapping:
-        return mapping[raw]
-    low = raw.lower()
+    key = normalize_sheet_title(raw)
     for title, gid in mapping.items():
-        if title.lower() == low:
+        if gid and normalize_sheet_title(title) == key:
             return gid
-    for title, gid in mapping.items():
-        if low in title.lower() or title.lower() in low:
-            return gid
+    # Нельзя брать «похожий» лист: «2026» или «Гинеколог» внутри
+    # «Ноябрь 2026 (Гинеколог)» открывали текущий месяц вместо следующего.
+    wanted = sheet_year_month(raw)
+    if wanted is None:
+        return ""
+    same = [
+        gid
+        for title, gid in mapping.items()
+        if gid and sheet_year_month(title) == wanted
+    ]
+    if len(same) == 1:
+        return same[0]
     return ""
 
 
@@ -613,7 +627,10 @@ def _list_public_sheets(spreadsheet_id: str, *, force: bool = False) -> list[tup
         if gid:
             gid_map[title] = gid
     if gid_map:
-        _SHEET_GID_CACHE[spreadsheet_id] = gid_map
+        # htmlview не видит скрытые вкладки — не затираем gid, уже полученные из API.
+        merged = dict(_SHEET_GID_CACHE.get(spreadsheet_id) or {})
+        merged.update(gid_map)
+        _SHEET_GID_CACHE[spreadsheet_id] = merged
     if out:
         _SHEET_LIST_CACHE[spreadsheet_id] = (now, out)
     return out
@@ -777,15 +794,35 @@ def _sheet_titles_via_curl(credentials_path: Path, spreadsheet_id: str) -> list[
     token = _access_token_via_curl(credentials_path)
     url = (
         "https://sheets.googleapis.com/v4/spreadsheets/"
-        f"{spreadsheet_id}?fields=sheets.properties.title"
+        f"{spreadsheet_id}?fields=sheets.properties(title,sheetId)"
     )
     data = _curl_json("GET", url, headers={"Authorization": f"Bearer {token}"})
     titles: list[str] = []
+    gid_map: dict[str, str] = {}
     for sheet in data.get("sheets") or []:
-        title = str(((sheet or {}).get("properties") or {}).get("title") or "").strip()
-        if title:
-            titles.append(title)
+        props = (sheet or {}).get("properties") or {}
+        # Скрытые вкладки тоже берём: следующий месяц часто спрятан в Google,
+        # но операторам его нужно открывать. Прошлые месяцы отсеет список листов.
+        title = str(props.get("title") or "").strip()
+        if not title:
+            continue
+        titles.append(title)
+        sheet_id = props.get("sheetId")
+        if sheet_id is not None and str(sheet_id).strip() != "":
+            gid_map[title] = str(sheet_id)
+    if gid_map:
+        merged = dict(_SHEET_GID_CACHE.get(spreadsheet_id) or {})
+        merged.update(gid_map)
+        _SHEET_GID_CACHE[spreadsheet_id] = merged
     return titles
+
+
+def _store_sheet_list_cache(spreadsheet_id: str, titles: list[str]) -> None:
+    gids = _SHEET_GID_CACHE.get(spreadsheet_id) or {}
+    _SHEET_LIST_CACHE[spreadsheet_id] = (
+        time.time(),
+        [(title, gids.get(title, "")) for title in titles if title],
+    )
 
 
 def _values_via_curl(
@@ -837,7 +874,7 @@ def _month_key_of(title: str) -> str:
 def _pick_month_sheet(titles: list[str], source: SheetRef) -> str:
     """Текущий месяц. Если на одной книге гинеколог и терапевт — берём нужную вкладку."""
     wanted = (source.sheet or "").strip()
-    if wanted.lower() in _ALL_SHEET_ALIASES:
+    if wanted.lower() in _ALL_SHEET_ALIASES or is_past_month_title(wanted):
         wanted = ""
     base = prefer_sheet_title(titles, wanted)
     if not base:
@@ -1559,8 +1596,12 @@ class SheetsClient:
         preferred = _get_preferred_sheet(sid, source.service) if sid else ""
         # После смены ссылки в реестре старое имя месяца на новой книге может отсутствовать.
         if preferred and available and preferred not in available:
-            _set_preferred_sheet(sid, "", source.service)
-            preferred = ""
+            resolved = resolve_sheet_title(preferred, available)
+            if resolved:
+                preferred = resolved
+            elif is_past_month_title(preferred):
+                _set_preferred_sheet(sid, "", source.service)
+                preferred = ""
         wanted = preferred or source.sheet
         parts = _parts_for_source(replace(source, sheet=wanted or source.sheet), available)
         if not parts:
@@ -1593,7 +1634,11 @@ class SheetsClient:
         preferred = _get_preferred_sheet(sid, source.service)
         if not preferred:
             wanted = (source.sheet or "").strip()
-            if wanted and wanted.lower() not in _ALL_SHEET_ALIASES:
+            if (
+                wanted
+                and wanted.lower() not in _ALL_SHEET_ALIASES
+                and not is_past_month_title(wanted)
+            ):
                 preferred = wanted
         cache_key = f"{sid}|{preferred}|svc={(source.service or '').strip().lower()}|colors={1 if include_colors else 0}"
         now = time.time()
@@ -1647,7 +1692,11 @@ class SheetsClient:
         preferred = _get_preferred_sheet(sid, source.service)
         if not preferred:
             wanted = (source.sheet or "").strip()
-            if wanted and wanted.lower() not in _ALL_SHEET_ALIASES:
+            if (
+                wanted
+                and wanted.lower() not in _ALL_SHEET_ALIASES
+                and not is_past_month_title(wanted)
+            ):
                 preferred = wanted
 
         # Быстрый путь: уже знаем лист месяца — один CSV, без htmlview.
@@ -1684,7 +1733,10 @@ class SheetsClient:
             available = []
         # Не зовём Sheets API list_sheets здесь — на Windows это часто зависает
         # и весь UI остаётся на «Обновляю…».
-        if preferred and available and preferred in available:
+        resolved = resolve_sheet_title(preferred, available) if preferred else ""
+        if resolved:
+            parts = _parts_for_source(replace(source, sheet=resolved), available or None)
+        elif preferred and not is_past_month_title(preferred):
             parts = _parts_for_source(replace(source, sheet=preferred), available or None)
         else:
             parts = _parts_for_source(source, available or None)
@@ -2209,7 +2261,7 @@ class SheetsClient:
         try:
             titles = _sheet_titles_via_curl(self._credentials_path, sid)
             if titles:
-                _SHEET_LIST_CACHE[sid] = (time.time(), [(title, "") for title in titles])
+                _store_sheet_list_cache(sid, titles)
         except Exception:
             titles = []
         if not titles:
@@ -2217,7 +2269,9 @@ class SheetsClient:
                 titles = _list_public_sheet_titles(sid)
             except Exception:
                 titles = []
-        return [title for title in titles if title and not is_info_title(title)]
+        return upcoming_sheet_titles(
+            [title for title in titles if title and not is_info_title(title)]
+        )
 
     def _load_via_sheets_api(self, source: SheetRef) -> list[Record]:
         """Закрытая таблица: один лист месяца через curl, без зависшего gspread."""
@@ -2225,13 +2279,19 @@ class SheetsClient:
         titles = _sheet_titles_via_curl(self._credentials_path, sid)
         if not titles:
             raise SheetsError(f"В «{source.name}» нет листов")
-        _SHEET_LIST_CACHE[sid] = (time.time(), [(title, "") for title in titles])
+        _store_sheet_list_cache(sid, titles)
         calendar_titles = [title for title in titles if not is_info_title(title)]
         preferred = _get_preferred_sheet(sid, source.service)
-        if preferred and preferred not in (calendar_titles or titles):
-            _set_preferred_sheet(sid, "", source.service)
-            preferred = ""
-        chosen = preferred or _pick_month_sheet(calendar_titles or titles, source)
+        resolved = resolve_sheet_title(preferred, calendar_titles or titles)
+        if preferred and not resolved:
+            # Вкладка есть в Google, но её не было в старом списке
+            # (скрытый следующий месяц). Не подменять её текущим месяцем.
+            if is_past_month_title(preferred):
+                _set_preferred_sheet(sid, "", source.service)
+                preferred = ""
+            else:
+                resolved = preferred
+        chosen = resolved or _pick_month_sheet(calendar_titles or titles, source)
         if not chosen:
             raise SheetsError(f"В «{source.name}» нет листа календаря")
         limit = _row_limit_for_source(source, sheet_title=chosen)
@@ -2267,7 +2327,9 @@ class SheetsClient:
         cached = _SHEET_LIST_CACHE.get(sid)
         if not cached:
             return []
-        return [title for title, _gid in cached[1] if title and not is_info_title(title)]
+        return upcoming_sheet_titles(
+            [title for title, _gid in cached[1] if title and not is_info_title(title)]
+        )
 
     def preferred_calendar_sheet(self, spreadsheet_id: str, *, service: str = "") -> str:
         return _get_preferred_sheet(spreadsheet_id, service)

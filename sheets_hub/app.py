@@ -39,6 +39,7 @@ from sheets_hub.config import (
     merge_tables,
     resolve_config_path,
     save_config,
+    upcoming_sheet_titles,
     usable_refs,
     writable_data_dir,
 )
@@ -1492,12 +1493,12 @@ class SheetsHubApp(ctk.CTk):
         if not hasattr(self, "sheet_filter"):
             return
         sid = self._active_spreadsheet_id()
-        values = list(titles or [])
+        values = upcoming_sheet_titles(list(titles or []))
         if not values and sid:
-            values = list(self._sheet_titles_by_sid.get(sid) or [])
+            values = upcoming_sheet_titles(list(self._sheet_titles_by_sid.get(sid) or []))
         if not values:
-            current = self._current_calendar_sheet()
-            values = [current] if current else [""]
+            kept = upcoming_sheet_titles([self._current_calendar_sheet()])
+            values = kept or [""]
         if sid and values and values != [""]:
             self._sheet_titles_by_sid[sid] = values
 
