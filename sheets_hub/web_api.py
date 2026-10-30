@@ -844,11 +844,17 @@ class HelixApi:
         path = find_credentials_file(self.config.credentials)
         if path is None:
             self.client = None
-            self.status = f"Нет credentials.json — нужен файл: {writable_data_dir() / 'credentials.json'}"
+            folder = app_root()
+            self.status = (
+                f"Не найден credentials.json. Положите ключ сервисного аккаунта в папку программы: {folder}"
+            )
             return self.snapshot()
         if credential_kind(path) != "service_account":
             self.client = None
-            self.status = "Нужен JSON сервисного аккаунта (type: service_account)."
+            self.status = (
+                f"Файл найден ({path}), но это не JSON сервисного аккаунта "
+                "(нужны type: service_account и client_email)."
+            )
             return self.snapshot()
         try:
             from sheets_hub.client import SheetsClient
@@ -957,8 +963,10 @@ class HelixApi:
             colors_mode = "cache"
         refresh_sheets = bool(data.get("refresh_sheets", False))
         if not self.client:
-            self.status = "Нет подключения — укажите credentials.json"
-            return self.snapshot()
+            # Не затираем причину общей фразой: ключ может уже лежать рядом с exe.
+            self.connect({"reload": False})
+            if not self.client:
+                return self.snapshot()
         if data.get("background"):
             got_lock = self._lock.acquire(blocking=False)
         else:

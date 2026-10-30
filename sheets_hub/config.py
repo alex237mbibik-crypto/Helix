@@ -140,34 +140,58 @@ CONFIG_PATH = ROOT / "config.yaml"
 EXAMPLE_CONFIG_PATH = _example_config_path()
 
 
+def _program_dirs() -> list[Path]:
+    """Папки, где может лежать credentials.json: рядом с exe, текущая, AppData."""
+    found: list[Path] = []
+    seen: set[str] = set()
+    raws: list[Path] = [app_root(), writable_data_dir(), user_data_dir(), Path.cwd()]
+    if sys.argv and sys.argv[0]:
+        raws.append(Path(sys.argv[0]).expanduser())
+        raws.append(Path(sys.argv[0]).expanduser().resolve().parent)
+    for raw in raws:
+        try:
+            path = raw.expanduser().resolve()
+        except Exception:
+            continue
+        if path.is_file():
+            path = path.parent
+        key = str(path).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(path)
+    return found
+
+
+def _skip_credential_name(path: Path) -> bool:
+    name = path.name.lower()
+    return "example" in name or "sample" in name or name.startswith("howto")
+
+
 def find_credentials_file(configured: Path | str | None = None) -> Path | None:
-    """Ищет credentials рядом с программой и в AppData."""
+    """Ищет боевой credentials.json рядом с программой, не пример из архива."""
     candidates: list[Path] = []
-    data = writable_data_dir()
-    legacy = user_data_dir()
+    dirs = _program_dirs()
     if configured:
         raw = Path(configured)
         candidates.append(raw)
         if not raw.is_absolute():
-            candidates.append(data / raw)
-            candidates.append(ROOT / raw)
-            candidates.append(legacy / raw)
-    candidates.append(data / "credentials.json")
-    candidates.append(ROOT / "credentials.json")
-    candidates.append(legacy / "credentials.json")
+            for folder in dirs:
+                candidates.append(folder / raw)
+    for folder in dirs:
+        candidates.append(folder / "credentials.json")
     try:
-        candidates.extend(sorted(data.glob("client_secret*.json")))
-        candidates.extend(sorted(data.glob("*credentials*.json")))
-        candidates.extend(sorted(ROOT.glob("client_secret*.json")))
-        candidates.extend(sorted(ROOT.glob("*credentials*.json")))
-        if legacy != data and legacy.exists():
-            candidates.extend(sorted(legacy.glob("client_secret*.json")))
-            candidates.extend(sorted(legacy.glob("*credentials*.json")))
+        for folder in dirs:
+            candidates.extend(sorted(folder.glob("client_secret*.json")))
+            candidates.extend(sorted(folder.glob("*credentials*.json")))
     except Exception:
         pass
 
+    existing: list[Path] = []
     seen: set[str] = set()
     for path in candidates:
+        if _skip_credential_name(path):
+            continue
         try:
             key = str(path.resolve()).lower()
         except Exception:
@@ -177,10 +201,20 @@ def find_credentials_file(configured: Path | str | None = None) -> Path | None:
         seen.add(key)
         try:
             if path.is_file():
-                return path.resolve()
+                existing.append(path.resolve())
         except Exception:
             continue
-    return None
+    if not existing:
+        return None
+    # Сначала настоящий ключ. credentials.example.json в той же папке не подменяем.
+    from sheets_hub.auth import json_is_placeholder
+
+    real = [path for path in existing if not json_is_placeholder(path)]
+    pool = real or existing
+    for path in pool:
+        if path.name.lower() == "credentials.json":
+            return path
+    return pool[0]
 
 
 _ID_FROM_URL = re.compile(r"/spreadsheets/d/([a-zA-Z0-9-_]+)")

@@ -26,7 +26,13 @@ from google.oauth2.service_account import Credentials
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from sheets_hub.auth import AuthError, account_label, credential_kind, load_gspread_credentials
+from sheets_hub.auth import (
+    AuthError,
+    account_label,
+    credential_kind,
+    load_gspread_credentials,
+    service_account_credentials,
+)
 from sheets_hub.calendar_sheet import (
     classify_slot,
     is_calendar_matrix,
@@ -762,7 +768,7 @@ def _curl_json(
 
 
 def _access_token_via_curl(credentials_path: Path) -> str:
-    creds = Credentials.from_service_account_file(str(credentials_path), scopes=SCOPES)
+    creds = service_account_credentials(credentials_path, SCOPES)
     now = int(time.time())
     payload = {
         "iss": creds.service_account_email,
@@ -906,7 +912,7 @@ def _pick_month_sheet(titles: list[str], source: SheetRef) -> str:
 
 def _access_token_via_requests_insecure(credentials_path: Path) -> str:
     """Запрос токена через requests verify=False, если curl/PowerShell недоступны."""
-    creds = Credentials.from_service_account_file(str(credentials_path), scopes=SCOPES)
+    creds = service_account_credentials(credentials_path, SCOPES)
     now = int(time.time())
     payload = {
         "iss": creds.service_account_email,
@@ -987,7 +993,7 @@ def _access_token_via_powershell(credentials_path: Path) -> str:
     """Токен через PowerShell — если curl к oauth2 тоже режется."""
     if sys.platform != "win32":
         raise SheetsError("PowerShell доступен только в Windows")
-    creds = Credentials.from_service_account_file(str(credentials_path), scopes=SCOPES)
+    creds = service_account_credentials(credentials_path, SCOPES)
     now = int(time.time())
     payload = {
         "iss": creds.service_account_email,

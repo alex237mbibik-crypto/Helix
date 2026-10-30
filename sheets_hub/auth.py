@@ -73,10 +73,40 @@ def clear_user_login(credentials_path: Path) -> None:
         pass
 
 
+def read_json_object(path: Path) -> dict:
+    """JSON с диска: UTF-8, BOM и UTF-16 (так Блокнот Windows иногда сохраняет ключ)."""
+    raw = path.read_bytes()
+    if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+        text = raw.decode("utf-16")
+    elif raw.startswith(b"\xef\xbb\xbf"):
+        text = raw.decode("utf-8-sig")
+    else:
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text = raw.decode("utf-16")
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise AuthError(f"{path.name} — не объект JSON")
+    return data
+
+
+def json_is_placeholder(path: Path) -> bool:
+    """Пример из поставки, а не боевой ключ."""
+    name = path.name.lower()
+    if "example" in name or "sample" in name or name.startswith("howto"):
+        return True
+    try:
+        blob = json.dumps(read_json_object(path))
+    except Exception:
+        return False
+    return "PASTE_" in blob or "your-gcp-project" in blob or "PASTE_PRIVATE_KEY" in blob
+
+
 def credential_kind(path: Path) -> str:
     """service_account | oauth_client | unknown"""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = read_json_object(path)
     except Exception:
         return "unknown"
     if data.get("type") == "service_account" and data.get("client_email"):
@@ -541,14 +571,19 @@ def access_token_for_path(credentials_path: Path) -> str:
     raise AuthError("Неизвестный тип credentials.json")
 
 
+def service_account_credentials(path: Path, scopes: list[str]):
+    """Ключ сервисного аккаунта, в том числе если файл сохранён в UTF-16."""
+    return ServiceAccountCredentials.from_service_account_info(
+        read_json_object(path), scopes=scopes
+    )
+
+
 def load_gspread_credentials(credentials_path: Path, *, interactive: bool = False):
     kind = credential_kind(credentials_path)
     if kind == "oauth_client":
         return ensure_user_credentials(credentials_path, interactive=interactive)
     if kind == "service_account":
-        return ServiceAccountCredentials.from_service_account_file(
-            str(credentials_path), scopes=SCOPES
-        )
+        return service_account_credentials(credentials_path, SCOPES)
     raise AuthError(
         "Нет подходящего credentials.json.\n"
         "Скачайте JSON сервисного аккаунта в Google Cloud и выберите его в «Таблицы»."
