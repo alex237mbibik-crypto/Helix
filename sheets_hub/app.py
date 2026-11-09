@@ -3279,7 +3279,7 @@ class SheetsHubApp(ctk.CTk):
             lock_state["dialog_close"] = lambda restore=True: close_dialog(restore=restore)
 
         def tick_lock_timer() -> None:
-            if state["closed"] or state["saved"] or not lock_deadline:
+            if state["closed"] or state["saved"] or state.get("saving") or not lock_deadline:
                 return
             left = max(0, int(lock_deadline - time.time()))
             if timer_label is not None:
@@ -3340,21 +3340,44 @@ class SheetsHubApp(ctk.CTk):
                         parent=dialog,
                     )
                     return
+            if state.get("saving") or state["saved"] or state["closed"]:
+                return
+            state["saving"] = True
+            if timer_job[0] is not None:
+                try:
+                    dialog.after_cancel(timer_job[0])
+                except Exception:
+                    pass
+                timer_job[0] = None
 
             def work():
-                lt = active_lock_text()
-                if lt:
-                    self.client.assert_calendar_lock(
-                        record, lt, previous=active_previous()
-                    )
-                to_write = write_back_value(record, field, value)
-                self.client.update_cell(record, field, to_write)
-                record.values[field] = value
-                if record.origin_values:
-                    record.origin_values[field] = to_write
-                return to_write
+                try:
+                    lt = active_lock_text()
+                    if lt:
+                        self.client.assert_calendar_lock(
+                            record, lt, previous=active_previous()
+                        )
+                    to_write = write_back_value(record, field, value)
+                    self.client.update_cell(record, field, to_write)
+                    record.values[field] = value
+                    if record.origin_values:
+                        record.origin_values[field] = to_write
+                    return to_write
+                except Exception as exc:
+                    return exc
 
             def done(_value):
+                if isinstance(_value, Exception):
+                    state["saving"] = False
+                    self._set_status(f"Ошибка: {_value}")
+                    messagebox.showerror("Ошибка", str(_value), parent=dialog)
+                    if (
+                        not state["closed"]
+                        and lock_deadline
+                        and time.time() < lock_deadline
+                    ):
+                        timer_job[0] = dialog.after(500, tick_lock_timer)
+                    return
                 state["saved"] = True
                 if calendar:
                     typed = value.strip()

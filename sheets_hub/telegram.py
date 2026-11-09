@@ -7,8 +7,10 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 import requests
 
@@ -100,6 +102,145 @@ def format_free_message(
     return "\n".join(lines)
 
 
+def _norm_text(text: str) -> str:
+    return " ".join((text or "").split()).casefold()
+
+
+def same_booking_text(previous: str, client_text: str) -> bool:
+    """Ячейка уже содержит этого клиента — повторно в Telegram не пишем."""
+    if not is_booking_value(previous) or not is_booking_value(client_text):
+        return False
+    return _norm_text(previous) == _norm_text(client_text)
+
+
+# Одна и та же запись с нескольких сохранений (таймер, закрытие окна, повтор кнопки).
+_DEDUPE_TTL_SEC = 10 * 60
+_dedupe_guard = threading.Lock()
+_dedupe_mem: dict[str, float] = {}
+
+
+def _cell_prefix(kind: str, record: Record) -> str:
+    try:
+        col = int(record.col_index.get("Клиент") or 0)
+    except Exception:
+        col = 0
+    return "|".join(
+        (
+            kind,
+            (record.spreadsheet_id or "").strip(),
+            (record.sheet or "").strip(),
+            str(int(record.row or 0)),
+            str(col),
+            "",
+        )
+    )
+
+
+def _dedupe_path() -> Path:
+    from sheets_hub.config import writable_data_dir
+
+    return writable_data_dir() / "telegram_sent.json"
+
+
+@contextmanager
+def _dedupe_file_lock() -> Iterator[None]:
+    path = _dedupe_path().with_suffix(".lock")
+    fd: int | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        yield
+        return
+    for _ in range(40):
+        try:
+            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            try:
+                if time.time() - path.stat().st_mtime > 15:
+                    path.unlink()
+                    continue
+            except Exception:
+                pass
+            time.sleep(0.025)
+        except Exception:
+            break
+    try:
+        yield
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _read_dedupe(now: float) -> dict[str, float]:
+    path = _dedupe_path()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        raw = {}
+    fresh: dict[str, float] = {}
+    if isinstance(raw, dict):
+        for key, stamp in raw.items():
+            try:
+                ts = float(stamp)
+            except (TypeError, ValueError):
+                continue
+            if now - ts < _DEDUPE_TTL_SEC:
+                fresh[str(key)] = ts
+    return fresh
+
+
+def _write_dedupe(data: dict[str, float]) -> None:
+    path = _dedupe_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def claim_notification(kind: str, record: Record, text: str) -> str | None:
+    """Ключ, если это уведомление ещё не уходило. None — уже отправляли."""
+    key = _cell_prefix(kind, record) + _norm_text(text)
+    now = time.time()
+    with _dedupe_file_lock():
+        with _dedupe_guard:
+            global_drop = [k for k, ts in _dedupe_mem.items() if now - ts >= _DEDUPE_TTL_SEC]
+            for old in global_drop:
+                _dedupe_mem.pop(old, None)
+            store = _read_dedupe(now)
+            if key in store or key in _dedupe_mem:
+                _dedupe_mem[key] = store.get(key, _dedupe_mem.get(key, now))
+                return None
+            if kind == "free":
+                book_prefix = _cell_prefix("book", record)
+                store = {k: v for k, v in store.items() if not k.startswith(book_prefix)}
+                for old in [k for k in _dedupe_mem if k.startswith(book_prefix)]:
+                    _dedupe_mem.pop(old, None)
+            store[key] = now
+            _dedupe_mem[key] = now
+            _write_dedupe(store)
+            return key
+
+
+def release_notification(key: str) -> None:
+    if not key:
+        return
+    with _dedupe_file_lock():
+        with _dedupe_guard:
+            _dedupe_mem.pop(key, None)
+            store = _read_dedupe(time.time())
+            store.pop(key, None)
+            _write_dedupe(store)
+
+
 def is_lock_text_safe(text: str) -> bool:
     try:
         from sheets_hub.calendar_sheet import is_lock_text
@@ -175,10 +316,37 @@ def _send_via_curl(url: str, payload: dict, *, timeout: float = 12.0) -> tuple[b
                 tmp_path.unlink(missing_ok=True)
             except Exception:
                 pass
+    if result.returncode in (28, 52, 56):
+        # Таймаут или обрыв ответа: Telegram уже мог принять сообщение.
+        raise _MaybeDelivered(f"curl exit {result.returncode}")
     if result.returncode != 0:
         err = (result.stderr or result.stdout or b"").decode("utf-8", errors="replace").strip()
         raise RuntimeError(err or f"curl exit {result.returncode}")
     return _parse_telegram_response(result.stdout)
+
+
+class _MaybeDelivered(Exception):
+    """Запрос, скорее всего, уже ушёл — повторять sendMessage нельзя."""
+
+
+def _delivery_ambiguous(exc: BaseException) -> bool:
+    if isinstance(exc, _MaybeDelivered):
+        return True
+    try:
+        if isinstance(exc, (requests.ConnectTimeout, requests.exceptions.SSLError)):
+            return False
+        if isinstance(exc, requests.Timeout):
+            return True
+        if isinstance(exc, requests.ConnectionError):
+            low = str(exc).lower()
+            return any(
+                part in low
+                for part in ("timed out", "reset", "aborted", "disconnected", "broken pipe")
+            )
+    except Exception:
+        pass
+    low = str(exc).lower()
+    return "timed out" in low or "timeout" in low or "curl exit 28" in low
 
 
 def send_message(settings: TelegramConfig, text: str, *, timeout: float = 12.0) -> tuple[bool, str]:
@@ -192,25 +360,31 @@ def send_message(settings: TelegramConfig, text: str, *, timeout: float = 12.0) 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
 
-    errors: list[str] = []
-    # На Windows Python SSL часто ломается — сначала curl -k, как для Google.
+    # Следующий канал — только если запрос точно не ушёл.
+    # Таймаут после отправки раньше давал второй и третий одинаковый алерт.
+    attempts: list[tuple[str, Callable[[], tuple[bool, str]]]] = []
     if sys.platform == "win32":
-        try:
-            return _send_via_curl(url, payload, timeout=timeout)
-        except Exception as exc:
-            errors.append(f"curl: {exc}")
-
-    for verify in (True, False):
-        try:
-            return _send_via_requests(url, payload, timeout=timeout, verify=verify)
-        except Exception as exc:
-            errors.append(str(exc))
-
+        attempts.append(("curl", lambda: _send_via_curl(url, payload, timeout=timeout)))
+    attempts.append(
+        ("requests", lambda: _send_via_requests(url, payload, timeout=timeout, verify=True))
+    )
+    attempts.append(
+        (
+            "requests-insecure",
+            lambda: _send_via_requests(url, payload, timeout=timeout, verify=False),
+        )
+    )
     if sys.platform != "win32":
+        attempts.append(("curl", lambda: _send_via_curl(url, payload, timeout=timeout)))
+
+    errors: list[str] = []
+    for label, attempt in attempts:
         try:
-            return _send_via_curl(url, payload, timeout=timeout)
+            return attempt()
         except Exception as exc:
-            errors.append(f"curl: {exc}")
+            if _delivery_ambiguous(exc):
+                return True, ""
+            errors.append(f"{label}: {exc}")
 
     return False, "; ".join(errors) if errors else "Не удалось отправить в Telegram"
 
@@ -238,7 +412,12 @@ def notify_booking_async(
         return
 
     message = format_booking_message(record, client_text)
-    _notify_async(settings, message, on_done=on_done)
+    key = claim_notification("book", record, client_text)
+    if key is None:
+        if on_done:
+            on_done(True, "")
+        return
+    _notify_async(settings, message, on_done=on_done, dedupe_key=key)
 
 
 def notify_free_async(
@@ -260,7 +439,12 @@ def notify_free_async(
         return
 
     message = format_free_message(record, previous_client)
-    _notify_async(settings, message, on_done=on_done)
+    key = claim_notification("free", record, previous_client or message)
+    if key is None:
+        if on_done:
+            on_done(True, "")
+        return
+    _notify_async(settings, message, on_done=on_done, dedupe_key=key)
 
 
 def _notify_async(
@@ -268,6 +452,7 @@ def _notify_async(
     message: str,
     *,
     on_done: Callable[[bool, str], None] | None = None,
+    dedupe_key: str = "",
 ) -> None:
     snap = TelegramConfig(
         enabled=True,
@@ -277,6 +462,8 @@ def _notify_async(
 
     def work() -> None:
         ok, err = send_message(snap, message)
+        if not ok and dedupe_key:
+            release_notification(dedupe_key)
         if on_done:
             try:
                 on_done(ok, err)

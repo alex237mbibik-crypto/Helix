@@ -518,6 +518,8 @@
     tutorialStep: 0,
     lockWatch: null,
     stateWatch: null,
+    saveInFlight: false,
+    bookingSent: false,
   };
 
   const TUTORIAL_STEPS = [
@@ -1000,6 +1002,7 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "same-origin",
+        keepalive: name === "book_slot" || name === "cancel_slot",
         body: JSON.stringify(payload === undefined ? {} : payload),
       });
       const result = await res.json().catch(() => null);
@@ -1181,6 +1184,8 @@
     state.lockPrev = res.lock_prev || "";
     state.expireSave = false;
     state.leaveFlushed = false;
+    state.saveInFlight = false;
+    state.bookingSent = false;
     document.getElementById("bookWhen").textContent =
       (cell.date || "") + " · " + (cell.time || "");
     document.getElementById("bookClient").value =
@@ -1268,8 +1273,22 @@
     };
   }
 
+  function beginSave() {
+    if (state.saveInFlight || state.bookingSent) return false;
+    state.saveInFlight = true;
+    clearLockTimer();
+    return true;
+  }
+
+  function finishSave(ok) {
+    state.saveInFlight = false;
+    if (ok) state.bookingSent = true;
+  }
+
   function saveLockKeepalive(slot, lockText, lockPrev, clientText) {
     if (!slot || !lockText || !clientText) return;
+    if (state.saveInFlight || state.bookingSent) return;
+    state.bookingSent = true;
     const payload = saveSlotPayload(slot, lockText, lockPrev, clientText);
     const a = api();
     if (a && a.book_slot) {
@@ -1279,12 +1298,14 @@
       return;
     }
     const body = JSON.stringify(payload);
+    let sent = false;
     try {
-      navigator.sendBeacon(
+      sent = navigator.sendBeacon(
         "/api/book_slot",
         new Blob([body], { type: "application/json" })
       );
     } catch (_) {}
+    if (sent) return;
     try {
       fetch("/api/book_slot", {
         method: "POST",
@@ -1306,11 +1327,17 @@
       await closeBook();
       return;
     }
+    if (!beginSave()) {
+      state.expireSave = false;
+      return;
+    }
     const res = await call("book_slot", saveSlotPayload(slot, lockText, lockPrev, text));
+    const saved = !!(res && res.ok !== false);
+    finishSave(saved);
     state.expireSave = false;
-    if (res && res.ok === false) {
+    if (!saved) {
       alert(
-        (res.error || "Не удалось записать данные") +
+        ((res && res.error) || "Не удалось записать данные") +
           "\nТекст ещё в окне — нажмите «Сохранить»."
       );
       if (state.lockText) startLockTimer(30);
@@ -1498,9 +1525,11 @@
     if (e.target.id === "bookModal") closeBook();
   });
   document.getElementById("bookSave").addEventListener("click", async () => {
-    if (!state.slot) return;
+    if (!state.slot || !beginSave()) return;
     const preg = document.querySelector('input[name="preg"]:checked');
     const slot = state.slot;
+    const btn = document.getElementById("bookSave");
+    if (btn) btn.disabled = true;
     const res = await call("book_slot", {
       spreadsheet_id: slot.spreadsheet_id,
       sheet: slot.sheet,
@@ -1515,8 +1544,12 @@
       lock_prev: state.lockPrev,
       operator: operatorName(),
     });
-    if (res && res.ok === false) {
-      alert(res.error || "Ошибка");
+    const saved = !!(res && res.ok !== false);
+    finishSave(saved);
+    if (!saved) {
+      if (btn) btn.disabled = false;
+      alert((res && res.error) || "Ошибка");
+      if (state.lockText && state.slot) startLockTimer(30);
       return;
     }
     // Уже сохранено — не снимаем lock через cancel.
@@ -1527,7 +1560,9 @@
     document.getElementById("bookModal").classList.remove("open");
   });
   document.getElementById("bookFree").addEventListener("click", async () => {
-    if (!state.slot) return;
+    if (!state.slot || state.saveInFlight) return;
+    state.saveInFlight = true;
+    clearLockTimer();
     const slot = state.slot;
     const res = await call("book_slot", {
       spreadsheet_id: slot.spreadsheet_id,
@@ -1540,10 +1575,13 @@
       lock_text: state.lockText,
       lock_prev: state.lockPrev,
     });
+    state.saveInFlight = false;
     if (res && res.ok === false) {
       alert(res.error || "Ошибка");
+      if (state.lockText && state.slot) startLockTimer(30);
       return;
     }
+    state.bookingSent = true;
     clearLockTimer();
     state.lockText = "";
     state.lockPrev = "";
@@ -1671,6 +1709,7 @@
   function flushOrReleaseOnLeave() {
     if (!(state.lockText && state.slot) || state.leaveFlushed) return;
     state.leaveFlushed = true;
+    if (state.saveInFlight || state.bookingSent) return;
     const text = pendingClientText();
     if (text) saveLockKeepalive(state.slot, state.lockText, state.lockPrev, text);
     else releaseLockKeepalive(state.slot, state.lockText, state.lockPrev);

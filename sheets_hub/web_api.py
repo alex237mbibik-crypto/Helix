@@ -1413,7 +1413,7 @@ class HelixApi:
                     notify_free_async(self.config.telegram, record, previous)
                 self.status = "Слот освобождён"
             else:
-                from sheets_hub.telegram import notify_booking_async
+                from sheets_hub.telegram import notify_booking_async, same_booking_text
 
                 if lock_text:
                     try:
@@ -1446,7 +1446,8 @@ class HelixApi:
                         except Exception:
                             pass
                         raise
-                notify_booking_async(self.config.telegram, record, client_text)
+                if not same_booking_text(previous, client_text):
+                    notify_booking_async(self.config.telegram, record, client_text)
                 self.status = "Запись сохранена"
         except Exception as exc:
             return {"ok": False, "error": str(exc)}

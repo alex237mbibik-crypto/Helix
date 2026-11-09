@@ -15,6 +15,8 @@ last_email.txt
 config.yaml
 .env
 ui_cache.json
+telegram_sent.json
+telegram_sent.lock
 webview_data/
 SheetsHub_data/
 # локальная копия для ручной сборки; в CI берётся из GitHub Secret
