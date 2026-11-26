@@ -17,6 +17,8 @@ config.yaml
 ui_cache.json
 telegram_sent.json
 telegram_sent.lock
+calendar_cache.json
+sheet_list_cache.json
 webview_data/
 SheetsHub_data/
 # локальная копия для ручной сборки; в CI берётся из GitHub Secret

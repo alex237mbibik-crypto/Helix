@@ -140,6 +140,23 @@ def _load_ui_cache() -> dict[str, Any]:
     return merged
 
 
+def _paint_cache_path() -> Path:
+    return writable_data_dir() / "calendar_cache.json"
+
+
+def _load_paint_cache() -> dict[str, Any]:
+    try:
+        data = json.loads(_paint_cache_path().read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    calendar = data.get("calendar")
+    if not isinstance(calendar, dict) or not calendar.get("cells"):
+        return {}
+    return data
+
+
 def _save_ui_cache(data: dict[str, Any]) -> None:
     payload = dict(data or {})
     text = json.dumps(payload, ensure_ascii=False, indent=0)
@@ -200,6 +217,8 @@ class HelixApi:
         self._active_lock: dict[str, Any] | None = None
         self._last_lock_sweep = 0.0
         self._tutorial_hide = False
+        self._paint = _load_paint_cache()
+        self._remember_paint = False
         self.updater = None
         try:
             from sheets_hub.updater import UpdateController
@@ -725,7 +744,7 @@ class HelixApi:
                 for date in dates
                 if day_colors.get(date, ("", ""))[0]
             ]
-            return {
+            data = {
                 "ok": True,
                 "status": self.status,
                 "email": email,
@@ -760,6 +779,47 @@ class HelixApi:
                 },
                 "update": self.updater.snapshot() if self.updater else {"status": "idle", "frozen": False},
             }
+        if not cal and self.client and self._paint_matches():
+            data["calendar"] = self._paint.get("calendar") or data["calendar"]
+            cached_info = self._paint.get("info")
+            if isinstance(cached_info, list) and cached_info:
+                data["info"] = cached_info
+            data["status"] = "Сохранённый календарь на экране, обновляю из Google…"
+        return data
+
+    def _paint_matches(self) -> bool:
+        saved = self._paint.get("filters") if isinstance(self._paint, dict) else None
+        if not isinstance(saved, dict):
+            return False
+        for key in ("name", "service", "city", "address"):
+            if (self.filters.get(key) or "") != str(saved.get(key) or ""):
+                return False
+        sheet = (self.filters.get("sheet") or "").strip()
+        saved_sheet = str(saved.get("sheet") or "").strip()
+        if sheet and saved_sheet and sheet != saved_sheet:
+            return False
+        cells = (self._paint.get("calendar") or {}).get("cells") if isinstance(self._paint, dict) else None
+        return isinstance(cells, dict) and bool(cells)
+
+    def _store_paint_cache(self, snap: dict[str, Any]) -> None:
+        calendar = snap.get("calendar") if isinstance(snap, dict) else None
+        if not isinstance(calendar, dict) or not calendar.get("cells"):
+            return
+        payload = {
+            "filters": {
+                key: self.filters.get(key, "")
+                for key in ("name", "service", "city", "address", "sheet")
+            },
+            "calendar": calendar,
+            "info": snap.get("info") if isinstance(snap.get("info"), list) else [],
+        }
+        self._paint = payload
+        try:
+            path = _paint_cache_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
 
     # --- public API for JS ---
 
@@ -767,10 +827,16 @@ class HelixApi:
         now = time.time()
         if self.client and now - self._last_lock_sweep >= 20:
             self._last_lock_sweep = now
-            try:
-                self.client.release_expired_calendar_locks(self.records)
-            except Exception:
-                pass
+            client = self.client
+            records = list(self.records)
+
+            def _sweep() -> None:
+                try:
+                    client.release_expired_calendar_locks(records)
+                except Exception:
+                    pass
+
+            threading.Thread(target=_sweep, daemon=True).start()
         return self.snapshot()
 
     def check_update(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -860,12 +926,14 @@ class HelixApi:
             from sheets_hub.client import SheetsClient
 
             self.client = SheetsClient(path)
+            changed = self.config.credentials != path
             self.config.credentials = path
             self._apply_cached_preferred()
-            try:
-                self._persist()
-            except Exception:
-                pass
+            if changed:
+                try:
+                    self._persist()
+                except Exception:
+                    pass
             self.status = f"Подключено: {self.client.service_email}"
             # По умолчанию при подключении тянем список таблиц из облака.
             if data.get("reload", True) or do_reload:
@@ -954,6 +1022,7 @@ class HelixApi:
 
     def reload(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         data = payload if isinstance(payload, dict) else {}
+        self._remember_paint = False
         fast = bool(data.get("fast", True))
         sync_registry = bool(data.get("sync_registry", False))
         # cache — мгновенно из памяти; fetch — узкий запрос к Google после CSV;
@@ -985,8 +1054,13 @@ class HelixApi:
                     previous_sid = previous[0].normalized_id()
             except Exception:
                 previous_sid = ""
-            # Сначала облачный реестр — иначе при пустом локальном кэше sync не успевал.
-            if sync_registry and self._registry_ready():
+            # Общий список не блокирует календарь, если таблицы уже есть локально.
+            have_local = False
+            try:
+                have_local = bool(self._selected_sources())
+            except Exception:
+                have_local = False
+            if (sync_registry or not have_local) and self._registry_ready():
                 try:
                     self.status = "Загружаю список таблиц из облака…"
                     remote = self.client.pull_table_registry(
@@ -1125,6 +1199,7 @@ class HelixApi:
             if errors:
                 self.status = "; ".join(errors[:2])
             else:
+                self._remember_paint = bool(self._calendar_records())
                 cal_n = len(self._calendar_records())
                 booked = sum(
                     1 for r in self._calendar_records() if r.values.get("Статус") == "Занято"
@@ -1139,7 +1214,11 @@ class HelixApi:
             self.status = str(exc).split("\n")[0]
         finally:
             self._lock.release()
-        return self.snapshot()
+        snap = self.snapshot()
+        if self._remember_paint:
+            self._remember_paint = False
+            self._store_paint_cache(snap)
+        return snap
 
     def fetch_colors(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Догрузить заливки Google по узкому диапазону — после быстрого CSV."""

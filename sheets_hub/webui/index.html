@@ -73,6 +73,19 @@
     .divider-light {
       height: 1px; background: linear-gradient(to right, #dbe3ed, transparent); margin: 1.2rem 0;
     }
+    .load-bar {
+      display: flex;
+      align-items: center;
+      gap: 0.55rem;
+      margin: -0.35rem 0 0.85rem;
+      padding: 0.45rem 1rem;
+      border-radius: 999px;
+      background: #eef8f3;
+      color: #1d6b4a;
+      font-size: 0.9rem;
+      font-weight: 600;
+    }
+    .load-bar[hidden] { display: none !important; }
     .table-wrap {
       overflow: auto;
       margin: 0.6rem 0;
@@ -364,6 +377,10 @@
       <h2>Календарь записи</h2>
       <span class="badge-soft" id="calBadge">—</span>
     </div>
+    <div id="loadBar" class="load-bar">
+      <i class="fas fa-sync-alt fa-spin"></i>
+      <span id="loadBarText">Загружаю таблицы…</span>
+    </div>
     <div class="table-wrap">
       <table class="calendar-table" id="calTable">
         <thead><tr><th class="time-col">Время</th></tr></thead>
@@ -511,6 +528,8 @@
     settingsOpen: false,
     infoOpen: false,
     busy: false,
+    loadCount: 0,
+    loadText: "Загружаю таблицы…",
     pendingRefresh: null,
     lastCalSig: "",
     lastInfoSig: "",
@@ -941,8 +960,7 @@
     if (document.activeElement !== document.getElementById("fSearch")) {
       document.getElementById("fSearch").value = f.search || "";
     }
-    document.getElementById("statusLine").innerHTML =
-      '<i class="fas fa-stethoscope" style="color:#2a7d5a;"></i> ' + (data.status || "");
+    renderLoading(data.status || "");
     const email = data.email || "нет ключа";
     document.getElementById("emailTop").innerHTML = '<i class="fas fa-cloud"></i> ' + email;
     renderUpdate(data.update);
@@ -976,6 +994,35 @@
       document.getElementById("tgOn").checked = !!tg.enabled;
       renderTables(data.tables || []);
       document.getElementById("cfgPath").textContent = data.config_path || "";
+    }
+  }
+
+  function setLoading(active, text) {
+    if (active) {
+      state.loadCount += 1;
+      if (text) state.loadText = text;
+    } else {
+      state.loadCount = Math.max(0, state.loadCount - 1);
+    }
+    renderLoading();
+  }
+
+  function renderLoading(fallback) {
+    const bar = document.getElementById("loadBar");
+    const label = document.getElementById("loadBarText");
+    const status = document.getElementById("statusLine");
+    const on = state.loadCount > 0;
+    const live = (state.data && state.data.status) || fallback || "";
+    const text = on ? state.loadText || "Загружаю таблицы…" : live;
+    if (bar) bar.hidden = !on;
+    if (label) label.textContent = state.loadText || "Загружаю таблицы…";
+    if (!status) return;
+    if (on) {
+      status.innerHTML =
+        '<i class="fas fa-sync-alt fa-spin" style="color:#2a7d5a;"></i> ' + text;
+    } else {
+      status.innerHTML =
+        '<i class="fas fa-stethoscope" style="color:#2a7d5a;"></i> ' + text;
     }
   }
 
@@ -1058,15 +1105,11 @@
     state.busy = true;
     state.pendingRefresh = null;
     const btn = document.getElementById("btnRefresh");
-    const status = document.getElementById("statusLine");
     const chip = document.getElementById("cloudStatus");
+    setLoading(true, full ? "Обновляю таблицу…" : "Загружаю таблицу…");
     if (btn) {
       btn.disabled = true;
       btn.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> Обновляю…';
-    }
-    if (status) {
-      status.innerHTML =
-        '<i class="fas fa-sync-alt fa-spin" style="color:#2a7d5a;"></i> Обновляю календарь…';
     }
     if (chip && state.settingsOpen) {
       chip.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> обновляю…';
@@ -1084,6 +1127,7 @@
       call("fetch_colors", { force: !!full }).catch(() => {});
     } finally {
       state.busy = false;
+      setLoading(false);
       if (btn) {
         btn.disabled = false;
         btn.innerHTML = '<i class="fas fa-sync-alt"></i> Обновить';
@@ -1639,25 +1683,37 @@
   });
 
   async function bootApp() {
-    const status = document.getElementById("statusLine");
-    if (status) {
-      status.innerHTML =
-        '<i class="fas fa-cloud-download-alt" style="color:#2a7d5a;"></i> Загружаю таблицы из облака…';
-    }
-    // 1) Быстрый кадр: фильтры из локального реестра, без ожидания Google.
-    const quick = await call("connect", { reload: false });
-    if (quick && (quick.options || quick.status !== undefined)) {
-      applyState(quick);
-    }
-    maybeShowTutorial(quick || state.data);
-    // 2) Реестр из облака + календарь.
-    const snap = await call("reload", {
-      fast: true,
-      sync_registry: true,
-      colors: "cache",
-    });
-    if (!(snap && (snap.calendar || snap.status !== undefined))) {
-      await refresh(false);
+    setLoading(true, "Загружаю таблицы…");
+    let backgroundStarted = false;
+    try {
+      // 1) Быстрый кадр: фильтры из локального реестра, без ожидания Google.
+      const quick = await call("connect", { reload: false });
+      if (quick && (quick.options || quick.status !== undefined)) {
+        applyState(quick);
+      }
+      maybeShowTutorial(quick || state.data);
+      // 2) Календарь. Общий список таблиц — следом, индикатор держится до конца.
+      const snap = await call("reload", {
+        fast: true,
+        sync_registry: false,
+        colors: "cache",
+      });
+      if (!(snap && (snap.calendar || snap.status !== undefined))) {
+        await refresh(false);
+      }
+      backgroundStarted = true;
+      setLoading(true, "Обновляю список таблиц…");
+      call("reload", {
+        fast: true,
+        sync_registry: true,
+        colors: "cache",
+        background: true,
+      })
+        .catch(() => {})
+        .finally(() => setLoading(false));
+    } finally {
+      setLoading(false);
+      if (!backgroundStarted) setLoading(false);
     }
     // Автообновление реже + разброс по времени: иначе много ПК одновременно
     // бьют в Google и всё зависает. Цвета — только по кнопке «Обновить».

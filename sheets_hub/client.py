@@ -52,6 +52,7 @@ from sheets_hub.config import (
     normalize_sheet_title,
     parse_spreadsheet_id,
     prefer_sheet_title,
+    writable_data_dir,
     requested_sheet_titles,
     resolve_sheet_title,
     sheet_year_month,
@@ -797,12 +798,11 @@ def _access_token_via_curl(credentials_path: Path) -> str:
 
 def _sheet_titles_via_curl(credentials_path: Path, spreadsheet_id: str) -> list[str]:
     """Имена вкладок через Sheets API и curl. Не зависает, в отличие от gspread на Windows."""
-    token = _access_token_via_curl(credentials_path)
     url = (
         "https://sheets.googleapis.com/v4/spreadsheets/"
         f"{spreadsheet_id}?fields=sheets.properties(title,sheetId)"
     )
-    data = _curl_json("GET", url, headers={"Authorization": f"Bearer {token}"})
+    data = _google_get(credentials_path, url)
     titles: list[str] = []
     gid_map: dict[str, str] = {}
     for sheet in data.get("sheets") or []:
@@ -823,12 +823,68 @@ def _sheet_titles_via_curl(credentials_path: Path, spreadsheet_id: str) -> list[
     return titles
 
 
+_SHEET_LIST_TTL_SEC = 30 * 60
+_SHEET_LIST_DISK_LOADED = False
+
+
+def _sheet_list_disk_path() -> Path:
+    return writable_data_dir() / "sheet_list_cache.json"
+
+
+def _load_sheet_list_disk() -> None:
+    global _SHEET_LIST_DISK_LOADED
+    if _SHEET_LIST_DISK_LOADED:
+        return
+    _SHEET_LIST_DISK_LOADED = True
+    try:
+        raw = json.loads(_sheet_list_disk_path().read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if not isinstance(raw, dict):
+        return
+    now = time.time()
+    for sid, item in raw.items():
+        if not isinstance(item, dict):
+            continue
+        try:
+            stamp = float(item.get("ts") or 0)
+        except (TypeError, ValueError):
+            continue
+        titles = [str(title).strip() for title in (item.get("titles") or []) if str(title).strip()]
+        if not sid or not titles or now - stamp > _SHEET_LIST_TTL_SEC:
+            continue
+        if sid not in _SHEET_LIST_CACHE:
+            _SHEET_LIST_CACHE[sid] = (stamp, [(title, "") for title in titles])
+
+
+def _titles_from_cache(spreadsheet_id: str) -> list[str]:
+    _load_sheet_list_disk()
+    cached = _SHEET_LIST_CACHE.get(spreadsheet_id)
+    if not cached or time.time() - cached[0] > _SHEET_LIST_TTL_SEC:
+        return []
+    return [title for title, _gid in cached[1] if title]
+
+
 def _store_sheet_list_cache(spreadsheet_id: str, titles: list[str]) -> None:
     gids = _SHEET_GID_CACHE.get(spreadsheet_id) or {}
+    clean = [title for title in titles if title]
     _SHEET_LIST_CACHE[spreadsheet_id] = (
         time.time(),
-        [(title, gids.get(title, "")) for title in titles if title],
+        [(title, gids.get(title, "")) for title in clean],
     )
+    try:
+        path = _sheet_list_disk_path()
+        try:
+            blob = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            blob = {}
+        if not isinstance(blob, dict):
+            blob = {}
+        blob[spreadsheet_id] = {"ts": time.time(), "titles": clean}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(blob, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def _values_via_curl(
@@ -838,14 +894,13 @@ def _values_via_curl(
     *,
     max_rows: int,
 ) -> list[list[str]]:
-    token = _access_token_via_curl(credentials_path)
     safe = (sheet or "Sheet1").replace("'", "''")
     rng = quote(f"'{safe}'!A1:AZ{max(1, int(max_rows))}", safe="")
     url = (
         "https://sheets.googleapis.com/v4/spreadsheets/"
         f"{spreadsheet_id}/values/{rng}?valueRenderOption=FORMATTED_VALUE"
     )
-    data = _curl_json("GET", url, headers={"Authorization": f"Bearer {token}"})
+    data = _google_get(credentials_path, url)
     rows = data.get("values") or []
     return [
         [(cell or "").strip() if isinstance(cell, str) else str(cell or "") for cell in row]
@@ -963,6 +1018,47 @@ def _powershell_trust_preamble(class_name: str) -> str:
     )
 
 
+_TOKEN_CACHE: dict[str, tuple[float, str]] = {}
+_TOKEN_CACHE_LOCK = threading.Lock()
+_TOKEN_TTL_SEC = 45 * 60
+
+
+def _token_cache_key(credentials_path: Path) -> str:
+    try:
+        return str(Path(credentials_path).resolve())
+    except Exception:
+        return str(credentials_path)
+
+
+def _drop_cached_token(credentials_path: Path) -> None:
+    with _TOKEN_CACHE_LOCK:
+        _TOKEN_CACHE.pop(_token_cache_key(credentials_path), None)
+
+
+def _is_auth_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(
+        part in text
+        for part in ("401", "unauthorized", "invalid authentication", "invalid_grant")
+    )
+
+
+def _google_get(credentials_path: Path, url: str) -> dict:
+    """Один GET с уже выданным токеном. Повтор — только если Google отверг токен."""
+    last: Exception | None = None
+    for attempt in (0, 1):
+        token = _access_token(credentials_path)
+        try:
+            return _curl_json("GET", url, headers={"Authorization": f"Bearer {token}"})
+        except Exception as exc:
+            last = exc
+            if attempt == 0 and _is_auth_error(exc):
+                _drop_cached_token(credentials_path)
+                continue
+            raise
+    raise last or SheetsError("пустой ответ Google")
+
+
 def _access_token(credentials_path: Path) -> str:
     """Bearer-токен: OAuth пользователя или JWT service account."""
     kind = credential_kind(credentials_path)
@@ -974,19 +1070,32 @@ def _access_token(credentials_path: Path) -> str:
         except AuthError as exc:
             raise SheetsError(str(exc)) from exc
 
+    key = _token_cache_key(credentials_path)
+    now = time.time()
+    with _TOKEN_CACHE_LOCK:
+        hit = _TOKEN_CACHE.get(key)
+        if hit and hit[1] and now < hit[0]:
+            return hit[1]
+
     errors: list[str] = []
+    token = ""
     for label, action in (
         ("curl", lambda: _access_token_via_curl(credentials_path)),
         ("powershell", lambda: _access_token_via_powershell(credentials_path)),
         ("requests", lambda: _access_token_via_requests_insecure(credentials_path)),
     ):
         try:
-            return action()
+            token = action()
+            break
         except Exception as exc:
             if label == "powershell" and sys.platform != "win32":
                 continue
             errors.append(f"{label}: {exc}")
-    raise SheetsError("Не получили access_token.\n" + "\n".join(errors[:4]))
+    if not token:
+        raise SheetsError("Не получили access_token.\n" + "\n".join(errors[:4]))
+    with _TOKEN_CACHE_LOCK:
+        _TOKEN_CACHE[key] = (time.time() + _TOKEN_TTL_SEC, token)
+    return token
 
 
 def _access_token_via_powershell(credentials_path: Path) -> str:
@@ -2280,48 +2389,112 @@ class SheetsClient:
         )
 
     def _load_via_sheets_api(self, source: SheetRef) -> list[Record]:
-        """Закрытая таблица: один лист месяца через curl, без зависшего gspread."""
+        """Закрытая таблица: лист месяца и справки параллельно, без зависшего gspread."""
+        from concurrent.futures import ThreadPoolExecutor
+
         sid = source.normalized_id()
-        titles = _sheet_titles_via_curl(self._credentials_path, sid)
-        if not titles:
-            raise SheetsError(f"В «{source.name}» нет листов")
-        _store_sheet_list_cache(sid, titles)
-        calendar_titles = [title for title in titles if not is_info_title(title)]
         preferred = _get_preferred_sheet(sid, source.service)
-        resolved = resolve_sheet_title(preferred, calendar_titles or titles)
-        if preferred and not resolved:
-            # Вкладка есть в Google, но её не было в старом списке
-            # (скрытый следующий месяц). Не подменять её текущим месяцем.
-            if is_past_month_title(preferred):
-                _set_preferred_sheet(sid, "", source.service)
-                preferred = ""
-            else:
-                resolved = preferred
-        chosen = resolved or _pick_month_sheet(calendar_titles or titles, source)
-        if not chosen:
-            raise SheetsError(f"В «{source.name}» нет листа календаря")
-        limit = _row_limit_for_source(source, sheet_title=chosen)
-        rows = _values_via_curl(self._credentials_path, sid, chosen, max_rows=limit)
-        loaded = self._records_from_rows(replace(source, sheet=chosen), rows)
-        for info_title in companion_info_titles(titles, chosen)[:2]:
-            try:
-                info_rows = _values_via_curl(
-                    self._credentials_path,
-                    sid,
-                    info_title,
-                    max_rows=MAX_INFO_SHEET_ROWS,
+        cache_key = f"{sid}|api|{preferred}|{(source.service or '').strip().lower()}"
+        if preferred:
+            now = time.time()
+            with _PUBLIC_LOAD_LOCK:
+                hit = _PUBLIC_LOAD_CACHE.get(cache_key)
+                if hit and (now - hit[0]) < _PUBLIC_LOAD_TTL_SEC:
+                    return copy.deepcopy(hit[1])
+
+        titles = _titles_from_cache(sid)
+
+        def ensure_titles() -> list[str]:
+            fresh = _sheet_titles_via_curl(self._credentials_path, sid)
+            if not fresh:
+                raise SheetsError(f"В «{source.name}» нет листов")
+            _store_sheet_list_cache(sid, fresh)
+            return fresh
+
+        def choose(available: list[str], hint: str) -> str:
+            calendar_titles = [title for title in available if not is_info_title(title)]
+            resolved = resolve_sheet_title(hint, calendar_titles or available)
+            if hint and not resolved:
+                # Вкладка есть в Google, но её не было в старом списке
+                # (скрытый следующий месяц). Не подменять её текущим месяцем.
+                if is_past_month_title(hint):
+                    _set_preferred_sheet(sid, "", source.service)
+                else:
+                    resolved = hint
+            return resolved or _pick_month_sheet(calendar_titles or available, source)
+
+        def load_rows(sheet_name: str, limit: int) -> list[list[str]]:
+            return _values_via_curl(
+                self._credentials_path, sid, sheet_name, max_rows=limit
+            )
+
+        def sheet_missing(exc: BaseException) -> bool:
+            text = str(exc).lower()
+            return "unable to parse range" in text or "400" in text
+
+        chosen = preferred if preferred and not is_past_month_title(preferred) else ""
+        rows: list[list[str]] | None = None
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            title_fut = None if titles else pool.submit(ensure_titles)
+            rows_fut = (
+                pool.submit(
+                    load_rows,
+                    chosen,
+                    _row_limit_for_source(source, sheet_title=chosen),
                 )
+                if chosen
+                else None
+            )
+            if title_fut is not None:
+                titles = title_fut.result()
+            info_futs: list[tuple[str, object]] = []
+            if chosen and titles:
+                info_futs = [
+                    (info_title, pool.submit(load_rows, info_title, MAX_INFO_SHEET_ROWS))
+                    for info_title in companion_info_titles(titles, chosen)[:2]
+                ]
+            if rows_fut is not None:
+                try:
+                    rows = rows_fut.result()
+                except Exception as exc:
+                    if not sheet_missing(exc):
+                        raise
+                    rows = None
+                    chosen = ""
+                    info_futs = []
+            if not chosen or rows is None:
+                if not titles:
+                    titles = ensure_titles()
+                chosen = choose(titles, preferred)
+                if not chosen:
+                    raise SheetsError(f"В «{source.name}» нет листа календаря")
+                rows = load_rows(chosen, _row_limit_for_source(source, sheet_title=chosen))
+                if not info_futs:
+                    info_futs = [
+                        (info_title, pool.submit(load_rows, info_title, MAX_INFO_SHEET_ROWS))
+                        for info_title in companion_info_titles(titles, chosen)[:2]
+                    ]
+            loaded = self._records_from_rows(replace(source, sheet=chosen), rows or [])
+            for info_title, fut in info_futs:
+                try:
+                    info_rows = fut.result()
+                except Exception:
+                    continue
                 loaded.extend(
                     self._records_from_rows(
                         replace(source, sheet=info_title, kind=KIND_INFO),
                         info_rows,
                     )
                 )
-            except Exception:
-                pass
         if not any(item.layout == "calendar" for item in loaded):
             raise SheetsError(f"На листе «{chosen}» нет сетки записи")
         _set_preferred_sheet(sid, chosen, source.service)
+        stored = f"{sid}|api|{chosen}|{(source.service or '').strip().lower()}"
+        with _PUBLIC_LOAD_LOCK:
+            stamped = (time.time(), copy.deepcopy(loaded))
+            _PUBLIC_LOAD_CACHE[stored] = stamped
+            if cache_key != stored:
+                _PUBLIC_LOAD_CACHE[cache_key] = stamped
         return loaded
 
     def cached_calendar_sheet_titles(self, spreadsheet_id: str) -> list[str]:
@@ -2330,11 +2503,12 @@ class SheetsClient:
             sid = parse_spreadsheet_id(spreadsheet_id)
         except ValueError:
             return []
-        cached = _SHEET_LIST_CACHE.get(sid)
-        if not cached:
-            return []
+        titles = _titles_from_cache(sid)
+        if not titles:
+            cached = _SHEET_LIST_CACHE.get(sid)
+            titles = [title for title, _gid in cached[1]] if cached else []
         return upcoming_sheet_titles(
-            [title for title, _gid in cached[1] if title and not is_info_title(title)]
+            [title for title in titles if title and not is_info_title(title)]
         )
 
     def preferred_calendar_sheet(self, spreadsheet_id: str, *, service: str = "") -> str:
